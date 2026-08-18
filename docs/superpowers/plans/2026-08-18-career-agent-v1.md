@@ -122,14 +122,16 @@ async def main() -> int:
         print("FAIL: CLAUDE_CODE_OAUTH_TOKEN not set. Run: claude setup-token")
         return 2
 
-    from claude_agent_sdk import query
+    from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions,
+                                  TextBlock, query)
 
     chunks = []
     async for message in query(prompt="Reply with exactly: OK",
-                               options={"allowed_tools": []}):
-        text = getattr(message, "text", None)
-        if text:
-            chunks.append(text)
+                               options=ClaudeAgentOptions(tools=None)):
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    chunks.append(block.text)
 
     reply = "".join(chunks).strip()
     if "OK" in reply:
@@ -1220,14 +1222,15 @@ class FakeClient:
 def test_linkedin_pins_actor_and_passes_location():
     client = FakeClient([{"id": "99", "title": "AI Engineer",
                           "companyName": "Acme", "location": "Chennai",
-                          "postedAt": "2026-08-01",
-                          "descriptionText": "LLM work", "link": "https://x/1"}])
+                          "postedDate": "2026-08-01",
+                          "description": "LLM work", "url": "https://x/1"}])
     jobs = fetch_linkedin("AI Engineer", "Chennai", False, 50, client)
 
     actor_id, run_input = client.calls[0]
     assert actor_id == LINKEDIN_ACTOR
     assert run_input["location"] == "Chennai"
-    assert run_input["keyword"] == "AI Engineer"
+    assert run_input["title"] == "AI Engineer"
+    assert run_input["limit"] == 50
     assert jobs[0].source == "linkedin"
     assert jobs[0].external_id == "99"
 
@@ -1286,14 +1289,18 @@ from career_agent.models import Job
 log = logging.getLogger(__name__)
 
 # Pinned. Changing an Actor is a code change, not a runtime decision.
-LINKEDIN_ACTOR = "practicaltools/linkedin-jobs"
+LINKEDIN_ACTOR = "valig/linkedin-jobs-scraper"
 NAUKRI_ACTOR = "automation-lab/naukri-scraper"
 
 
 def _run(client: Any, actor_id: str, run_input: dict) -> list[dict]:
     try:
         run = client.actor(actor_id).call(run_input=run_input)
-        return list(client.dataset(run["defaultDatasetId"]).iterate_items())
+        # apify-client >= 3 returns a typed Run object, not a dict. Subscripting
+        # it raises TypeError, which the except below would report as an Actor
+        # failure even though the Actor succeeded.
+        dataset_id = run.default_dataset_id
+        return list(client.dataset(dataset_id).iterate_items())
     except Exception as exc:  # an Actor outage must not kill the run
         log.warning("apify actor %s failed: %s", actor_id, exc)
         return []
@@ -1301,27 +1308,28 @@ def _run(client: Any, actor_id: str, run_input: dict) -> list[dict]:
 
 def fetch_linkedin(keyword: str, location: str, remote: bool,
                    max_jobs: int, client: Any) -> list[Job]:
+    # Key names verified against the Actor's published input schema, not assumed.
     run_input = {
-        "keyword": keyword,
+        "title": keyword,
         "location": location,
-        "maxJobs": max_jobs,
-        "fetchDescriptions": True,
+        "limit": max_jobs,
     }
     if remote:
-        run_input["workplaceType"] = "remote"
+        # LinkedIn's f_WT workplace code: 1 on-site, 2 remote, 3 hybrid.
+        run_input["remote"] = ["2"]
 
     items = _run(client, LINKEDIN_ACTOR, run_input)
     return [
         Job(source="linkedin",
-            external_id=str(i.get("id") or i.get("jobId")),
+            external_id=str(i["id"]),
             company=i.get("companyName") or "unknown",
             title=i.get("title") or "unknown",
             location=i.get("location"),
             is_remote=remote,
-            posted_at=i.get("postedAt"),
-            url=i.get("link") or i.get("jobUrl"),
-            description=i.get("descriptionText"))
-        for i in items if i.get("id") or i.get("jobId")
+            posted_at=i.get("postedDate"),
+            url=i.get("url"),
+            description=i.get("description"))
+        for i in items if i.get("id")
     ]
 
 
@@ -1836,13 +1844,16 @@ def verify_auth() -> None:
 
 async def _ask(prompt: str) -> str:
     """One tool-less call for gate scoring."""
-    from claude_agent_sdk import query
+    from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions,
+                                  TextBlock, query)
 
     chunks = []
-    async for message in query(prompt=prompt, options={"allowed_tools": []}):
-        text = getattr(message, "text", None)
-        if text:
-            chunks.append(text)
+    async for message in query(prompt=prompt,
+                               options=ClaudeAgentOptions(tools=None)):
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    chunks.append(block.text)
     return "".join(chunks)
 
 
@@ -1914,6 +1925,14 @@ def main() -> None:
         uvicorn.run("career_agent.web.app:app", port=8000, reload=False)
     else:
         asyncio.run(run_once(args))
+
+
+# Required. Without it, `python -m career_agent.run` imports this module,
+# defines everything, and exits 0 having done nothing. The console script
+# would still work, so the failure is invisible until a scheduled task
+# "succeeds" every morning without discovering a single job.
+if __name__ == "__main__":
+    main()
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -2786,9 +2805,174 @@ git commit -m "feat: opt-in scheduling with an explicit no-trigger banner"
 
 ---
 
+## Task 17: The send step
+
+**Files:** Modify `src/career_agent/web/app.py`, `src/career_agent/web/templates/index.html`, `tests/test_web.py`
+
+**Interfaces:**
+- Consumes: `ats_apply.submit(conn, job_id, dry_run, filler=None) -> dict` (Task 12); `store.log(conn, job_id, type_, payload=None) -> None` (Task 6); `_conn()`, `_guard(conn, job_id, allow_skip)` (Task 14, both already in `app.py`)
+- Produces: `POST /send/{job_id}` route; a `has_draft` column on `LIST_SQL`, which `index.html` reads to switch the row's action from Apply/Dismiss to Send
+
+The application lifecycle documented in `docs/architecture-overview.md` names an explicit
+transition: `draft --> in_flight: you click Apply`. Task 14 built the review half of that
+promise. Every route it shipped calls `ats_apply.submit(dry_run=True)`, which only ever
+produces a `draft` — Playwright opens `headless=False` so you can see the rendered form,
+but nothing is ever sent. `dry_run=False` is called nowhere reachable from the dashboard.
+This task adds the second click: once a draft exists, the row offers Send, which calls
+`ats_apply.submit(dry_run=False)` for real. Two separate clicks for two separate stakes —
+rendering a form costs nothing, sending it does not.
+
+`ats_apply.submit` does not convert the draft row; each call inserts its own row (see
+`apply/ats.py:60-67` for `dry_run=True`, `:69-95` for `dry_run=False`). The partial unique
+index only blocks a second attempt once one reaches `in_flight`, `submitted`,
+`held_unknown`, or `failed_permanent`, so a `draft` row never blocks the real send that
+follows it.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/test_web.py`:
+
+```python
+def test_send_without_a_draft_is_refused(client):
+    r = client.post("/send/1")
+    assert "draft" in r.text.lower()
+
+
+def test_send_after_apply_performs_a_real_submission(client, monkeypatch):
+    calls = []
+
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        calls.append(dry_run)
+        status = "draft" if dry_run else "submitted"
+        conn.execute(
+            "INSERT INTO application (job_id, resume_version, status)"
+            " VALUES (?, 'v1', ?)", (job_id, status))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": status}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+
+    client.post("/apply/1")
+    r = client.post("/send/1")
+
+    assert r.status_code == 200
+    assert calls == [True, False]
+    conn = db.connect(web.DB_PATH)
+    types = {e["type"] for e in conn.execute("SELECT type FROM event")}
+    assert "human_confirmed_send" in types
+
+
+def test_index_offers_send_once_a_draft_exists(client):
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'v1', 'draft')")
+    conn.commit()
+    r = client.get("/")
+    assert '/send/1' in r.text
+    assert '/apply/1' not in r.text
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `pytest tests/test_web.py -v`
+Expected: `test_send_without_a_draft_is_refused` and
+`test_send_after_apply_performs_a_real_submission` fail with 404 (no `/send` route
+exists yet). `test_index_offers_send_once_a_draft_exists` fails because `has_draft` is
+not a column `LIST_SQL` selects, so nothing distinguishes the draft row and `/apply/1`
+still appears.
+
+- [ ] **Step 3: Add `has_draft` to `LIST_SQL` in `app.py`**
+
+Replace the existing `LIST_SQL`:
+
+```python
+LIST_SQL = """
+SELECT j.id, j.company, j.title, j.location, j.source, j.url,
+       a.verdict, a.rationale, a.stage, a.weighted_score AS score,
+       (SELECT COUNT(*) FROM application ap
+         WHERE ap.job_id = j.id
+           AND ap.status IN ('in_flight','submitted')) AS applied,
+       (SELECT COUNT(*) FROM application ap
+         WHERE ap.job_id = j.id AND ap.status = 'draft') AS has_draft
+  FROM job j JOIN assessment a ON a.job_id = j.id
+ WHERE j.merged_into_job_id IS NULL AND a.verdict IN ({placeholders})
+ ORDER BY a.weighted_score DESC NULLS LAST, j.discovered_at DESC
+"""
+```
+
+- [ ] **Step 4: Add the `/send` route to `app.py`**
+
+Append after the `override` route, before `dismiss`:
+
+```python
+@app.post("/send/{job_id}", response_class=HTMLResponse)
+async def send(job_id: int):
+    conn = _conn()
+    draft = conn.execute(
+        "SELECT id FROM application WHERE job_id = ? AND status = 'draft'"
+        " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+    if draft is None:
+        return HTMLResponse(
+            '<span class="denied">No draft to send yet. Click Apply first.</span>')
+
+    denial = _guard(conn, job_id, allow_skip=True)
+    if denial:
+        return HTMLResponse(f'<span class="denied">{denial}</span>')
+
+    store.log(conn, job_id, "human_confirmed_send")
+
+    try:
+        result = await ats_apply.submit(conn, job_id, dry_run=False)
+    except Exception as exc:
+        return HTMLResponse(f'<span class="denied">{escape(str(exc))}</span>')
+    if not result["ok"]:
+        return HTMLResponse(f'<span class="denied">{escape(result["reason"])}</span>')
+    return HTMLResponse('<span class="done">Sent</span>')
+```
+
+`allow_skip=True` on the guard call is deliberate: the skip/override decision was
+already made and recorded at draft time, by whichever of `apply` or `override` created
+the draft. Re-running that check at send time would ask the same question twice.
+`escape()` on `result["reason"]` matters here specifically because `apply/ats.py`'s
+failure path embeds the raw exception text in that string (`f"submission {status}:
+{exc}"`), and `exc` can originate from Playwright output that echoes the job's URL.
+
+- [ ] **Step 5: Update `index.html`**
+
+Replace the action cell's conditional:
+
+```html
+    <td>
+      {% if j["applied"] %}
+        <span class="done">Applied</span>
+      {% elif j["has_draft"] %}
+        <button hx-post="/send/{{ j['id'] }}" hx-swap="outerHTML">Send</button>
+      {% elif j["verdict"] == "skip" %}
+        <button hx-post="/override/{{ j['id'] }}" hx-swap="outerHTML">Apply anyway</button>
+      {% else %}
+        <button hx-post="/apply/{{ j['id'] }}" hx-swap="outerHTML">Apply</button>
+        <button hx-post="/dismiss/{{ j['id'] }}" hx-swap="outerHTML">Dismiss</button>
+      {% endif %}
+    </td>
+```
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `pytest tests/test_web.py -v`
+Expected: all pass, full suite still green.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/career_agent/web/ tests/test_web.py
+git commit -m "feat: wire the real send, distinct from the draft it follows"
+```
+
+---
+
 ## Self-review notes
 
-**Spec coverage.** Every spec section maps to a task: prerequisites (Task 3 for the board list, Task 10 for the facts guard), spikes (Task 1, and Spike 2 runs alongside Tasks 7-9), architecture (Task 11), discovery from the brief (Task 9), hard filter (Task 5), scored gate (Task 10), calibration (Tasks 13-15), data model (Task 2), fingerprinting (Task 4), submission lifecycle (Task 12), idempotency (Task 6), guardrails (Task 14), error handling (Tasks 10, 12), triggering (Task 16), testing (per task).
+**Spec coverage.** Every spec section maps to a task: prerequisites (Task 3 for the board list, Task 10 for the facts guard), spikes (Task 1, and Spike 2 runs alongside Tasks 7-9), architecture (Task 11), discovery from the brief (Task 9), hard filter (Task 5), scored gate (Task 10), calibration (Tasks 13-15), data model (Task 2), fingerprinting (Task 4), submission lifecycle (Task 12), idempotency (Task 6), guardrails (Task 14), the draft-to-real-send transition (Task 17), error handling (Tasks 10, 12), triggering (Task 16), testing (per task).
 
 **Deliberately not built.** LinkedIn and Naukri submission: both stay manual-queue only per the spec, so no connector exists. Lever and Ashby: Greenhouse proves the pattern and the other two are the same shape against different URLs. `qa_bank` has a table but no form-filling logic, because whether it is worth building depends on Spike 2b showing ATS is more than 20% of relevant listings. Tailoring and auto-submission are v2 and v3.
 

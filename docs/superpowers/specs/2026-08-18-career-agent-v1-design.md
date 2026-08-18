@@ -1,7 +1,7 @@
 # Career Agent v1: design
 
 Date: 2026-08-18
-Revision: 7
+Revision: 8
 Status: closed for revision. Build from this.
 
 Scope of this document: the first shippable milestone. Later phases are named where
@@ -149,7 +149,7 @@ automation sits on top of it.
 
 ## Spikes, before implementation
 
-**Spike 1: subscription auth. Roughly 20 minutes.** Run `claude setup-token`, set
+**Spike 1: subscription auth. PASSED 2026-08-18.** Kept below for the record. Run `claude setup-token`, set
 `CLAUDE_CODE_OAUTH_TOKEN`, make one trivial Agent SDK call. If the installed SDK
 invokes the CLI in bare mode the token is ignored and billing reverts to
 pay-per-token. This gates the economics of everything below and must not wait for
@@ -689,8 +689,9 @@ monthly credit covers early testing. See `docs/research-browser-automation.md`.
 
 ### Total
 
-Subscription mode: $3 to $6 a month, all of it Apify. Bare mode: $6 to $65,
-depending on volume and caching. Spike 1 decides which, and takes 20 minutes.
+**Settled at $3 to $6 a month, all of it Apify.** Spike 1 passed, so subscription
+mode applies and model calls cost nothing at the margin. The pay-per-token table
+above is retained as the counterfactual, not the forecast.
 
 ## Staleness
 
@@ -706,6 +707,12 @@ Startup runs a trivial call to confirm auth rather than inspecting the token.
 Anthropic's terms do not permit third party developers to offer claude.ai login or
 rate limits to their own users. This project stays single-user on the developer's own
 quota. If it ever ships to other people, the auth model changes first.
+
+**Bare mode: resolved. Spike 1 passed 2026-08-18.** The installed SDK accepts
+`CLAUDE_CODE_OAUTH_TOKEN` and does not invoke the CLI in bare mode. Verified by
+running `scripts/spike_auth.py`, which makes a real tool-less call and checks the
+reply, rather than by inspecting the credential. Subscription mode is therefore the
+live cost model.
 
 ## Testing
 
