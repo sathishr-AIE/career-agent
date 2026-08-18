@@ -1,0 +1,51 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Career Agent</title>
+<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 62rem; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid #ddd; }
+  .submit { color: #157f3b; font-weight: 600; }
+  .hold { color: #9a6700; font-weight: 600; }
+  .skip { color: #b42318; font-weight: 600; }
+  .denied { color: #b42318; }
+  .done { color: #157f3b; }
+  .rationale { color: #555; font-size: .9em; }
+  nav a { margin-right: 1rem; }
+</style>
+<h1>Career Agent</h1>
+<nav>
+  <a href="/">Queue</a>
+  <a href="/?show=skipped">Skipped</a>
+</nav>
+{% if show == "skipped" %}
+<p class="rationale">
+  These were skipped by the gate. Applying anyway is recorded as an override,
+  which is how the gate gets caught being too strict.
+</p>
+{% endif %}
+<table>
+  <tr><th>Score</th><th>Role</th><th>Source</th><th>Verdict</th><th></th></tr>
+  {% for j in jobs %}
+  <tr>
+    <td>{{ (j["score"] or 0) | round | int }}</td>
+    <td>
+      <a href="{{ j['url'] }}">{{ j["title"] }}</a> at {{ j["company"] }}<br>
+      <span class="rationale">{{ j["rationale"] }}</span>
+    </td>
+    <td>{{ j["source"] }}</td>
+    <td class="{{ j['verdict'] }}">{{ j["verdict"] }}</td>
+    <td>
+      {% if j["applied"] %}
+        <span class="done">Applied</span>
+      {% elif j["verdict"] == "skip" %}
+        <button hx-post="/override/{{ j['id'] }}" hx-swap="outerHTML">Apply anyway</button>
+      {% else %}
+        <button hx-post="/apply/{{ j['id'] }}" hx-swap="outerHTML">Apply</button>
+        <button hx-post="/dismiss/{{ j['id'] }}" hx-swap="outerHTML">Dismiss</button>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
