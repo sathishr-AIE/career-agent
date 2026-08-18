@@ -1,0 +1,11 @@
+[[board]]
+provider = "greenhouse"
+token = "anthropic"
+company = "Anthropic"
+tier = 1
+
+[[board]]
+provider = "greenhouse"
+token = "stripe"
+company = "Stripe"
+tier = 1

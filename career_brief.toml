@@ -1,0 +1,24 @@
+# Single source of truth for search and filter settings.
+# Edit this rather than passing flags on the command line.
+
+target_titles = ["AI Engineer", "Machine Learning Engineer", "Applied AI Engineer"]
+title_families = ["ai engineer", "machine learning engineer",
+                  "applied ai engineer", "ml engineer", "data scientist"]
+
+# What we ASK each source for. Adding a city multiplies daily Actor runs
+# by the number of target titles.
+search_locations = ["Chennai"]
+
+# What the hard filter ACCEPTS on the way back.
+locations = ["Chennai", "Remote"]
+
+remote_ok = true
+salary_floor_inr = 1200000
+work_authorization = ["India"]
+
+daily_cap = 5
+gate_threshold = 72
+staleness_days = 30
+
+excluded_companies = []
+non_negotiables = ["No unpaid trial periods"]
