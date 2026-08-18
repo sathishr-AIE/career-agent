@@ -68,3 +68,13 @@ def test_override_on_a_skip_records_the_override(client):
 def test_plain_apply_refuses_a_skip(client):
     r = client.post("/apply/2")
     assert "skip" in r.text.lower() or "override" in r.text.lower()
+
+
+def test_submit_failure_message_is_escaped(client, monkeypatch):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("<script>bad</script>")
+
+    monkeypatch.setattr(web.ats_apply, "submit", boom)
+    r = client.post("/override/2")
+    assert r.status_code == 200
+    assert "<script>" not in r.text

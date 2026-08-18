@@ -1,3 +1,4 @@
+from html import escape
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -81,7 +82,7 @@ async def _do_apply(job_id: int, allow_skip: bool, event: str | None):
     try:
         result = await ats_apply.submit(conn, job_id, dry_run=True)
     except Exception as exc:
-        return HTMLResponse(f'<span class="denied">{exc}</span>')
+        return HTMLResponse(f'<span class="denied">{escape(str(exc))}</span>')
     if not result["ok"]:
         return HTMLResponse(f'<span class="denied">{result["reason"]}</span>')
     return HTMLResponse('<span class="done">Applied</span>')
