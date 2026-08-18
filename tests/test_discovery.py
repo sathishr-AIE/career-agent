@@ -62,3 +62,5 @@ def test_run_discovery_calls_every_planned_query(monkeypatch):
 
     assert len(calls) == 8
     assert all(location == "Chennai" for _, _, location, _ in calls)
+    assert sum(1 for c in calls if c[0] == "linkedin") == 4
+    assert sum(1 for c in calls if c[0] == "naukri") == 4
