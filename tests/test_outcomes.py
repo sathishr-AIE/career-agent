@@ -35,7 +35,10 @@ def test_does_not_derive_before_the_window(conn):
 
 
 def test_does_not_derive_at_the_boundary(conn):
-    _app(conn, 30)
+    cutoff = conn.execute("SELECT datetime('now', '-30 days')").fetchone()[0]
+    conn.execute(
+        "INSERT INTO application (job_id, resume_version, status, submitted_at)"
+        " VALUES (1, 'v1', 'submitted', ?)", (cutoff,))
     assert outcomes.derive_no_response(conn, after_days=30) == 0
     assert conn.execute("SELECT COUNT(*) c FROM outcome").fetchone()["c"] == 0
 
