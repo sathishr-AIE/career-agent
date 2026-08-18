@@ -16,14 +16,16 @@ async def main() -> int:
         print("FAIL: CLAUDE_CODE_OAUTH_TOKEN not set. Run: claude setup-token")
         return 2
 
-    from claude_agent_sdk import query
+    from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions,
+                                  TextBlock, query)
 
     chunks = []
     async for message in query(prompt="Reply with exactly: OK",
-                               options={"allowed_tools": []}):
-        text = getattr(message, "text", None)
-        if text:
-            chunks.append(text)
+                               options=ClaudeAgentOptions(tools=None)):
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    chunks.append(block.text)
 
     reply = "".join(chunks).strip()
     if "OK" in reply:
