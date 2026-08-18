@@ -115,3 +115,11 @@ def main() -> None:
         uvicorn.run("career_agent.web.app:app", port=8000, reload=False)
     else:
         asyncio.run(run_once(args))
+
+
+# Required. Without it, `python -m career_agent.run` imports this module,
+# defines everything, and exits 0 having done nothing. The console script
+# would still work, so the failure is invisible until a scheduled task
+# "succeeds" every morning without discovering a single job.
+if __name__ == "__main__":
+    main()
