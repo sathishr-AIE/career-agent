@@ -8,7 +8,7 @@ import httpx
 from apify_client import ApifyClient
 from dotenv import load_dotenv
 
-from career_agent import db, discovery, gate, hardfilter, store
+from career_agent import db, discovery, gate, hardfilter, outcomes, store
 from career_agent.config import load_boards, load_brief
 
 log = logging.getLogger(__name__)
@@ -50,6 +50,10 @@ async def _ask(prompt: str) -> str:
 async def run_once(args) -> None:
     verify_auth()
 
+    if args.max_score == 0:
+        log.warning("--max-score 0: scoring is disabled this run; only "
+                     "discovery and the hard filter will run")
+
     conn = db.connect(Path(args.db))
     db.init_schema(conn)
 
@@ -84,6 +88,9 @@ async def run_once(args) -> None:
         scored += 1
 
     log.info("hard-filtered %d, scored %d", skipped, scored)
+
+    derived = outcomes.derive_no_response(conn)
+    log.info("derived %d no_response outcome(s)", derived)
 
 
 def _row_to_job(row):
