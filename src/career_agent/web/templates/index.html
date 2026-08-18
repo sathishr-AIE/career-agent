@@ -44,8 +44,12 @@
     <td>{{ j["source"] }}</td>
     <td class="{{ j['verdict'] }}">{{ j["verdict"] }}</td>
     <td>
-      {% if j["applied"] %}
+      {% if j["terminal_status"] in ("in_flight", "submitted") %}
         <span class="done">Applied</span>
+      {% elif j["terminal_status"] == "held_unknown" %}
+        <span class="denied">Held — confirm manually, then clear it</span>
+      {% elif j["terminal_status"] == "failed_permanent" %}
+        <span class="denied">Failed permanently — see the event log</span>
       {% elif j["has_draft"] %}
         <button hx-post="/send/{{ j['id'] }}" hx-swap="outerHTML">Send</button>
       {% elif j["verdict"] == "skip" %}

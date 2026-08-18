@@ -137,6 +137,26 @@ def test_index_offers_send_once_a_draft_exists(client):
     assert '/apply/1' not in r.text
 
 
+def test_index_shows_held_unknown_and_hides_apply_button(client):
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'v1', 'held_unknown')")
+    conn.commit()
+    r = client.get("/")
+    assert "Held" in r.text
+    assert "/apply/1" not in r.text
+
+
+def test_index_shows_failed_permanent_and_hides_apply_button(client):
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'v1', 'failed_permanent')")
+    conn.commit()
+    r = client.get("/")
+    assert "Failed permanently" in r.text
+    assert "/apply/1" not in r.text
+
+
 def test_scheduled_task_installed_is_false_for_a_missing_task():
     assert web.scheduled_task_installed("NoSuchCareerAgentTask") is False
 

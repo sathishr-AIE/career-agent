@@ -19,9 +19,10 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 LIST_SQL = """
 SELECT j.id, j.company, j.title, j.location, j.source, j.url,
        a.verdict, a.rationale, a.stage, a.weighted_score AS score,
-       (SELECT COUNT(*) FROM application ap
+       (SELECT ap.status FROM application ap
          WHERE ap.job_id = j.id
-           AND ap.status IN ('in_flight','submitted')) AS applied,
+           AND ap.status IN ('in_flight','submitted','held_unknown','failed_permanent')
+         ORDER BY ap.id DESC LIMIT 1) AS terminal_status,
        (SELECT COUNT(*) FROM application ap
          WHERE ap.job_id = j.id AND ap.status = 'draft') AS has_draft
   FROM job j JOIN assessment a ON a.job_id = j.id
