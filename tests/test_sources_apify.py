@@ -81,3 +81,11 @@ def test_actor_failure_returns_empty_not_crash():
             raise RuntimeError("actor unavailable")
 
     assert fetch_linkedin("x", "Chennai", False, 5, Boom()) == []
+
+
+def test_linkedin_remote_uses_workplacetype_not_a_location_string():
+    client = FakeClient()
+    fetch_linkedin("AI Engineer", "Chennai", True, 50, client)
+    _, run_input = client.calls[0]
+    assert run_input["workplaceType"] == "remote"
+    assert run_input["location"] == "Chennai"
