@@ -38,3 +38,7 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# --- Project-specific ---
+*.db
+screenshots/
