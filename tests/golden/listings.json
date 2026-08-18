@@ -1,0 +1,20 @@
+[
+  {
+    "expected": "submit",
+    "job": {"source": "ats", "external_id": "g1", "company": "Acme AI",
+            "title": "AI Engineer", "location": "Chennai",
+            "description": "Build RAG pipelines in Python. 1-3 years experience."}
+  },
+  {
+    "expected": "skip",
+    "job": {"source": "ats", "external_id": "g2", "company": "Globex",
+            "title": "Senior Staff ML Architect", "location": "Zurich",
+            "description": "12+ years required. On-site. Swiss permit required."}
+  },
+  {
+    "expected": "hold",
+    "job": {"source": "linkedin", "external_id": "g3", "company": "Initech",
+            "title": "Data Scientist", "location": "Chennai",
+            "description": "Mostly dashboards and SQL reporting. Some Python."}
+  }
+]
