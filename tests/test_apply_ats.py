@@ -42,6 +42,8 @@ async def test_second_real_submission_is_refused(conn):
     out = await ats_apply.submit(conn, 1, dry_run=False, filler=_ok)
     assert out["ok"] is False
     assert "already" in out["reason"]
+    assert conn.execute(
+        "SELECT COUNT(*) n FROM application WHERE job_id = 1").fetchone()["n"] == 1
 
 
 async def test_captcha_holds_and_records_no_application(conn):
@@ -69,6 +71,9 @@ async def test_three_failures_become_failed_permanent(conn):
 
     out = await ats_apply.submit(conn, 1, dry_run=False, filler=_ok)
     assert out["ok"] is False
+    assert conn.execute(
+        "SELECT COUNT(*) n FROM application WHERE job_id = 1"
+    ).fetchone()["n"] == ats_apply.MAX_ATTEMPTS
 
 
 def test_stale_in_flight_becomes_held_unknown(conn):
