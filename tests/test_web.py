@@ -78,3 +78,42 @@ def test_submit_failure_message_is_escaped(client, monkeypatch):
     r = client.post("/override/2")
     assert r.status_code == 200
     assert "<script>" not in r.text
+
+
+def test_send_without_a_draft_is_refused(client):
+    r = client.post("/send/1")
+    assert "draft" in r.text.lower()
+
+
+def test_send_after_apply_performs_a_real_submission(client, monkeypatch):
+    calls = []
+
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        calls.append(dry_run)
+        status = "draft" if dry_run else "submitted"
+        conn.execute(
+            "INSERT INTO application (job_id, resume_version, status)"
+            " VALUES (?, 'v1', ?)", (job_id, status))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": status}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+
+    client.post("/apply/1")
+    r = client.post("/send/1")
+
+    assert r.status_code == 200
+    assert calls == [True, False]
+    conn = db.connect(web.DB_PATH)
+    types = {e["type"] for e in conn.execute("SELECT type FROM event")}
+    assert "human_confirmed_send" in types
+
+
+def test_index_offers_send_once_a_draft_exists(client):
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'v1', 'draft')")
+    conn.commit()
+    r = client.get("/")
+    assert '/send/1' in r.text
+    assert '/apply/1' not in r.text

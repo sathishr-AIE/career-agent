@@ -20,7 +20,9 @@ SELECT j.id, j.company, j.title, j.location, j.source, j.url,
        a.verdict, a.rationale, a.stage, a.weighted_score AS score,
        (SELECT COUNT(*) FROM application ap
          WHERE ap.job_id = j.id
-           AND ap.status IN ('in_flight','submitted')) AS applied
+           AND ap.status IN ('in_flight','submitted')) AS applied,
+       (SELECT COUNT(*) FROM application ap
+         WHERE ap.job_id = j.id AND ap.status = 'draft') AS has_draft
   FROM job j JOIN assessment a ON a.job_id = j.id
  WHERE j.merged_into_job_id IS NULL AND a.verdict IN ({placeholders})
  ORDER BY a.weighted_score DESC NULLS LAST, j.discovered_at DESC
@@ -98,6 +100,31 @@ async def override(job_id: int):
     """Applying to something the gate skipped. The most valuable label the
     system produces, because it is the gate erring in the expensive direction."""
     return await _do_apply(job_id, allow_skip=True, event="human_override")
+
+
+@app.post("/send/{job_id}", response_class=HTMLResponse)
+async def send(job_id: int):
+    conn = _conn()
+    draft = conn.execute(
+        "SELECT id FROM application WHERE job_id = ? AND status = 'draft'"
+        " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+    if draft is None:
+        return HTMLResponse(
+            '<span class="denied">No draft to send yet. Click Apply first.</span>')
+
+    denial = _guard(conn, job_id, allow_skip=True)
+    if denial:
+        return HTMLResponse(f'<span class="denied">{denial}</span>')
+
+    store.log(conn, job_id, "human_confirmed_send")
+
+    try:
+        result = await ats_apply.submit(conn, job_id, dry_run=False)
+    except Exception as exc:
+        return HTMLResponse(f'<span class="denied">{escape(str(exc))}</span>')
+    if not result["ok"]:
+        return HTMLResponse(f'<span class="denied">{escape(result["reason"])}</span>')
+    return HTMLResponse('<span class="done">Sent</span>')
 
 
 @app.post("/dismiss/{job_id}", response_class=HTMLResponse)
