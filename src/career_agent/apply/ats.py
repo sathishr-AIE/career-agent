@@ -74,6 +74,11 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
     conn.commit()
 
     try:
+        # ponytail: re-runs the filler independently instead of reusing the
+        # draft's stored answers; harmless while _default_filler always
+        # returns the same static dict regardless of dry_run, but once the
+        # filler is real this needs to read the draft's `answers` column so
+        # Send commits exactly what the human reviewed, not a fresh fill.
         answers = await filler(row["url"])
     except CaptchaEncountered as exc:
         conn.execute("DELETE FROM application WHERE id = ?", (app_id,))
