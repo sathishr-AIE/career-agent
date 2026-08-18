@@ -80,6 +80,16 @@ def test_submit_failure_message_is_escaped(client, monkeypatch):
     assert "<script>" not in r.text
 
 
+def test_apply_denial_reason_is_escaped(client, monkeypatch):
+    async def denied(*args, **kwargs):
+        return {"ok": False, "reason": "<script>bad</script>"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", denied)
+    r = client.post("/apply/1")
+    assert r.status_code == 200
+    assert "<script>" not in r.text
+
+
 def test_send_without_a_draft_is_refused(client, monkeypatch):
     calls = []
 
