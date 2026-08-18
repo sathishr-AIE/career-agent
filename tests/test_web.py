@@ -80,8 +80,16 @@ def test_submit_failure_message_is_escaped(client, monkeypatch):
     assert "<script>" not in r.text
 
 
-def test_send_without_a_draft_is_refused(client):
+def test_send_without_a_draft_is_refused(client, monkeypatch):
+    calls = []
+
+    async def spy(*args, **kwargs):
+        calls.append(args)
+        return {"ok": True}
+
+    monkeypatch.setattr(web.ats_apply, "submit", spy)
     r = client.post("/send/1")
+    assert calls == []
     assert "draft" in r.text.lower()
 
 
