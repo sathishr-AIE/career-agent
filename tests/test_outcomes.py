@@ -34,6 +34,12 @@ def test_does_not_derive_before_the_window(conn):
     assert outcomes.derive_no_response(conn, after_days=30) == 0
 
 
+def test_does_not_derive_at_the_boundary(conn):
+    _app(conn, 30)
+    assert outcomes.derive_no_response(conn, after_days=30) == 0
+    assert conn.execute("SELECT COUNT(*) c FROM outcome").fetchone()["c"] == 0
+
+
 def test_does_not_derive_twice(conn):
     _app(conn, 31)
     outcomes.derive_no_response(conn, after_days=30)
