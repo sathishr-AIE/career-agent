@@ -14,7 +14,8 @@ def check(job: Job, brief: CareerBrief) -> str | None:
 
     if not (job.is_remote and brief.remote_ok):
         accepted = {normalize.location(l) for l in brief.locations} - {""}
-        if accepted and normalize.location(job.location) not in accepted:
+        loc = normalize.location(job.location)
+        if accepted and not any(a in loc or loc in a for a in accepted):
             return f"location outside accepted set: {job.location}"
 
     if brief.salary_floor_inr and job.comp_max is not None:

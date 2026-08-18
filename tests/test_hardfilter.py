@@ -45,3 +45,8 @@ def test_remote_job_passes_regardless_of_city():
 
 def test_unstated_compensation_does_not_reject():
     assert check(_job(comp_max=None), BRIEF) is None
+
+
+@pytest.mark.parametrize("location", ["Greater Chennai Area", "Chennai(Guindy)"])
+def test_compound_location_phrases_survive(location):
+    assert check(_job(location=location), BRIEF) is None
