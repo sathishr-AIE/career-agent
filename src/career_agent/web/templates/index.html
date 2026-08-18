@@ -25,6 +25,13 @@
   which is how the gate gets caught being too strict.
 </p>
 {% endif %}
+{% if not scheduled %}
+<p class="rationale">
+  No scheduled run is installed, so nothing runs unless you start it.
+  Run <code>career-agent run</code>, or install the daily task with
+  <code>scripts\install-scheduler.ps1</code>.
+</p>
+{% endif %}
 <table>
   <tr><th>Score</th><th>Role</th><th>Source</th><th>Verdict</th><th></th></tr>
   {% for j in jobs %}

@@ -125,3 +125,18 @@ def test_index_offers_send_once_a_draft_exists(client):
     r = client.get("/")
     assert '/send/1' in r.text
     assert '/apply/1' not in r.text
+
+
+def test_scheduled_task_installed_is_false_for_a_missing_task():
+    assert web.scheduled_task_installed("NoSuchCareerAgentTask") is False
+
+
+def test_index_shows_no_schedule_banner_by_default(client):
+    r = client.get("/")
+    assert "No scheduled run is installed" in r.text
+
+
+def test_index_hides_banner_when_a_schedule_is_installed(client, monkeypatch):
+    monkeypatch.setattr(web, "scheduled_task_installed", lambda: True)
+    r = client.get("/")
+    assert "No scheduled run is installed" not in r.text

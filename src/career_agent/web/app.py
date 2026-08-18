@@ -1,3 +1,4 @@
+import subprocess
 from html import escape
 from pathlib import Path
 
@@ -36,6 +37,19 @@ def _conn():
     return conn
 
 
+def scheduled_task_installed(name: str = "CareerAgentDaily") -> bool:
+    """No trigger is installed by default. The dashboard says so rather than
+    letting you assume something ran overnight when nothing did."""
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"Get-ScheduledTask -TaskName {name} -ErrorAction SilentlyContinue"],
+            capture_output=True, text=True, timeout=10)
+        return name in result.stdout
+    except Exception:
+        return False
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, show: str = "queue"):
     conn = _conn()
@@ -44,7 +58,8 @@ def index(request: Request, show: str = "queue"):
     rows = conn.execute(sql, verdicts).fetchall()
     return templates.TemplateResponse(
         request=request, name="index.html",
-        context={"jobs": rows, "show": show})
+        context={"jobs": rows, "show": show,
+                 "scheduled": scheduled_task_installed()})
 
 
 def _guard(conn, job_id: int, allow_skip: bool) -> str | None:
