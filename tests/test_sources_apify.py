@@ -10,13 +10,18 @@ class FakeDataset:
         return iter(self._items)
 
 
+class FakeRun:
+    def __init__(self, dataset_id="ds1"):
+        self.default_dataset_id = dataset_id
+
+
 class FakeActor:
     def __init__(self, parent, actor_id):
         self.parent, self.actor_id = parent, actor_id
 
     def call(self, run_input):
         self.parent.calls.append((self.actor_id, run_input))
-        return {"defaultDatasetId": "ds1"}
+        return FakeRun()
 
 
 class FakeClient:

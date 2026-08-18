@@ -13,7 +13,11 @@ NAUKRI_ACTOR = "automation-lab/naukri-scraper"
 def _run(client: Any, actor_id: str, run_input: dict) -> list[dict]:
     try:
         run = client.actor(actor_id).call(run_input=run_input)
-        return list(client.dataset(run["defaultDatasetId"]).iterate_items())
+        # apify-client >= 3 returns a typed Run object, not a dict. Subscripting
+        # it raises TypeError, which the except below would report as an Actor
+        # failure even though the Actor succeeded.
+        dataset_id = run.default_dataset_id
+        return list(client.dataset(dataset_id).iterate_items())
     except Exception as exc:  # an Actor outage must not kill the run
         log.warning("apify actor %s failed: %s", actor_id, exc)
         return []
