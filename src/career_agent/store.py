@@ -1,0 +1,75 @@
+import sqlite3
+
+from career_agent import normalize
+from career_agent.config import CareerBrief
+from career_agent.models import Job, Verdict
+
+
+def log(conn, job_id: int | None, type_: str, payload: str | None = None) -> None:
+    conn.execute("INSERT INTO event (job_id, type, payload) VALUES (?, ?, ?)",
+                 (job_id, type_, payload))
+    conn.commit()
+
+
+def upsert_jobs(conn, jobs: list[Job], brief: CareerBrief) -> int:
+    """Insert jobs that are new and fresh. Returns how many were inserted."""
+    inserted = 0
+    for job in jobs:
+        if normalize.is_stale(job, brief.staleness_days):
+            continue
+        try:
+            conn.execute(
+                "INSERT INTO job (fingerprint, source, external_id, company,"
+                " company_normalized, title, title_normalized, location,"
+                " is_remote, comp_min, comp_max, posted_at, url, description)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (normalize.fingerprint(job), job.source, job.external_id,
+                 job.company, normalize.company(job.company), job.title,
+                 normalize.title(job.title), job.location, int(job.is_remote),
+                 job.comp_min, job.comp_max, job.posted_at, job.url,
+                 job.description))
+            inserted += 1
+        except sqlite3.IntegrityError:
+            continue  # same role, already seen from another board
+    conn.commit()
+    return inserted
+
+
+def save_hard_skip(conn, job_id: int, reason: str) -> None:
+    conn.execute(
+        "INSERT INTO assessment (job_id, stage, verdict, rationale, model,"
+        " prompt_version) VALUES (?, 'hard', 'skip', ?, 'hardfilter', 'n/a')",
+        (job_id, reason))
+    conn.commit()
+
+
+def save_assessment(conn, job_id: int, v: Verdict, model: str,
+                    prompt_version: str) -> None:
+    conn.execute(
+        "INSERT INTO assessment (job_id, stage, role_fit, credibility,"
+        " opportunity, application_quality, eligibility_soft, weighted_score,"
+        " verdict, rationale, model, prompt_version)"
+        " VALUES (?, 'scored', ?,?,?,?,?,?,?,?,?,?)",
+        (job_id, v.role_fit, v.credibility, v.opportunity, v.application_quality,
+         v.eligibility_soft, v.weighted, v.verdict, v.rationale, model,
+         prompt_version))
+    conn.commit()
+
+
+def unscored_jobs(conn, prompt_version: str, limit: int) -> list[sqlite3.Row]:
+    """Jobs with no assessment at the current prompt version, excluding
+    hard-filter skips and merged duplicates. Bumping the version brings
+    previously scored jobs back, which is what makes prompt changes measurable."""
+    return conn.execute(
+        "SELECT j.* FROM job j"
+        " WHERE j.merged_into_job_id IS NULL"
+        "   AND NOT EXISTS (SELECT 1 FROM assessment a WHERE a.job_id = j.id"
+        "                     AND (a.stage = 'hard'"
+        "                          OR a.prompt_version = ?))"
+        " ORDER BY j.discovered_at DESC LIMIT ?",
+        (prompt_version, limit)).fetchall()
+
+
+def facts(conn) -> list[str]:
+    rows = conn.execute("SELECT claim, evidence FROM fact ORDER BY id").fetchall()
+    return [f"{r['claim']} (evidence: {r['evidence']})" for r in rows]
