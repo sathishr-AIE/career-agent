@@ -133,7 +133,10 @@ sequenceDiagram
 
     You->>DB: open the dashboard later
     You->>B: click Apply on a job
-    B->>B: fill the form
+    B->>B: render a draft, dry run
+    B->>DB: record the draft
+    You->>B: review the draft, click Send
+    B->>B: fill the form for real
     B->>DB: record the application
     Note over B: stops at any captcha and holds the job
 
@@ -197,9 +200,9 @@ crash halfway through pressing submit.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> draft: rendered but not sent
+    [*] --> draft: you click Apply
 
-    draft --> in_flight: you click Apply
+    draft --> in_flight: you click Send
     in_flight --> submitted: confirmation seen
     in_flight --> failed: the attempt errored
     in_flight --> held_unknown: crashed mid-send
