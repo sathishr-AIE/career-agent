@@ -38,16 +38,19 @@ class FakeClient:
 def test_linkedin_pins_actor_and_passes_location():
     client = FakeClient([{"id": "99", "title": "AI Engineer",
                           "companyName": "Acme", "location": "Chennai",
-                          "postedAt": "2026-08-01",
-                          "descriptionText": "LLM work", "link": "https://x/1"}])
+                          "postedDate": "2026-08-01",
+                          "description": "LLM work", "url": "https://x/1"}])
     jobs = fetch_linkedin("AI Engineer", "Chennai", False, 50, client)
 
     actor_id, run_input = client.calls[0]
     assert actor_id == LINKEDIN_ACTOR
     assert run_input["location"] == "Chennai"
-    assert run_input["keyword"] == "AI Engineer"
+    assert run_input["title"] == "AI Engineer"
+    assert run_input["limit"] == 50
     assert jobs[0].source == "linkedin"
     assert jobs[0].external_id == "99"
+    assert jobs[0].url == "https://x/1"
+    assert jobs[0].description == "LLM work"
 
 
 def test_naukri_pins_actor_and_parses_inr_band():
@@ -88,9 +91,9 @@ def test_actor_failure_returns_empty_not_crash():
     assert fetch_linkedin("x", "Chennai", False, 5, Boom()) == []
 
 
-def test_linkedin_remote_uses_workplacetype_not_a_location_string():
+def test_linkedin_remote_uses_remote_param_not_a_location_string():
     client = FakeClient()
     fetch_linkedin("AI Engineer", "Chennai", True, 50, client)
     _, run_input = client.calls[0]
-    assert run_input["workplaceType"] == "remote"
+    assert run_input["remote"] == ["2"]
     assert run_input["location"] == "Chennai"
