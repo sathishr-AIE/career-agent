@@ -1,6 +1,6 @@
 import pytest
 
-from career_agent import db
+from career_agent import db, store
 from career_agent.web import worker
 
 
@@ -9,6 +9,16 @@ def conn(tmp_path):
     c = db.connect(tmp_path / "t.db")
     db.init_schema(c)
     return c
+
+
+@pytest.fixture
+def brief_path(tmp_path):
+    p = tmp_path / "career_brief.toml"
+    p.write_text(
+        'target_titles = ["AI Engineer"]\n'
+        'search_locations = ["Chennai"]\n'
+        'daily_cap = 5\n')
+    return p
 
 
 def _job(conn, fp, priority=None, score=80, verdict="submit"):
@@ -168,3 +178,137 @@ def test_queue_count_respects_latest_assessment_verdict(conn):
     conn.commit()
     # Count should be 0 because latest assessment is 'skip'
     assert worker.queue_count(conn) == 0
+
+
+async def test_tick_does_nothing_when_not_running(conn, brief_path):
+    job_id = _job(conn, "idle-test")
+    await worker.apply_tick(conn, brief_path)
+    assert worker.get_run_state(conn, "apply")["current_job_id"] is None
+    assert conn.execute("SELECT COUNT(*) n FROM application").fetchone()["n"] == 0
+
+
+async def test_tick_with_empty_queue_goes_idle_and_logs_completion(conn, brief_path):
+    worker.set_run_state(conn, "apply", status="running", mode="auto")
+    await worker.apply_tick(conn, brief_path)
+    state = worker.get_run_state(conn, "apply")
+    assert state["status"] == "idle"
+    types = {e["type"] for e in conn.execute("SELECT type FROM event")}
+    assert "run_completed" in types
+
+
+async def test_tick_auto_mode_drafts_and_sends(conn, brief_path, monkeypatch):
+    job_id = _job(conn, "auto-me")
+    worker.set_run_state(conn, "apply", status="running", mode="auto")
+
+    calls = []
+
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        calls.append(dry_run)
+        status = "draft" if dry_run else "submitted"
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', ?)", (job_id, status))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": status}
+
+    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
+    await worker.apply_tick(conn, brief_path)
+
+    assert calls == [True, False]
+    assert worker.get_run_state(conn, "apply")["current_job_id"] is None
+
+
+async def test_tick_manual_mode_stops_after_draft(conn, brief_path, monkeypatch):
+    job_id = _job(conn, "manual-me")
+    worker.set_run_state(conn, "apply", status="running", mode="manual")
+
+    calls = []
+
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        calls.append(dry_run)
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', 'draft')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
+    await worker.apply_tick(conn, brief_path)
+
+    assert calls == [True]
+    state = worker.get_run_state(conn, "apply")
+    assert state["status"] == "running"
+    assert state["current_job_id"] == job_id
+
+
+async def test_tick_is_a_noop_while_awaiting_manual_review(conn, brief_path, monkeypatch):
+    job_id = _job(conn, "already-drafted")
+    worker.set_run_state(conn, "apply", status="running", mode="manual",
+                         current_job_id=job_id)
+
+    async def fail_if_called(*a, **kw):
+        raise AssertionError("submit should not be called again")
+
+    monkeypatch.setattr(worker.ats_apply, "submit", fail_if_called)
+    await worker.apply_tick(conn, brief_path)  # must not raise
+
+
+async def test_tick_autopauses_on_daily_cap(conn, brief_path):
+    # daily_cap = 0 is rejected by CareerBrief validation (see
+    # test_config.py::test_brief_rejects_zero_daily_cap), so the cap is
+    # reached here the realistic way: daily_cap = 1 with one job already
+    # submitted today, rather than the brief's literal (invalid) daily_cap
+    # = 0 toml.
+    p = brief_path.parent / "career_brief.toml"
+    p.write_text(
+        'target_titles = ["AI Engineer"]\n'
+        'search_locations = ["Chennai"]\n'
+        'daily_cap = 1\n')
+    already_applied = _job(conn, "already-applied-today")
+    conn.execute(
+        "INSERT INTO application (job_id, resume_version, status,"
+        " submitted_at) VALUES (?, 'v1', 'submitted', datetime('now'))",
+        (already_applied,))
+    conn.commit()
+    _job(conn, "capped")
+    worker.set_run_state(conn, "apply", status="running", mode="auto")
+
+    await worker.apply_tick(conn, p)
+
+    state = worker.get_run_state(conn, "apply")
+    assert state["status"] == "paused"
+    types = {e["type"] for e in conn.execute("SELECT type FROM event")}
+    assert "run_autopaused" in types
+
+
+async def test_tick_skips_a_denied_job_and_stays_running(conn, brief_path):
+    # A verdict='skip' job is excluded by next_candidate's own SQL
+    # (verdict IN ('submit','hold')), so it never reaches guard() through
+    # apply_tick and can't exercise the job_skipped branch. Use a real
+    # ('submit') candidate with the agent paused instead, the reachable
+    # non-cap denial guard() produces.
+    _job(conn, "gate-skipped")
+    store.log(conn, None, "pause", "on")
+    worker.set_run_state(conn, "apply", status="running", mode="auto")
+
+    await worker.apply_tick(conn, brief_path)
+
+    state = worker.get_run_state(conn, "apply")
+    assert state["status"] == "running"
+    assert state["current_job_id"] is None
+    types = {e["type"] for e in conn.execute("SELECT type FROM event")}
+    assert "job_skipped" in types
+
+
+async def test_tick_errors_on_unhandled_submit_exception(conn, brief_path, monkeypatch):
+    _job(conn, "boom")
+    worker.set_run_state(conn, "apply", status="running", mode="auto")
+
+    async def boom(*a, **kw):
+        raise RuntimeError("browser crashed")
+
+    monkeypatch.setattr(worker.ats_apply, "submit", boom)
+    await worker.apply_tick(conn, brief_path)
+
+    state = worker.get_run_state(conn, "apply")
+    assert state["status"] == "error"
+    assert "browser crashed" in state["last_error"]
+    assert state["current_job_id"] is None

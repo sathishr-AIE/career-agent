@@ -1,6 +1,8 @@
 import sqlite3
 from pathlib import Path
 
+from career_agent import store
+from career_agent.apply import ats as ats_apply
 from career_agent.config import load_brief
 
 CANDIDATE_SQL = """
@@ -63,6 +65,63 @@ def guard(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
     if paused and paused["payload"] == "on":
         return "The agent is paused."
     return None
+
+
+async def apply_tick(conn: sqlite3.Connection, brief_path) -> None:
+    """One step of the apply worker: pick a candidate, gate it, draft it,
+    and in auto mode send it. Called by the control endpoints (for
+    immediate feedback) and by the background loop (to keep going
+    unattended). A no-op unless the apply run is 'running' and not
+    already blocked on a manual-mode draft awaiting review."""
+    state = get_run_state(conn, "apply")
+    if state["status"] != "running":
+        return
+    if state["current_job_id"] is not None:
+        return
+
+    candidate = next_candidate(conn)
+    if candidate is None:
+        set_run_state(conn, "apply", status="idle", current_job_id=None)
+        store.log(conn, None, "run_completed")
+        return
+
+    job_id = candidate["job_id"]
+    set_run_state(conn, "apply", current_job_id=job_id)
+
+    denial = guard(conn, job_id, allow_skip=True, brief_path=brief_path)
+    if denial:
+        if "cap" in denial.lower():
+            set_run_state(conn, "apply", status="paused", current_job_id=None)
+            store.log(conn, job_id, "run_autopaused", denial)
+        else:
+            store.log(conn, job_id, "job_skipped", denial)
+            set_run_state(conn, "apply", current_job_id=None)
+        return
+
+    try:
+        result = await ats_apply.submit(conn, job_id, dry_run=True)
+    except Exception as exc:
+        set_run_state(conn, "apply", status="error", current_job_id=None,
+                      last_error=str(exc))
+        store.log(conn, job_id, "run_error", str(exc))
+        return
+
+    if not result["ok"]:
+        store.log(conn, job_id, "job_skipped", result.get("reason", ""))
+        set_run_state(conn, "apply", current_job_id=None)
+        return
+
+    if state["mode"] == "manual":
+        return  # stays 'running' with current_job_id set: awaiting review
+
+    try:
+        await ats_apply.submit(conn, job_id, dry_run=False)
+    except Exception as exc:
+        set_run_state(conn, "apply", status="error", current_job_id=None,
+                      last_error=str(exc))
+        store.log(conn, job_id, "run_error", str(exc))
+        return
+    set_run_state(conn, "apply", current_job_id=None)
 
 
 def queue_count(conn: sqlite3.Connection) -> int:
