@@ -1,0 +1,98 @@
+import datetime as dt
+import sqlite3
+
+from career_agent import outcomes
+
+CALLBACK_LABELS = {"screen": "Response", "interview": "Interview",
+                    "offer": "Offer", "rejected": "Rejected",
+                    "no_response": "No Response"}
+
+
+def _daily_counts(conn: sqlite3.Connection, sql: str) -> dict[str, int]:
+    return {r["day"]: r["n"] for r in conn.execute(sql)}
+
+
+def sparkline_values(conn: sqlite3.Connection, count_sql: str) -> list[int]:
+    """count_sql must SELECT (day, n) grouped by an ISO date `day` column,
+    covering at least the last 7 days. Zero-filled for days with no rows."""
+    counts = _daily_counts(conn, count_sql)
+    today = dt.date.today()
+    return [counts.get(str(today - dt.timedelta(days=i)), 0)
+            for i in range(6, -1, -1)]
+
+
+def sparkline_points(values: list[int]) -> str:
+    """SVG polyline points, scaled into a 64x28 box (matches the prototype's
+    .spark svg viewBox="0 0 64 28"). All-zero (or empty) series still emit
+    one point per value, flat along the baseline (y=24) -- callers such as
+    kpis() rely on a fixed 7-points-per-week shape regardless of activity."""
+    if not values:
+        return "0,24 63,24"
+    lo, hi = min(values), max(values)
+    span = (hi - lo) or 1
+    step = 63 / (len(values) - 1) if len(values) > 1 else 0
+    points = []
+    for i, v in enumerate(values):
+        x = round(i * step, 1)
+        y = round(24 - ((v - lo) / span) * 20, 1)
+        points.append(f"{x},{y}")
+    return " ".join(points)
+
+
+def kpis(conn: sqlite3.Connection) -> dict:
+    discovered = conn.execute(
+        "SELECT COUNT(*) n FROM job"
+        " WHERE date(discovered_at) = date('now')").fetchone()["n"]
+
+    after_hard_filter = conn.execute(
+        "SELECT COUNT(*) n FROM job j JOIN assessment a ON a.job_id = j.id"
+        " WHERE date(j.discovered_at) = date('now')"
+        "   AND a.stage = 'scored'"
+        "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id"
+        "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
+        ).fetchone()["n"]
+
+    shortlisted = conn.execute(
+        "SELECT COUNT(*) n FROM job j JOIN assessment a ON a.job_id = j.id"
+        " WHERE date(j.discovered_at) = date('now') AND a.stage = 'scored'"
+        "   AND a.verdict IN ('submit','hold')"
+        "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id"
+        "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
+        ).fetchone()["n"]
+
+    applied = conn.execute(
+        "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
+        "   AND date(submitted_at) = date('now')").fetchone()["n"]
+
+    responses, _total_submitted = outcomes.callback_rate(conn)
+
+    sparklines = {
+        "discovered": sparkline_points(sparkline_values(conn,
+            "SELECT date(discovered_at) day, COUNT(*) n FROM job"
+            " WHERE discovered_at >= date('now', '-6 days') GROUP BY day")),
+        "after_hard_filter": sparkline_points(sparkline_values(conn,
+            "SELECT date(j.discovered_at) day, COUNT(*) n FROM job j"
+            " JOIN assessment a ON a.job_id = j.id WHERE a.stage = 'scored'"
+            "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id"
+            "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
+            "   AND j.discovered_at >= date('now', '-6 days') GROUP BY day")),
+        "shortlisted": sparkline_points(sparkline_values(conn,
+            "SELECT date(j.discovered_at) day, COUNT(*) n FROM job j"
+            " JOIN assessment a ON a.job_id = j.id WHERE a.stage = 'scored'"
+            "   AND a.verdict IN ('submit','hold')"
+            "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id"
+            "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
+            "   AND j.discovered_at >= date('now', '-6 days') GROUP BY day")),
+        "applied": sparkline_points(sparkline_values(conn,
+            "SELECT date(submitted_at) day, COUNT(*) n FROM application"
+            " WHERE status = 'submitted'"
+            "   AND submitted_at >= date('now', '-6 days') GROUP BY day")),
+        "responses": sparkline_points(sparkline_values(conn,
+            "SELECT date(occurred_at) day, COUNT(*) n FROM outcome"
+            " WHERE type IN ('screen','interview','offer')"
+            "   AND occurred_at >= date('now', '-6 days') GROUP BY day")),
+    }
+
+    return {"discovered": discovered, "after_hard_filter": after_hard_filter,
+            "shortlisted": shortlisted, "applied": applied,
+            "responses": responses, "sparklines": sparklines}
