@@ -74,6 +74,18 @@ CREATE TABLE IF NOT EXISTS event (
     occurred_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS run_state (
+    kind           TEXT PRIMARY KEY CHECK (kind IN ('pipeline','apply')),
+    status         TEXT NOT NULL DEFAULT 'idle'
+                    CHECK (status IN
+                     ('idle','running','paused','stopped','error')),
+    mode           TEXT CHECK (mode IN ('auto','manual')),
+    current_job_id INTEGER REFERENCES job(id),
+    started_at     TEXT,
+    last_error     TEXT,
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS fact (
     id         INTEGER PRIMARY KEY,
     claim      TEXT NOT NULL,
@@ -114,4 +126,18 @@ def connect(path: Path) -> sqlite3.Connection:
 
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    conn.execute("INSERT OR IGNORE INTO run_state (kind, mode)"
+                 " VALUES ('apply', 'manual')")
+    conn.execute("INSERT OR IGNORE INTO run_state (kind) VALUES ('pipeline')")
+    _add_column_if_missing(conn, "job", "priority", "INTEGER")
     conn.commit()
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str,
+                            column: str, coltype: str) -> None:
+    """CREATE TABLE IF NOT EXISTS can't add a column to a table that already
+    exists. init_schema runs on every request (see web/app.py's _conn), so
+    this has to be a no-op after the first time it succeeds."""
+    cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")

@@ -69,3 +69,34 @@ def test_merged_job_is_soft_deleted_not_removed(conn):
     live = conn.execute("SELECT COUNT(*) n FROM job"
                         " WHERE merged_into_job_id IS NULL").fetchone()["n"]
     assert live == 1
+
+
+def test_run_state_seeded_with_apply_and_pipeline_rows(conn):
+    kinds = {r["kind"] for r in conn.execute("SELECT kind FROM run_state")}
+    assert kinds == {"apply", "pipeline"}
+
+
+def test_run_state_apply_row_starts_idle_manual(conn):
+    row = conn.execute(
+        "SELECT status, mode FROM run_state WHERE kind = 'apply'").fetchone()
+    assert row["status"] == "idle"
+    assert row["mode"] == "manual"
+
+
+def test_init_schema_is_idempotent_for_run_state(conn):
+    db.init_schema(conn)  # called a second time by the fixture's next call
+    count = conn.execute("SELECT COUNT(*) n FROM run_state").fetchone()["n"]
+    assert count == 2
+
+
+def test_job_has_priority_column(conn):
+    j = _job(conn)
+    conn.execute("UPDATE job SET priority = 3 WHERE id = ?", (j,))
+    row = conn.execute("SELECT priority FROM job WHERE id = ?", (j,)).fetchone()
+    assert row["priority"] == 3
+
+
+def test_job_priority_defaults_to_null(conn):
+    j = _job(conn)
+    row = conn.execute("SELECT priority FROM job WHERE id = ?", (j,)).fetchone()
+    assert row["priority"] is None
