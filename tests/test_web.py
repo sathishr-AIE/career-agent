@@ -35,17 +35,17 @@ def client(tmp_path, monkeypatch):
 
 
 def test_index_shows_submit_and_hold_with_rationale(client):
-    r = client.get("/")
+    r = client.get("/applications")
     assert "AI Engineer" in r.text
     assert "strong match" in r.text
 
 
 def test_index_hides_skips_by_default(client):
-    assert "ML Engineer" not in client.get("/").text
+    assert "ML Engineer" not in client.get("/applications").text
 
 
 def test_skipped_view_shows_them(client):
-    r = client.get("/?show=skipped")
+    r = client.get("/applications?show=skipped")
     assert "ML Engineer" in r.text
     assert "credibility below floor" in r.text
 
@@ -133,7 +133,7 @@ def test_index_offers_send_once_a_draft_exists(client):
     conn.execute("INSERT INTO application (job_id, resume_version, status)"
                  " VALUES (1, 'v1', 'draft')")
     conn.commit()
-    r = client.get("/")
+    r = client.get("/applications")
     assert '/send/1' in r.text
     assert '/apply/1' not in r.text
 
@@ -143,7 +143,7 @@ def test_index_shows_held_unknown_and_hides_apply_button(client):
     conn.execute("INSERT INTO application (job_id, resume_version, status)"
                  " VALUES (1, 'v1', 'held_unknown')")
     conn.commit()
-    r = client.get("/")
+    r = client.get("/applications")
     assert "Held" in r.text
     assert "/apply/1" not in r.text
 
@@ -153,7 +153,7 @@ def test_index_shows_failed_permanent_and_hides_apply_button(client):
     conn.execute("INSERT INTO application (job_id, resume_version, status)"
                  " VALUES (1, 'v1', 'failed_permanent')")
     conn.commit()
-    r = client.get("/")
+    r = client.get("/applications")
     assert "Failed permanently" in r.text
     assert "/apply/1" not in r.text
 
@@ -163,14 +163,20 @@ def test_scheduled_task_installed_is_false_for_a_missing_task():
 
 
 def test_index_shows_no_schedule_banner_by_default(client):
-    r = client.get("/")
+    r = client.get("/applications")
     assert "No scheduled run is installed" in r.text
 
 
 def test_index_hides_banner_when_a_schedule_is_installed(client, monkeypatch):
     monkeypatch.setattr(web, "scheduled_task_installed", lambda: True)
-    r = client.get("/")
+    r = client.get("/applications")
     assert "No scheduled run is installed" not in r.text
+
+
+def test_root_redirects_to_applications(client):
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code == 307
+    assert r.headers["location"] == "/applications"
 
 
 def test_run_start_sets_status_running_and_ticks_once(client, monkeypatch):

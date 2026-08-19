@@ -5,7 +5,7 @@ from html import escape
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from career_agent import db, store
@@ -61,7 +61,12 @@ def scheduled_task_installed(name: str = "CareerAgentDaily") -> bool:
         return False
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
+def root():
+    return RedirectResponse("/applications", status_code=307)
+
+
+@app.get("/applications", response_class=HTMLResponse)
 def index(request: Request, show: str = "queue"):
     conn = _conn()
     verdicts = ["skip"] if show == "skipped" else ["submit", "hold"]
