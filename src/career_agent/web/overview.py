@@ -100,3 +100,44 @@ def kpis(conn: sqlite3.Connection) -> dict:
     return {"discovered": discovered, "after_hard_filter": after_hard_filter,
             "shortlisted": shortlisted, "applied": applied,
             "responses": responses, "sparklines": sparklines}
+
+
+def outcome_summary(conn: sqlite3.Connection) -> dict:
+    rows = conn.execute(
+        "SELECT id FROM application WHERE status = 'submitted'"
+        "   AND date(submitted_at) >= date('now', 'start of month')").fetchall()
+    applied = len(rows)
+    effective = [outcomes.effective_outcome(conn, r["id"]) for r in rows]
+    responses = sum(1 for o in effective if o in outcomes.CALLBACK_TYPES)
+    interviews = sum(1 for o in effective if o in ("interview", "offer"))
+    offers = sum(1 for o in effective if o == "offer")
+    callback_rate = round(100 * responses / applied, 1) if applied else 0.0
+    interview_rate = round(100 * interviews / applied, 1) if applied else 0.0
+    return {"applied": applied, "responses": responses, "interviews": interviews,
+            "offers": offers, "callback_rate": callback_rate,
+            "interview_rate": interview_rate}
+
+
+def score_distribution(conn: sqlite3.Connection) -> dict:
+    rows = conn.execute(
+        "SELECT weighted_score FROM assessment a WHERE stage = 'scored'"
+        "   AND weighted_score IS NOT NULL"
+        "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = a.job_id"
+        "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
+        ).fetchall()
+    total = len(rows)
+    if total == 0:
+        return {"total": 0, "high": 0, "good": 0, "fair": 0, "low": 0}
+    buckets = {"high": 0, "good": 0, "fair": 0, "low": 0}
+    for r in rows:
+        s = r["weighted_score"]
+        if s >= 80:
+            buckets["high"] += 1
+        elif s >= 60:
+            buckets["good"] += 1
+        elif s >= 40:
+            buckets["fair"] += 1
+        else:
+            buckets["low"] += 1
+    return {"total": total,
+            **{k: round(100 * v / total, 1) for k, v in buckets.items()}}

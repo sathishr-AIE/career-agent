@@ -149,3 +149,85 @@ def test_sparkline_points_scales_to_a_64_by_28_box():
     ys = [float(p.split(",")[1]) for p in points.split()]
     assert xs[0] == 0.0 and xs[-1] == 63.0
     assert min(ys) == 4.0 and max(ys) == 24.0
+
+
+def test_outcome_summary_counts_this_month(conn):
+    j = _job(conn, "this-month")
+    app_id = conn.execute(
+        "INSERT INTO application (job_id, resume_version, status,"
+        " submitted_at) VALUES (?, 'v1', 'submitted',"
+        " datetime('now', 'start of month', '+1 day'))", (j,)).lastrowid
+    conn.execute("INSERT INTO outcome (application_id, type)"
+                 " VALUES (?, 'interview')", (app_id,))
+    conn.commit()
+    summary = overview.outcome_summary(conn)
+    assert summary["applied"] == 1
+    assert summary["responses"] == 1
+    assert summary["interviews"] == 1
+    assert summary["offers"] == 0
+    assert summary["callback_rate"] == 100.0
+    assert summary["interview_rate"] == 100.0
+
+
+def test_outcome_summary_uses_effective_outcome_not_raw_rows(conn):
+    """A derived no_response should not count as a response once a real
+    outcome supersedes it — outcome_summary must go through
+    effective_outcome(), not just check whether any callback-type row
+    exists."""
+    j = _job(conn, "superseded")
+    app_id = conn.execute(
+        "INSERT INTO application (job_id, resume_version, status,"
+        " submitted_at) VALUES (?, 'v1', 'submitted', datetime('now'))",
+        (j,)).lastrowid
+    conn.execute("INSERT INTO outcome (application_id, type, derived,"
+                 " occurred_at) VALUES (?, 'screen', 0, datetime('now', '-1 day'))",
+                 (app_id,))
+    conn.execute("INSERT INTO outcome (application_id, type, derived,"
+                 " occurred_at) VALUES (?, 'rejected', 0, datetime('now'))",
+                 (app_id,))
+    conn.commit()
+    summary = overview.outcome_summary(conn)
+    assert summary["responses"] == 0  # latest outcome is 'rejected', not a callback
+
+
+def test_outcome_summary_zero_applications_avoids_division_by_zero(conn):
+    summary = overview.outcome_summary(conn)
+    assert summary == {"applied": 0, "responses": 0, "interviews": 0,
+                        "offers": 0, "callback_rate": 0.0,
+                        "interview_rate": 0.0}
+
+
+def test_score_distribution_buckets(conn):
+    j1 = _job(conn, "high")
+    _scored(conn, j1, score=90)
+    j2 = _job(conn, "good")
+    _scored(conn, j2, score=65)
+    j3 = _job(conn, "fair")
+    _scored(conn, j3, score=45)
+    j4 = _job(conn, "low")
+    _scored(conn, j4, score=10)
+    conn.commit()
+    dist = overview.score_distribution(conn)
+    assert dist["total"] == 4
+    assert dist["high"] == 25.0
+    assert dist["good"] == 25.0
+    assert dist["fair"] == 25.0
+    assert dist["low"] == 25.0
+
+
+def test_score_distribution_does_not_double_count_a_rescored_job(conn):
+    j = _job(conn, "rescored")
+    _scored(conn, j, score=10)  # older pass
+    _scored(conn, j, score=90)  # rescored, newer — this is the one that counts
+    conn.commit()
+    dist = overview.score_distribution(conn)
+    assert dist["total"] == 1
+    assert dist["high"] == 100.0
+    assert dist["low"] == 0
+
+
+def test_score_distribution_excludes_hard_skips(conn):
+    j = _job(conn, "hard-skip")
+    _hard_skip(conn, j)
+    conn.commit()
+    assert overview.score_distribution(conn)["total"] == 0
