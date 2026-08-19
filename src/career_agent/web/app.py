@@ -34,8 +34,8 @@ SELECT j.id, j.company, j.title, j.location, j.source, j.url,
          WHERE ap.job_id = j.id
            AND ap.status IN ('in_flight','submitted','held_unknown','failed_permanent')
          ORDER BY ap.id DESC LIMIT 1) AS terminal_status,
-       (SELECT COUNT(*) FROM application ap
-         WHERE ap.job_id = j.id AND ap.status = 'draft') AS has_draft
+       (SELECT ap.status FROM application ap WHERE ap.job_id = j.id
+         ORDER BY ap.id DESC LIMIT 1) IS 'draft' AS has_draft
   FROM job j JOIN assessment a ON a.job_id = j.id
  WHERE j.merged_into_job_id IS NULL AND a.verdict IN ({placeholders})
  ORDER BY a.weighted_score DESC NULLS LAST, j.discovered_at DESC

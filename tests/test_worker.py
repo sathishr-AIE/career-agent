@@ -94,6 +94,22 @@ def test_next_candidate_excludes_jobs_with_a_pending_draft(conn):
     assert worker.queue_count(conn) == 0
 
 
+def test_next_candidate_includes_a_job_that_drafted_then_failed(conn):
+    """A real-submit attempt never deletes the earlier draft row (ats.py's
+    submit() only inserts), so a job that drafted and then failed transiently
+    carries BOTH a 'draft' row and a later 'failed' row. The latest row is
+    what matters -- it must stay retryable, or auto-mode retry and
+    /queue/{id}/retry become permanent no-ops after the first attempt."""
+    job_id = _job(conn, "drafted-then-failed")
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (?, 'v1', 'draft')", (job_id,))
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (?, 'v1', 'failed')", (job_id,))
+    conn.commit()
+    assert worker.next_candidate(conn)["job_id"] == job_id
+    assert worker.queue_count(conn) == 1
+
+
 def test_next_candidate_includes_a_failed_job(conn):
     job_id = _job(conn, "failed-once")
     conn.execute("INSERT INTO application (job_id, resume_version, status)"

@@ -18,8 +18,10 @@ QUEUE_WHERE = """
        SELECT 1 FROM application ap
         WHERE ap.job_id = j.id
           AND ap.status IN ('in_flight','submitted','held_unknown',
-                             'failed_permanent','draft')
+                             'failed_permanent')
    )
+   AND (SELECT ap.status FROM application ap WHERE ap.job_id = j.id
+        ORDER BY ap.id DESC LIMIT 1) IS NOT 'draft'
 """
 
 CANDIDATE_SQL = f"""

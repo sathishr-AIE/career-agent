@@ -146,6 +146,29 @@ def test_index_offers_send_once_a_draft_exists(client):
     assert "AI Engineer" not in queue_html
 
 
+def test_index_requeues_a_job_that_drafted_then_failed(client):
+    """submit()'s real-send path never deletes the earlier draft row, so a
+    job that drafted and then failed transiently carries both a 'draft' row
+    and a later 'failed' row. has_draft must track the LATEST row (here,
+    'failed'), not blanket row-membership -- else the job stays permanently
+    hidden from the Queue tab and stuck showing a stale Send button, even
+    though worker.next_candidate now treats it as retryable again."""
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'v1', 'draft')")
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'v1', 'failed')")
+    conn.commit()
+    r = client.get("/applications")
+    # back in the Queue tab, like any other retryable job
+    queue_html = r.text.split('id="tab-queue"')[1].split('id="tab-all"')[0]
+    assert "AI Engineer" in queue_html
+    # All Applications: Apply/Dismiss again, not a stale Send button
+    all_html = r.text.split('id="tab-all"')[1].split('id="tab-skipped"')[0]
+    assert '/apply/1' in all_html
+    assert '/send/1' not in all_html
+
+
 def test_index_shows_held_unknown_and_hides_apply_button(client):
     conn = db.connect(web.DB_PATH)
     conn.execute("INSERT INTO application (job_id, resume_version, status)"
