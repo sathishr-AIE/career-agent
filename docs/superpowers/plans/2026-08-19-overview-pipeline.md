@@ -141,6 +141,20 @@ def test_kpis_responses_matches_callback_rate_numerator(conn):
     assert overview.kpis(conn)["responses"] == 1
 
 
+def test_kpis_does_not_double_count_a_rescored_job(conn):
+    """A job can pick up a second 'scored' assessment row when the gate's
+    prompt_version bumps (store.unscored_jobs re-surfaces it; save_assessment
+    always inserts, never upserts). after_hard_filter/shortlisted must count
+    the job once, using its latest assessment, not once per row."""
+    j = _job(conn, "rescored")
+    _scored(conn, j, score=40, verdict="skip")  # first pass, older
+    _scored(conn, j, score=90, verdict="submit")  # rescored, newer
+    conn.commit()
+    kpi_data = overview.kpis(conn)
+    assert kpi_data["after_hard_filter"] == 1
+    assert kpi_data["shortlisted"] == 1  # only the latest verdict counts
+
+
 def test_kpis_sparklines_have_seven_points_per_metric(conn):
     _job(conn, "a")
     conn.commit()
@@ -220,12 +234,18 @@ def kpis(conn: sqlite3.Connection) -> dict:
     after_hard_filter = conn.execute(
         "SELECT COUNT(*) n FROM job j JOIN assessment a ON a.job_id = j.id"
         " WHERE date(j.discovered_at) = date('now')"
-        "   AND a.stage = 'scored'").fetchone()["n"]
+        "   AND a.stage = 'scored'"
+        "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id"
+        "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
+        ).fetchone()["n"]
 
     shortlisted = conn.execute(
         "SELECT COUNT(*) n FROM job j JOIN assessment a ON a.job_id = j.id"
         " WHERE date(j.discovered_at) = date('now') AND a.stage = 'scored'"
-        "   AND a.verdict IN ('submit','hold')").fetchone()["n"]
+        "   AND a.verdict IN ('submit','hold')"
+        "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id"
+        "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
+        ).fetchone()["n"]
 
     applied = conn.execute(
         "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
@@ -240,11 +260,15 @@ def kpis(conn: sqlite3.Connection) -> dict:
         "after_hard_filter": sparkline_points(sparkline_values(conn,
             "SELECT date(j.discovered_at) day, COUNT(*) n FROM job j"
             " JOIN assessment a ON a.job_id = j.id WHERE a.stage = 'scored'"
+            "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id"
+            "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
             "   AND j.discovered_at >= date('now', '-6 days') GROUP BY day")),
         "shortlisted": sparkline_points(sparkline_values(conn,
             "SELECT date(j.discovered_at) day, COUNT(*) n FROM job j"
             " JOIN assessment a ON a.job_id = j.id WHERE a.stage = 'scored'"
             "   AND a.verdict IN ('submit','hold')"
+            "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id"
+            "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
             "   AND j.discovered_at >= date('now', '-6 days') GROUP BY day")),
         "applied": sparkline_points(sparkline_values(conn,
             "SELECT date(submitted_at) day, COUNT(*) n FROM application"
@@ -358,6 +382,17 @@ def test_score_distribution_buckets(conn):
     assert dist["low"] == 25.0
 
 
+def test_score_distribution_does_not_double_count_a_rescored_job(conn):
+    j = _job(conn, "rescored")
+    _scored(conn, j, score=10)  # older pass
+    _scored(conn, j, score=90)  # rescored, newer — this is the one that counts
+    conn.commit()
+    dist = overview.score_distribution(conn)
+    assert dist["total"] == 1
+    assert dist["high"] == 100.0
+    assert dist["low"] == 0
+
+
 def test_score_distribution_excludes_hard_skips(conn):
     j = _job(conn, "hard-skip")
     _hard_skip(conn, j)
@@ -393,8 +428,11 @@ def outcome_summary(conn: sqlite3.Connection) -> dict:
 
 def score_distribution(conn: sqlite3.Connection) -> dict:
     rows = conn.execute(
-        "SELECT weighted_score FROM assessment WHERE stage = 'scored'"
-        "   AND weighted_score IS NOT NULL").fetchall()
+        "SELECT weighted_score FROM assessment a WHERE stage = 'scored'"
+        "   AND weighted_score IS NOT NULL"
+        "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = a.job_id"
+        "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
+        ).fetchall()
     total = len(rows)
     if total == 0:
         return {"total": 0, "high": 0, "good": 0, "fair": 0, "low": 0}
@@ -458,6 +496,20 @@ def test_source_performance_groups_by_source(conn):
     assert rows["naukri"]["pass_rate"] == 0.0
 
 
+def test_source_performance_does_not_shortlist_a_demoted_job(conn):
+    """COUNT(DISTINCT j.id) alone only prevents counting a rescored job
+    twice — it doesn't stop a stale older row from mis-attributing it to
+    the wrong bucket. A job demoted submit->skip must not still count as
+    shortlisted via its old row."""
+    j = _job(conn, "demoted", source="linkedin")
+    _scored(conn, j, score=90, verdict="submit")  # older pass
+    _scored(conn, j, score=20, verdict="skip")  # rescored, newer: demoted
+    conn.commit()
+    rows = {r["source"]: r for r in overview.source_performance(conn)}
+    assert rows["linkedin"]["discovered"] == 1
+    assert rows["linkedin"]["shortlist_rate"] == 0.0
+
+
 def test_source_performance_response_rate(conn):
     j = _job(conn, "li-2", source="linkedin")
     _scored(conn, j, verdict="submit")
@@ -487,6 +539,16 @@ def test_recent_discoveries_gate_labels(conn):
     assert by_id[j1] == "pass"
     assert by_id[j2] == "review"
     assert by_id[j3] == "fail"
+
+
+def test_recent_discoveries_does_not_duplicate_a_rescored_job(conn):
+    j = _job(conn, "rescored")
+    _scored(conn, j, score=40, verdict="skip")  # older pass
+    _scored(conn, j, score=90, verdict="submit")  # rescored, newer
+    conn.commit()
+    rows = [d for d in overview.recent_discoveries(conn) if d["id"] == j]
+    assert len(rows) == 1
+    assert rows[0]["verdict"] == "submit"  # the latest assessment, not the old one
 
 
 def test_recent_discoveries_respects_limit(conn):
@@ -547,6 +609,8 @@ def source_performance(conn: sqlite3.Connection) -> list[dict]:
         "             ('screen','interview','offer') THEN ap.id END) responded"
         "  FROM job j"
         "  LEFT JOIN assessment a ON a.job_id = j.id"
+        "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id"
+        "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
         "  LEFT JOIN application ap ON ap.job_id = j.id AND ap.status = 'submitted'"
         "  LEFT JOIN outcome o ON o.application_id = ap.id"
         " WHERE j.merged_into_job_id IS NULL"
@@ -571,6 +635,8 @@ def recent_discoveries(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
         "SELECT j.id, j.title, j.company, j.source, j.location, j.url,"
         "       a.stage, a.verdict, a.weighted_score"
         "  FROM job j LEFT JOIN assessment a ON a.job_id = j.id"
+        "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id"
+        "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
         " WHERE j.merged_into_job_id IS NULL"
         " ORDER BY j.discovered_at DESC LIMIT ?", (limit,)).fetchall()
     result = []
@@ -907,8 +973,13 @@ git commit -m "feat: add pipeline run-now endpoint and status fragment"
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/test_web.py` (add `from career_agent.web import overview` to
-the imports):
+First, delete the sibling plan's `test_root_redirects_to_applications`
+test from `tests/test_web.py` — it asserts `GET /` returns a 307, which
+this task makes permanently false (`/` now renders the real page). Leaving
+it in place would turn a correct removal into a spurious "regression."
+
+Then add to `tests/test_web.py` (add `from career_agent.web import
+overview` to the imports):
 
 ```python
 def test_root_renders_overview_not_a_redirect(client):
@@ -937,6 +1008,11 @@ def test_overview_ready_to_apply_cta_links_to_applications(client):
 def test_overview_embeds_pipeline_status_polling(client):
     r = client.get("/")
     assert 'hx-get="/pipeline/status"' in r.text
+    # must be innerHTML, not outerHTML — outerHTML replaces the polling
+    # element itself and htmx never re-fires the poll after that (this
+    # exact regression happened once already, in the sibling plan's
+    # /run/status poller)
+    assert 'hx-swap="innerHTML"' in r.text
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -987,8 +1063,12 @@ Create `src/career_agent/web/templates/overview.html`:
 <h1>Dashboard</h1>
 <p class="rationale">Your daily job discovery and application command center.</p>
 
-<div hx-get="/pipeline/status" hx-trigger="load, every 3s" hx-swap="outerHTML">
-  <div id="pipeline-status">Loading…</div>
+<!-- innerHTML, not outerHTML: the polling element must survive its own swap,
+     or htmx drops it from the DOM and the poll never fires again — this bit
+     the sibling plan's /run/status poller the same way before it was fixed. -->
+<div id="pipeline-status-poller" hx-get="/pipeline/status" hx-trigger="load, every 3s"
+     hx-swap="innerHTML">
+  {% include "_pipeline_status.html" %}
 </div>
 
 <div class="kpis">
