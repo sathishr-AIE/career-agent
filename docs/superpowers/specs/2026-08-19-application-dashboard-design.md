@@ -159,7 +159,7 @@ CREATE TABLE IF NOT EXISTS run_state (
 );
 -- seeded with two rows on init_schema: ('pipeline', 'idle', ...), ('apply', 'idle', ...)
 
-ALTER TABLE application ADD COLUMN priority INTEGER;  -- NULL = score order
+ALTER TABLE job ADD COLUMN priority INTEGER;  -- NULL = score order
 ```
 
 One table, keyed by `kind`, instead of two near-identical ones. The
@@ -168,8 +168,8 @@ worker's completion (below), a finished pipeline run goes back to `idle`
 plus an `event(type='pipeline_completed')` row rather than a distinct
 "completed" status, since the CHECK constraint's five values are shared
 across both kinds. `mode` and `current_job_id` stay `NULL` for the
-`pipeline` row — they're meaningless outside `apply`. `application.priority`
-and the `event` table are unchanged from Revision 1.
+`pipeline` row — they're meaningless outside `apply`. `job.priority` and
+the `event` table are unchanged from Revision 1.
 
 ## The pipeline runner (Overview page)
 
@@ -192,9 +192,12 @@ besides its control endpoints.
 **Loop**, while the `apply` row's `status == 'running'`:
 
 1. Pick the next queue candidate: `assessment.verdict IN ('submit','hold')`,
-   no terminal `application.status`, `job.merged_into_job_id IS NULL`,
-   ordered by `application.priority ASC NULLS LAST, assessment.weighted_score
-   DESC`. If none, set `status = 'idle'`, `current_job_id = NULL`, and log
+   no terminal `application.status` (none at all, or `failed`, which is
+   retryable), `job.merged_into_job_id IS NULL`, ordered by
+   `job.priority ASC NULLS LAST, assessment.weighted_score DESC` — priority
+   lives on `job`, not `application`, because most candidates have no
+   `application` row yet to attach it to. If none, set `status = 'idle'`,
+   `current_job_id = NULL`, and log
    `event(type='run_completed')` — "completed" is a terminal *result*, not
    a distinct control state; idle already means "nothing running," and
    this keeps the status enum exactly the five values in the CHECK
