@@ -134,7 +134,12 @@ async def apply_worker_loop(conn_factory, brief_path) -> None:
         conn = conn_factory()
         state = get_run_state(conn, "apply")
         if state["status"] == "running" and state["current_job_id"] is None:
-            await apply_tick(conn, brief_path)
+            try:
+                await apply_tick(conn, brief_path)
+            except Exception as exc:
+                set_run_state(conn, "apply", status="error", current_job_id=None,
+                              last_error=str(exc))
+                store.log(conn, None, "run_error", str(exc))
         else:
             await asyncio.sleep(1)
 

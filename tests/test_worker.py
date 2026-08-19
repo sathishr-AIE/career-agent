@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from career_agent import db, store
@@ -312,3 +314,36 @@ async def test_tick_errors_on_unhandled_submit_exception(conn, brief_path, monke
     assert state["status"] == "error"
     assert "browser crashed" in state["last_error"]
     assert state["current_job_id"] is None
+
+
+async def test_loop_marks_run_errored_on_exception_apply_tick_doesnt_catch(
+        conn, brief_path, monkeypatch):
+    """apply_tick only catches exceptions around its own submit() calls, so
+    anything else that raises (e.g. next_candidate's query blowing up) must
+    still be caught by the loop itself -- otherwise the fire-and-forget
+    background task dies silently and /run/status keeps claiming 'running'
+    forever with no last_error to explain why."""
+    _job(conn, "boom-loop")
+    worker.set_run_state(conn, "apply", status="running", mode="auto")
+
+    def boom(*a, **kw):
+        raise RuntimeError("candidate query exploded")
+
+    monkeypatch.setattr(worker, "next_candidate", boom)
+
+    task = asyncio.create_task(worker.apply_worker_loop(lambda: conn, brief_path))
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if worker.get_run_state(conn, "apply")["status"] == "error":
+            break
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass  # expected: cancel() is how the caller stops the loop
+
+    state = worker.get_run_state(conn, "apply")
+    assert state["status"] == "error"
+    assert "candidate query exploded" in state["last_error"]
+    types = {e["type"] for e in conn.execute("SELECT type FROM event")}
+    assert "run_error" in types
