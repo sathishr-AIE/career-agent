@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 from pathlib import Path
 
@@ -122,6 +123,20 @@ async def apply_tick(conn: sqlite3.Connection, brief_path) -> None:
         store.log(conn, job_id, "run_error", str(exc))
         return
     set_run_state(conn, "apply", current_job_id=None)
+
+
+async def apply_worker_loop(conn_factory, brief_path) -> None:
+    """Keeps the apply run advancing without anyone polling — the piece
+    that makes Start actually mean 'walk away'. conn_factory is a
+    zero-arg callable (web/app.py's _conn) so each iteration gets a
+    fresh connection, matching the rest of the app's per-call pattern."""
+    while True:
+        conn = conn_factory()
+        state = get_run_state(conn, "apply")
+        if state["status"] == "running" and state["current_job_id"] is None:
+            await apply_tick(conn, brief_path)
+        else:
+            await asyncio.sleep(1)
 
 
 def queue_count(conn: sqlite3.Connection) -> int:

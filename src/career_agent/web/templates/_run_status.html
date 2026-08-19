@@ -1,0 +1,52 @@
+{% set s = run_state %}
+<div id="run-status">
+  {% if s["status"] in ("idle", "stopped", "error") %}
+    <button class="btn primary" hx-post="/run/start"
+            hx-vals='{"mode": "{{ s["mode"] or "manual" }}"}'
+            hx-target="#run-status" hx-swap="outerHTML">▶ Start</button>
+  {% elif s["status"] == "running" %}
+    <button class="btn" hx-post="/run/pause"
+            hx-target="#run-status" hx-swap="outerHTML">⏸ Pause</button>
+    <button class="btn" hx-post="/run/stop"
+            hx-target="#run-status" hx-swap="outerHTML">⏹ Stop</button>
+  {% elif s["status"] == "paused" %}
+    <button class="btn primary" hx-post="/run/resume"
+            hx-target="#run-status" hx-swap="outerHTML">▶ Resume</button>
+    <button class="btn" hx-post="/run/stop"
+            hx-target="#run-status" hx-swap="outerHTML">⏹ Stop</button>
+  {% endif %}
+  <span class="pill status-{{ s["status"] }}">{{ s["status"] | capitalize }}</span>
+  {% if s["last_error"] %}
+    <span class="denied">{{ s["last_error"] }}</span>
+  {% endif %}
+
+  <div class="kpis">
+    <div class="card kpi"><h3>Total Applied</h3><div class="num">{{ stats.total_applied }}</div></div>
+    <div class="card kpi"><h3>Queued</h3><div class="num">{{ stats.queued }}</div></div>
+    <div class="card kpi"><h3>In Progress</h3><div class="num">{{ stats.in_progress }}</div></div>
+    <div class="card kpi"><h3>Successful</h3><div class="num">{{ stats.successful }}</div></div>
+    <div class="card kpi"><h3>Failed/Skipped</h3><div class="num">{{ stats.failed_skipped }}</div></div>
+  </div>
+
+  {% if current_job %}
+  <div class="card now-processing">
+    <b>{{ current_job["title"] }}</b> at {{ current_job["company"] }}
+    {% if s["mode"] == "manual" %}
+      <span class="rationale">Draft ready — review and send.</span>
+      <button class="btn" hx-post="/send/{{ current_job['job_id'] }}"
+              hx-target="#run-status" hx-swap="outerHTML">Send</button>
+      <button class="btn" hx-post="/queue/{{ current_job['job_id'] }}/skip"
+              hx-target="#run-status" hx-swap="outerHTML">Skip</button>
+    {% else %}
+      <span class="rationale">Applying…</span>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div class="activity-log">
+    {% for e in recent_events %}
+      <div class="log-line">{{ e["occurred_at"] }} — {{ e["type"] }}
+        {% if e["payload"] %}: {{ e["payload"] }}{% endif %}</div>
+    {% endfor %}
+  </div>
+</div>

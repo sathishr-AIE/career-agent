@@ -1,4 +1,6 @@
+import asyncio
 import subprocess
+from contextlib import asynccontextmanager
 from html import escape
 from pathlib import Path
 
@@ -13,7 +15,15 @@ from career_agent.web import worker
 DB_PATH = Path("data/career.db")
 BRIEF_PATH = Path("career_brief.toml")
 
-app = FastAPI(title="Career Agent")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(worker.apply_worker_loop(_conn, BRIEF_PATH))
+    yield
+    task.cancel()
+
+
+app = FastAPI(title="Career Agent", lifespan=lifespan)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 LIST_SQL = """
@@ -123,6 +133,41 @@ def dismiss(job_id: int):
     conn = _conn()
     store.log(conn, job_id, "human_dismissed")
     return HTMLResponse('<span class="done">Dismissed</span>')
+
+
+def _run_status_context(conn) -> dict:
+    state = worker.get_run_state(conn, "apply")
+    current_job = None
+    if state["current_job_id"]:
+        current_job = conn.execute(
+            "SELECT j.id AS job_id, j.company, j.title FROM job j"
+            " WHERE j.id = ?", (state["current_job_id"],)).fetchone()
+    stats = {
+        "total_applied": conn.execute(
+            "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
+        ).fetchone()["n"],
+        "queued": worker.queue_count(conn),
+        "in_progress": 1 if state["current_job_id"] else 0,
+        "successful": conn.execute(
+            "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
+        ).fetchone()["n"],
+        "failed_skipped": conn.execute(
+            "SELECT COUNT(*) n FROM application WHERE status = 'failed_permanent'"
+        ).fetchone()["n"],
+    }
+    recent_events = conn.execute(
+        "SELECT type, payload, occurred_at FROM event"
+        " ORDER BY id DESC LIMIT 10").fetchall()
+    return {"run_state": state, "current_job": current_job, "stats": stats,
+            "recent_events": recent_events}
+
+
+@app.get("/run/status", response_class=HTMLResponse)
+def run_status(request: Request):
+    conn = _conn()
+    return templates.TemplateResponse(
+        request=request, name="_run_status.html",
+        context=_run_status_context(conn))
 
 
 @app.post("/run/start")

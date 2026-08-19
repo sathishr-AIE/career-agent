@@ -317,3 +317,38 @@ def test_queue_priority_swaps_with_neighbor(client):
     p1 = conn.execute("SELECT priority FROM job WHERE id = 1").fetchone()["priority"]
     p2 = conn.execute("SELECT priority FROM job WHERE id = 2").fetchone()["priority"]
     assert p2 < p1
+
+
+def test_run_status_shows_idle_start_button(client):
+    r = client.get("/run/status")
+    assert r.status_code == 200
+    assert "Start" in r.text
+    assert 'hx-post="/run/start"' in r.text
+
+
+def test_run_status_shows_pause_button_and_current_job_when_running(client, monkeypatch):
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', 'draft')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    client.post("/run/start", data={"mode": "manual"})
+    r = client.get("/run/status")
+    assert "Pause" in r.text
+    assert "AI Engineer" in r.text  # current job's title, from the fixture
+
+
+def test_run_status_shows_stats(client, monkeypatch):
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', 'submitted')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "submitted"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    client.post("/run/start", data={"mode": "auto"})
+    r = client.get("/run/status")
+    assert r.status_code == 200
+    assert "Total Applied" in r.text
