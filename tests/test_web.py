@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from career_agent import db
 from career_agent.web import app as web
+from career_agent.web import pipeline
 from career_agent.web import worker
 
 
@@ -531,3 +532,46 @@ def test_run_status_shows_stats(client, monkeypatch):
     r = client.get("/run/status")
     assert r.status_code == 200
     assert "Total Applied" in r.text
+
+
+def test_pipeline_run_now_flips_status_and_logs_synchronously(client, monkeypatch):
+    async def never_finishes(args):
+        import asyncio
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(pipeline.run_module, "run_once", never_finishes)
+    r = client.post("/pipeline/run-now")
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "pipeline")["status"] == "running"
+    types = {e["type"] for e in conn.execute("SELECT type FROM event")}
+    assert "pipeline_started" in types
+
+
+def test_pipeline_run_now_refuses_a_second_concurrent_run(client, monkeypatch):
+    async def never_finishes(args):
+        import asyncio
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(pipeline.run_module, "run_once", never_finishes)
+    client.post("/pipeline/run-now")
+    r = client.post("/pipeline/run-now")
+    assert "already" in r.text.lower()
+
+
+def test_pipeline_status_shows_run_now_button_when_idle(client):
+    r = client.get("/pipeline/status")
+    assert r.status_code == 200
+    assert 'hx-post="/pipeline/run-now"' in r.text
+    assert "Run Now" in r.text
+
+
+def test_pipeline_status_shows_running_state(client, monkeypatch):
+    async def never_finishes(args):
+        import asyncio
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(pipeline.run_module, "run_once", never_finishes)
+    client.post("/pipeline/run-now")
+    r = client.get("/pipeline/status")
+    assert "Running" in r.text

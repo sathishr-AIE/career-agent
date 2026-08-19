@@ -11,7 +11,7 @@ from fastapi.templating import Jinja2Templates
 from career_agent import db, store
 from career_agent.apply import ats as ats_apply
 from career_agent.config import load_brief
-from career_agent.web import worker
+from career_agent.web import pipeline, worker
 
 DB_PATH = Path("data/career.db")
 BRIEF_PATH = Path("career_brief.toml")
@@ -241,6 +241,28 @@ def run_stop():
     worker.set_run_state(conn, "apply", status="stopped", current_job_id=None)
     store.log(conn, None, "run_stopped")
     return HTMLResponse("ok")
+
+
+@app.post("/pipeline/run-now")
+async def pipeline_run_now():
+    conn = _conn()
+    state = worker.get_run_state(conn, "pipeline")
+    if state["status"] not in ("idle", "error"):
+        return HTMLResponse(
+            '<span class="denied">A pipeline run is already in progress.</span>')
+    worker.set_run_state(conn, "pipeline", status="running", last_error=None)
+    store.log(conn, None, "pipeline_started")
+    asyncio.create_task(
+        pipeline.run_background(_conn, DB_PATH, BRIEF_PATH))
+    return HTMLResponse("ok")
+
+
+@app.get("/pipeline/status", response_class=HTMLResponse)
+def pipeline_status(request: Request):
+    conn = _conn()
+    return templates.TemplateResponse(
+        request=request, name="_pipeline_status.html",
+        context={"pipeline_state": worker.get_run_state(conn, "pipeline")})
 
 
 @app.post("/queue/{job_id}/skip")

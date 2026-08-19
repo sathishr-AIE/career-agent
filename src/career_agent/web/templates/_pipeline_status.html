@@ -1,0 +1,14 @@
+<div id="pipeline-status">
+  {% if pipeline_state["status"] in ("idle", "error") %}
+    <button class="btn primary" hx-post="/pipeline/run-now"
+            hx-target="#pipeline-status" hx-swap="outerHTML">▶ Run Now</button>
+  {% else %}
+    <button class="btn" disabled>◌ Running…</button>
+  {% endif %}
+  <span class="pill status-{{ pipeline_state["status"] }}">
+    {{ pipeline_state["status"] | capitalize }}</span>
+  <span class="run-meta">Last update: {{ pipeline_state["updated_at"] }}</span>
+  {% if pipeline_state["last_error"] %}
+    <span class="denied">{{ pipeline_state["last_error"] }}</span>
+  {% endif %}
+</div>
