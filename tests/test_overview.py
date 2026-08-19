@@ -231,3 +231,100 @@ def test_score_distribution_excludes_hard_skips(conn):
     _hard_skip(conn, j)
     conn.commit()
     assert overview.score_distribution(conn)["total"] == 0
+
+
+def test_source_performance_groups_by_source(conn):
+    j1 = _job(conn, "li-1", source="linkedin")
+    _scored(conn, j1, verdict="submit")
+    j2 = _job(conn, "nk-1", source="naukri")
+    _hard_skip(conn, j2)
+    conn.commit()
+    rows = {r["source"]: r for r in overview.source_performance(conn)}
+    assert rows["linkedin"]["discovered"] == 1
+    assert rows["linkedin"]["pass_rate"] == 100.0
+    assert rows["naukri"]["pass_rate"] == 0.0
+
+
+def test_source_performance_does_not_shortlist_a_demoted_job(conn):
+    """COUNT(DISTINCT j.id) alone only prevents counting a rescored job
+    twice — it doesn't stop a stale older row from mis-attributing it to
+    the wrong bucket. A job demoted submit->skip must not still count as
+    shortlisted via its old row."""
+    j = _job(conn, "demoted", source="linkedin")
+    _scored(conn, j, score=90, verdict="submit")  # older pass
+    _scored(conn, j, score=20, verdict="skip")  # rescored, newer: demoted
+    conn.commit()
+    rows = {r["source"]: r for r in overview.source_performance(conn)}
+    assert rows["linkedin"]["discovered"] == 1
+    assert rows["linkedin"]["shortlist_rate"] == 0.0
+
+
+def test_source_performance_response_rate(conn):
+    j = _job(conn, "li-2", source="linkedin")
+    _scored(conn, j, verdict="submit")
+    app_id = conn.execute(
+        "INSERT INTO application (job_id, resume_version, status,"
+        " submitted_at) VALUES (?, 'v1', 'submitted', datetime('now'))",
+        (j,)).lastrowid
+    conn.execute("INSERT INTO outcome (application_id, type)"
+                 " VALUES (?, 'screen')", (app_id,))
+    conn.commit()
+    rows = {r["source"]: r for r in overview.source_performance(conn)}
+    assert rows["linkedin"]["applied"] == 1
+    assert rows["linkedin"]["response_rate"] == 100.0
+
+
+def test_recent_discoveries_gate_labels(conn):
+    j1 = _job(conn, "passed")
+    _scored(conn, j1, verdict="submit")
+    j2 = _job(conn, "reviewed")
+    _scored(conn, j2, verdict="skip")
+    j3 = _job(conn, "failed")
+    _hard_skip(conn, j3)
+    conn.commit()
+    gates = {d["title"] + d["source"] + str(d["id"]): d["gate"]
+             for d in overview.recent_discoveries(conn)}
+    by_id = {d["id"]: d["gate"] for d in overview.recent_discoveries(conn)}
+    assert by_id[j1] == "pass"
+    assert by_id[j2] == "review"
+    assert by_id[j3] == "fail"
+
+
+def test_recent_discoveries_does_not_duplicate_a_rescored_job(conn):
+    j = _job(conn, "rescored")
+    _scored(conn, j, score=40, verdict="skip")  # older pass
+    _scored(conn, j, score=90, verdict="submit")  # rescored, newer
+    conn.commit()
+    rows = [d for d in overview.recent_discoveries(conn) if d["id"] == j]
+    assert len(rows) == 1
+    assert rows[0]["verdict"] == "submit"  # the latest assessment, not the old one
+
+
+def test_recent_discoveries_respects_limit(conn):
+    for i in range(15):
+        _job(conn, f"j{i}")
+    conn.commit()
+    assert len(overview.recent_discoveries(conn, limit=5)) == 5
+
+
+def test_recent_outcomes_labels_applied_when_no_outcome_yet(conn):
+    j = _job(conn, "just-applied")
+    conn.execute("INSERT INTO application (job_id, resume_version, status,"
+                 " submitted_at) VALUES (?, 'v1', 'submitted', datetime('now'))",
+                 (j,))
+    conn.commit()
+    outcomes_list = overview.recent_outcomes(conn)
+    assert outcomes_list[0]["label"] == "Applied"
+
+
+def test_recent_outcomes_labels_interview(conn):
+    j = _job(conn, "interviewing")
+    app_id = conn.execute(
+        "INSERT INTO application (job_id, resume_version, status,"
+        " submitted_at) VALUES (?, 'v1', 'submitted', datetime('now'))",
+        (j,)).lastrowid
+    conn.execute("INSERT INTO outcome (application_id, type)"
+                 " VALUES (?, 'interview')", (app_id,))
+    conn.commit()
+    outcomes_list = overview.recent_outcomes(conn)
+    assert outcomes_list[0]["label"] == "Interview"

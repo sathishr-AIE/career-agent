@@ -141,3 +141,80 @@ def score_distribution(conn: sqlite3.Connection) -> dict:
             buckets["low"] += 1
     return {"total": total,
             **{k: round(100 * v / total, 1) for k, v in buckets.items()}}
+
+
+def source_performance(conn: sqlite3.Connection) -> list[dict]:
+    # ponytail: response rate here treats "any callback-type outcome row
+    # exists" as a response, skipping the derived-vs-manual tie-break
+    # outcomes.effective_outcome() applies. Fine for a per-source
+    # aggregate; upgrade to effective_outcome() per application if this
+    # ever needs to match outcome_summary()'s numbers exactly.
+    rows = conn.execute(
+        "SELECT j.source,"
+        "       COUNT(DISTINCT j.id) discovered,"
+        "       COUNT(DISTINCT CASE WHEN a.stage='scored' THEN j.id END)"
+        "         after_hard_filter,"
+        "       COUNT(DISTINCT CASE WHEN a.stage='scored' AND a.verdict IN"
+        "             ('submit','hold') THEN j.id END) shortlisted,"
+        "       COUNT(DISTINCT ap.id) applied,"
+        "       COUNT(DISTINCT CASE WHEN o.type IN"
+        "             ('screen','interview','offer') THEN ap.id END) responded"
+        "  FROM job j"
+        "  LEFT JOIN assessment a ON a.job_id = j.id"
+        "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id"
+        "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
+        "  LEFT JOIN application ap ON ap.job_id = j.id AND ap.status = 'submitted'"
+        "  LEFT JOIN outcome o ON o.application_id = ap.id"
+        " WHERE j.merged_into_job_id IS NULL"
+        " GROUP BY j.source"
+        " ORDER BY discovered DESC").fetchall()
+    result = []
+    for r in rows:
+        pass_rate = (round(100 * r["after_hard_filter"] / r["discovered"], 1)
+                     if r["discovered"] else 0.0)
+        shortlist_rate = (round(100 * r["shortlisted"] / r["after_hard_filter"], 1)
+                          if r["after_hard_filter"] else 0.0)
+        response_rate = (round(100 * r["responded"] / r["applied"], 1)
+                         if r["applied"] else 0.0)
+        result.append({"source": r["source"], "discovered": r["discovered"],
+                        "pass_rate": pass_rate, "shortlist_rate": shortlist_rate,
+                        "applied": r["applied"], "response_rate": response_rate})
+    return result
+
+
+def recent_discoveries(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
+    rows = conn.execute(
+        "SELECT j.id, j.title, j.company, j.source, j.location, j.url,"
+        "       a.stage, a.verdict, a.weighted_score"
+        "  FROM job j LEFT JOIN assessment a ON a.job_id = j.id"
+        "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id"
+        "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
+        " WHERE j.merged_into_job_id IS NULL"
+        " ORDER BY j.discovered_at DESC LIMIT ?", (limit,)).fetchall()
+    result = []
+    for r in rows:
+        if r["stage"] == "hard":
+            gate = "fail"
+        elif r["stage"] == "scored" and r["verdict"] == "skip":
+            gate = "review"
+        elif r["stage"] == "scored":
+            gate = "pass"
+        else:
+            gate = "pending"
+        result.append({**dict(r), "gate": gate})
+    return result
+
+
+def recent_outcomes(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
+    rows = conn.execute(
+        "SELECT ap.id AS application_id, j.title, j.company, ap.submitted_at"
+        "  FROM application ap JOIN job j ON j.id = ap.job_id"
+        " WHERE ap.status = 'submitted'"
+        " ORDER BY ap.submitted_at DESC LIMIT ?", (limit,)).fetchall()
+    result = []
+    for r in rows:
+        effective = outcomes.effective_outcome(conn, r["application_id"])
+        label = CALLBACK_LABELS.get(effective, "Applied")
+        result.append({"title": r["title"], "company": r["company"],
+                        "label": label, "submitted_at": r["submitted_at"]})
+    return result
