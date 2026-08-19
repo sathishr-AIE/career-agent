@@ -1,3 +1,5 @@
+import datetime as dt
+
 import pytest
 
 from career_agent import db
@@ -103,6 +105,31 @@ def test_kpis_sparklines_have_seven_points_per_metric(conn):
                            "applied", "responses"}
     for points in sparks.values():
         assert len(points.split()) == 7
+
+
+def test_sparkline_values_anchors_to_utc_today_not_host_local_clock(conn, monkeypatch):
+    """sparkline_values must agree with the SQL it's paired with, which
+    always buckets by SQLite's date('now') -- UTC. Simulates the window
+    (e.g. ~05:30-11:00 IST in Chennai, UTC+5:30) where a host's local
+    calendar day is still behind UTC's, by making the two clocks disagree
+    on purpose: if the function read the local clock, this would bucket
+    under 2026-01-01 and the assertion would fail."""
+    class _FixedLocalDate(dt.date):
+        @classmethod
+        def today(cls):
+            return dt.date(2026, 1, 1)
+
+    class _FixedUTCDatetime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 1, 2, 1, 0, tzinfo=tz)
+
+    monkeypatch.setattr(overview.dt, "date", _FixedLocalDate)
+    monkeypatch.setattr(overview.dt, "datetime", _FixedUTCDatetime)
+
+    values = overview.sparkline_values(conn, "SELECT '2026-01-02' day, 5 n")
+
+    assert values[-1] == 5  # bucketed under UTC's 2026-01-02, not local's 01-01
 
 
 def test_sparkline_points_flat_line_when_all_zero():

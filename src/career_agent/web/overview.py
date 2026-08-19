@@ -16,7 +16,11 @@ def sparkline_values(conn: sqlite3.Connection, count_sql: str) -> list[int]:
     """count_sql must SELECT (day, n) grouped by an ISO date `day` column,
     covering at least the last 7 days. Zero-filled for days with no rows."""
     counts = _daily_counts(conn, count_sql)
-    today = dt.date.today()
+    # SQLite's date('now') (used by every count_sql caller passes) is UTC.
+    # dt.date.today() is the host's local calendar day, which disagrees with
+    # UTC for part of every day off-UTC (e.g. Chennai, UTC+5:30, roughly
+    # 05:30-11:00 IST) -- misaligning the "today" bucket against the SQL.
+    today = dt.datetime.now(dt.timezone.utc).date()
     return [counts.get(str(today - dt.timedelta(days=i)), 0)
             for i in range(6, -1, -1)]
 
