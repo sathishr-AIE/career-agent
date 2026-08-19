@@ -87,7 +87,10 @@ def applications(request: Request, show: str = "queue"):
                  "show": show, "scheduled": scheduled_task_installed(),
                  "active_nav": "applications", "brief": brief,
                  "daily_cap": brief.daily_cap,
-                 "today_submitted": today_submitted})
+                 "today_submitted": today_submitted,
+                 # first paint of the polled fragment, so the page ships the
+                 # real status (and the mode toggle) instead of "Loading…"
+                 **_run_status_context(conn)})
 
 
 async def _do_apply(job_id: int, allow_skip: bool, event: str | None):
@@ -142,6 +145,10 @@ async def send(job_id: int):
         return HTMLResponse(f'<span class="denied">{escape(str(exc))}</span>')
     if not result["ok"]:
         return HTMLResponse(f'<span class="denied">{escape(result["reason"])}</span>')
+    # the run was parked on this draft awaiting review; unpark it, or the
+    # worker loop returns early forever and the run never advances
+    if worker.get_run_state(conn, "apply")["current_job_id"] == job_id:
+        worker.set_run_state(conn, "apply", current_job_id=None)
     return HTMLResponse('<span class="done">Sent</span>')
 
 
@@ -159,18 +166,29 @@ def _run_status_context(conn) -> dict:
         current_job = conn.execute(
             "SELECT j.id AS job_id, j.company, j.title FROM job j"
             " WHERE j.id = ?", (state["current_job_id"],)).fetchone()
+    submitted = conn.execute(
+        "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
+    ).fetchone()["n"]
+    failed = conn.execute(
+        "SELECT COUNT(*) n FROM application WHERE status = 'failed_permanent'"
+    ).fetchone()["n"]
+    # jobs the gate skipped and nobody overrode (an override would have left
+    # an application row behind), counted once via the latest assessment
+    gate_skipped = conn.execute(
+        "SELECT COUNT(*) n FROM job j JOIN assessment a ON a.job_id = j.id"
+        " WHERE j.merged_into_job_id IS NULL AND a.verdict = 'skip'"
+        "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id"
+        "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
+        "   AND NOT EXISTS (SELECT 1 FROM event e WHERE e.job_id = j.id"
+        "                     AND e.type = 'human_override')"
+        "   AND NOT EXISTS (SELECT 1 FROM application ap WHERE ap.job_id = j.id)"
+    ).fetchone()["n"]
     stats = {
-        "total_applied": conn.execute(
-            "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
-        ).fetchone()["n"],
+        "total_applied": submitted,
         "queued": worker.queue_count(conn),
         "in_progress": 1 if state["current_job_id"] else 0,
-        "successful": conn.execute(
-            "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
-        ).fetchone()["n"],
-        "failed_skipped": conn.execute(
-            "SELECT COUNT(*) n FROM application WHERE status = 'failed_permanent'"
-        ).fetchone()["n"],
+        "successful": submitted,
+        "failed_skipped": failed + gate_skipped,
     }
     recent_events = conn.execute(
         "SELECT type, payload, occurred_at FROM event"
@@ -190,7 +208,8 @@ def run_status(request: Request):
 @app.post("/run/start")
 async def run_start(mode: str = Form(...)):
     conn = _conn()
-    worker.set_run_state(conn, "apply", status="running", mode=mode)
+    worker.set_run_state(conn, "apply", status="running", mode=mode,
+                         last_error=None)
     conn.execute("UPDATE run_state SET started_at = datetime('now')"
                  " WHERE kind = 'apply'")
     conn.commit()
@@ -261,8 +280,10 @@ def queue_retry(job_id: int):
 def queue_priority(job_id: int, direction: str = Form(...)):
     conn = _conn()
     order = conn.execute(
-        "SELECT id, priority FROM job WHERE merged_into_job_id IS NULL"
-        " ORDER BY priority ASC NULLS LAST, id ASC").fetchall()
+        "SELECT j.id AS id, j.priority AS priority FROM job j"
+        " JOIN assessment a ON a.job_id = j.id"
+        f" WHERE {worker.QUEUE_WHERE}"
+        " ORDER BY j.priority ASC NULLS LAST, j.id ASC").fetchall()
     ids = [r["id"] for r in order]
     if job_id not in ids:
         return HTMLResponse('<span class="denied">Not in the queue.</span>')

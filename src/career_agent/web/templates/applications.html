@@ -2,8 +2,23 @@
 {% block content %}
 <h1>Applications</h1>
 
-<div hx-get="/run/status" hx-trigger="load, every 2s" hx-swap="outerHTML">
-  <div id="run-status">Loading…</div>
+<!-- Outside the polled fragment on purpose: a 2s swap would wipe the user's
+     selection between picking Auto and clicking Start. Start pulls it in via
+     hx-include; the poll only flips it disabled/enabled (see the script). -->
+<span class="mode-toggle">
+  <label><input type="radio" name="mode" value="manual"
+                {% if run_state["status"] == "running" %}disabled{% endif %}
+                {% if run_state["mode"] != "auto" %}checked{% endif %}> Manual</label>
+  <label><input type="radio" name="mode" value="auto"
+                {% if run_state["status"] == "running" %}disabled{% endif %}
+                {% if run_state["mode"] == "auto" %}checked{% endif %}> Auto</label>
+</span>
+
+<!-- innerHTML, not outerHTML: the polling element must survive its own swap,
+     or htmx drops it from the DOM and the poll never fires again. -->
+<div id="run-status-poller" hx-get="/run/status" hx-trigger="load, every 2s"
+     hx-swap="innerHTML">
+  {% include "_run_status.html" %}
 </div>
 
 {% if not scheduled %}
@@ -21,7 +36,9 @@
 </div>
 
 <div id="tab-queue" class="tab-panel active">
-  {% set queue_rows = jobs | selectattr("verdict", "in", ["submit", "hold"]) | rejectattr("terminal_status") | list %}
+  {# same set the worker queues and /queue/../priority reorders: a drafted #}
+  {# job is in progress, not queued -- it shows in the status card instead #}
+  {% set queue_rows = jobs | selectattr("verdict", "in", ["submit", "hold"]) | rejectattr("terminal_status") | rejectattr("has_draft") | list %}
   {% if not queue_rows %}
   <p class="rationale">Nothing to apply to — run discovery, or check Skipped.</p>
   {% else %}
@@ -105,14 +122,24 @@ function showTab(name) {
   event.target.classList.add('active');
 }
 
+// Read the log out of the DOM rather than off evt.target: after the swap
+// switched to innerHTML the settle event fires on the poller wrapper, and
+// the control buttons settle on it too (they replace #run-status with "ok").
+// Missing log = not a status render, so leave the count alone.
 let lastEventCount = null;
 document.body.addEventListener('htmx:afterSettle', function(evt) {
-  if (evt.target.id !== 'run-status') return;
-  const lines = evt.target.querySelectorAll('.log-line').length;
+  const log = document.querySelector('#run-status-poller .activity-log');
+  if (!log) return;
+
+  // mode can't change mid-run
+  const running = !!document.querySelector('#run-status-poller .status-running');
+  document.querySelectorAll('.mode-toggle input').forEach(i => i.disabled = running);
+
+  const lines = log.querySelectorAll('.log-line').length;
   if (lastEventCount !== null && lines > lastEventCount) {
     const toast = document.createElement('div');
     toast.className = 'toast';
-    toast.textContent = evt.target.querySelector('.log-line').textContent;
+    toast.textContent = log.querySelector('.log-line').textContent;
     document.getElementById('toasts').appendChild(toast);
     setTimeout(() => toast.remove(), 5000);
   }

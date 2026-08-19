@@ -141,6 +141,9 @@ def test_index_offers_send_once_a_draft_exists(client):
     r = client.get("/applications")
     assert '/send/1' in r.text
     assert '/apply/1' not in r.text
+    # and it leaves the Queue tab: a drafted job is in progress, not queued
+    queue_html = r.text.split('id="tab-queue"')[1].split('id="tab-all"')[0]
+    assert "AI Engineer" not in queue_html
 
 
 def test_index_shows_held_unknown_and_hides_apply_button(client):
@@ -319,6 +322,7 @@ def test_queue_retry_on_a_failed_job_bumps_priority_to_front(client):
 
 def test_queue_priority_swaps_with_neighbor(client):
     conn = db.connect(web.DB_PATH)
+    conn.execute("UPDATE assessment SET verdict = 'submit' WHERE job_id = 2")
     conn.execute("UPDATE job SET priority = 0 WHERE id = 1")
     conn.execute("UPDATE job SET priority = 1 WHERE id = 2")
     conn.commit()
@@ -328,6 +332,109 @@ def test_queue_priority_swaps_with_neighbor(client):
     p1 = conn.execute("SELECT priority FROM job WHERE id = 1").fetchone()["priority"]
     p2 = conn.execute("SELECT priority FROM job WHERE id = 2").fetchone()["priority"]
     assert p2 < p1
+
+
+def test_queue_priority_ignores_jobs_that_are_not_in_the_queue(client):
+    """Job 2's verdict is 'skip', so it isn't in the Queue tab at all.
+    Nudging job 1 down must be a no-op rather than a silent swap against a
+    row the user cannot see -- which is what made the buttons look dead."""
+    conn = db.connect(web.DB_PATH)
+    conn.execute("UPDATE job SET priority = 0 WHERE id = 1")
+    conn.execute("UPDATE job SET priority = 1 WHERE id = 2")
+    conn.commit()
+    r = client.post("/queue/1/priority", data={"direction": "down"})
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    p1 = conn.execute("SELECT priority FROM job WHERE id = 1").fetchone()["priority"]
+    p2 = conn.execute("SELECT priority FROM job WHERE id = 2").fetchone()["priority"]
+    assert p1 < p2  # unchanged: the skipped job was never a neighbor
+
+
+def test_queue_priority_refuses_a_job_that_is_not_a_candidate(client):
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'v1', 'draft')")
+    conn.commit()
+    r = client.post("/queue/1/priority", data={"direction": "up"})
+    assert "not in the queue" in r.text.lower()
+
+
+def test_send_clears_the_run_state_so_the_worker_can_advance(client, monkeypatch):
+    """Manual mode parks the run on a draft. If /send doesn't release
+    current_job_id, apply_tick returns early forever and the run is dead."""
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        status = "draft" if dry_run else "submitted"
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', ?)", (job_id, status))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": status}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    client.post("/run/start", data={"mode": "manual"})
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["current_job_id"] == 1
+
+    r = client.post("/send/1")
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["current_job_id"] is None
+
+
+def test_run_start_clears_a_stale_last_error(client, monkeypatch):
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', 'draft')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    conn = db.connect(web.DB_PATH)
+    worker.set_run_state(conn, "apply", status="error",
+                         last_error="browser crashed")
+    client.post("/run/start", data={"mode": "manual"})
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["last_error"] is None
+
+
+def _mode_toggle(html: str) -> str:
+    return html.split('class="mode-toggle"')[1].split("</span>")[0]
+
+
+def test_applications_page_offers_a_mode_toggle(client):
+    toggle = _mode_toggle(client.get("/applications").text)
+    assert 'name="mode"' in toggle
+    assert 'value="auto"' in toggle
+    assert 'value="manual"' in toggle
+    # and Start sends whatever the toggle holds
+    assert "hx-include=\"[name='mode']\"" in client.get("/run/status").text
+
+
+def test_mode_toggle_is_disabled_while_a_run_is_running(client, monkeypatch):
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', 'draft')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    assert "disabled" not in _mode_toggle(client.get("/applications").text)
+    client.post("/run/start", data={"mode": "manual"})
+    assert "disabled" in _mode_toggle(client.get("/applications").text)
+
+
+@pytest.mark.parametrize("mode", ["auto", "manual"])
+def test_run_start_records_the_mode_it_was_given(client, monkeypatch, mode):
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        status = "draft" if dry_run else "submitted"
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', ?)", (job_id, status))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": status}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    client.post("/run/start", data={"mode": mode})
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["mode"] == mode
 
 
 def test_run_status_shows_idle_start_button(client):
@@ -367,6 +474,26 @@ def test_applications_page_embeds_run_status_polling(client):
 def test_applications_page_shows_career_brief_panel(client):
     r = client.get("/applications")
     assert "Career Brief" in r.text
+
+
+def test_failed_skipped_counts_gate_skips_until_they_are_overridden(client, monkeypatch):
+    """Job 2 is a skip nobody acted on -- 'Failed/Skipped' should say so
+    instead of reporting 0 until an application actually fails."""
+    conn = db.connect(web.DB_PATH)
+    stats = web._run_status_context(conn)["stats"]
+    assert stats["failed_skipped"] == 1
+    assert stats["total_applied"] == stats["successful"] == 0
+
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', 'draft')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    client.post("/override/2")
+    conn = db.connect(web.DB_PATH)
+    assert web._run_status_context(conn)["stats"]["failed_skipped"] == 0
 
 
 def test_run_status_shows_stats(client, monkeypatch):

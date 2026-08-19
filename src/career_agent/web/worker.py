@@ -6,11 +6,11 @@ from career_agent import store
 from career_agent.apply import ats as ats_apply
 from career_agent.config import load_brief
 
-CANDIDATE_SQL = """
-SELECT j.id AS job_id, j.company, j.title, a.weighted_score
-  FROM job j
-  JOIN assessment a ON a.job_id = j.id
- WHERE j.merged_into_job_id IS NULL
+# The one definition of "is this job in the apply queue". Anything that
+# counts, picks, or reorders the queue joins job j + assessment a and uses
+# this predicate, so the three can't drift apart.
+QUEUE_WHERE = """
+   j.merged_into_job_id IS NULL
    AND a.verdict IN ('submit','hold')
    AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id
                ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)
@@ -18,8 +18,15 @@ SELECT j.id AS job_id, j.company, j.title, a.weighted_score
        SELECT 1 FROM application ap
         WHERE ap.job_id = j.id
           AND ap.status IN ('in_flight','submitted','held_unknown',
-                             'failed_permanent')
+                             'failed_permanent','draft')
    )
+"""
+
+CANDIDATE_SQL = f"""
+SELECT j.id AS job_id, j.company, j.title, a.weighted_score
+  FROM job j
+  JOIN assessment a ON a.job_id = j.id
+ WHERE {QUEUE_WHERE}
  ORDER BY j.priority ASC NULLS LAST, a.weighted_score DESC
  LIMIT 1
 """
@@ -31,6 +38,8 @@ def get_run_state(conn: sqlite3.Connection, kind: str) -> sqlite3.Row:
 
 
 def set_run_state(conn: sqlite3.Connection, kind: str, **fields) -> None:
+    if not fields:
+        return  # nothing to set; an empty SET clause is invalid SQL
     cols = ", ".join(f"{k} = ?" for k in fields)
     conn.execute(
         f"UPDATE run_state SET {cols}, updated_at = datetime('now')"
@@ -116,12 +125,15 @@ async def apply_tick(conn: sqlite3.Connection, brief_path) -> None:
         return  # stays 'running' with current_job_id set: awaiting review
 
     try:
-        await ats_apply.submit(conn, job_id, dry_run=False)
+        result = await ats_apply.submit(conn, job_id, dry_run=False)
     except Exception as exc:
         set_run_state(conn, "apply", status="error", current_job_id=None,
                       last_error=str(exc))
         store.log(conn, job_id, "run_error", str(exc))
         return
+    if not result["ok"]:
+        # captcha hold / permanent failure: reported, not raised
+        store.log(conn, job_id, "job_skipped", result.get("reason", ""))
     set_run_state(conn, "apply", current_job_id=None)
 
 
@@ -140,6 +152,9 @@ async def apply_worker_loop(conn_factory, brief_path) -> None:
                 set_run_state(conn, "apply", status="error", current_job_id=None,
                               last_error=str(exc))
                 store.log(conn, None, "run_error", str(exc))
+            # a tick can return without awaiting anything (e.g. a guard
+            # denial), so yield here rather than spinning the event loop
+            await asyncio.sleep(0.1)
         else:
             await asyncio.sleep(1)
 
@@ -147,12 +162,4 @@ async def apply_worker_loop(conn_factory, brief_path) -> None:
 def queue_count(conn: sqlite3.Connection) -> int:
     return conn.execute(
         "SELECT COUNT(*) n FROM job j JOIN assessment a ON a.job_id = j.id"
-        " WHERE j.merged_into_job_id IS NULL"
-        "   AND a.verdict IN ('submit','hold')"
-        "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id"
-        "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
-        "   AND NOT EXISTS (SELECT 1 FROM application ap"
-        "                    WHERE ap.job_id = j.id"
-        "                      AND ap.status IN ('in_flight','submitted',"
-        "                                        'held_unknown','failed_permanent'))"
-    ).fetchone()["n"]
+        f" WHERE {QUEUE_WHERE}").fetchone()["n"]

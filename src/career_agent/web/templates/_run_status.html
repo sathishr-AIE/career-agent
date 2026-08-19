@@ -2,7 +2,7 @@
 <div id="run-status">
   {% if s["status"] in ("idle", "stopped", "error") %}
     <button class="btn primary" hx-post="/run/start"
-            hx-vals='{"mode": "{{ s["mode"] or "manual" }}"}'
+            hx-include="[name='mode']"
             hx-target="#run-status" hx-swap="outerHTML">▶ Start</button>
   {% elif s["status"] == "running" %}
     <button class="btn" hx-post="/run/pause"

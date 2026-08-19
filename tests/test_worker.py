@@ -53,6 +53,11 @@ def test_set_run_state_updates_given_fields_only(conn):
     assert worker.get_run_state(conn, "pipeline")["status"] == "idle"
 
 
+def test_set_run_state_with_no_fields_is_a_noop(conn):
+    worker.set_run_state(conn, "apply")  # would be "SET , updated_at = ..."
+    assert worker.get_run_state(conn, "apply")["status"] == "idle"
+
+
 def test_next_candidate_orders_by_score_when_no_priority(conn):
     _job(conn, "low", score=50)
     high = _job(conn, "high", score=90)
@@ -76,6 +81,17 @@ def test_next_candidate_excludes_jobs_with_a_live_application(conn):
                  " VALUES (?, 'v1', 'submitted')", (job_id,))
     conn.commit()
     assert worker.next_candidate(conn) is None
+
+
+def test_next_candidate_excludes_jobs_with_a_pending_draft(conn):
+    """A drafted job is already in flight from the queue's point of view --
+    otherwise the background loop re-picks it a second after it was skipped."""
+    job_id = _job(conn, "drafted")
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (?, 'v1', 'draft')", (job_id,))
+    conn.commit()
+    assert worker.next_candidate(conn) is None
+    assert worker.queue_count(conn) == 0
 
 
 def test_next_candidate_includes_a_failed_job(conn):
@@ -217,6 +233,33 @@ async def test_tick_auto_mode_drafts_and_sends(conn, brief_path, monkeypatch):
 
     assert calls == [True, False]
     assert worker.get_run_state(conn, "apply")["current_job_id"] is None
+
+
+async def test_tick_auto_mode_skips_when_the_real_send_reports_not_ok(
+        conn, brief_path, monkeypatch):
+    """A captcha hold or permanent failure comes back as ok=False, not as an
+    exception -- treating that as success would leave the run claiming it
+    applied and, worse, silently move on with no job_skipped record."""
+    job_id = _job(conn, "captcha")
+    worker.set_run_state(conn, "apply", status="running", mode="auto")
+
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        if dry_run:
+            conn.execute("INSERT INTO application (job_id, resume_version,"
+                         " status) VALUES (?, 'v1', 'draft')", (job_id,))
+            conn.commit()
+            return {"ok": True, "job_id": job_id, "status": "draft"}
+        return {"ok": False, "reason": "captcha held the submission"}
+
+    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
+    await worker.apply_tick(conn, brief_path)
+
+    state = worker.get_run_state(conn, "apply")
+    assert state["status"] == "running"
+    assert state["current_job_id"] is None
+    skips = conn.execute(
+        "SELECT payload FROM event WHERE type = 'job_skipped'").fetchall()
+    assert [s["payload"] for s in skips] == ["captcha held the submission"]
 
 
 async def test_tick_manual_mode_stops_after_draft(conn, brief_path, monkeypatch):

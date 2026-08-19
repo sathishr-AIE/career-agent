@@ -43,6 +43,10 @@
   .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:14px 0}
   .kpi h3{font-size:11px;margin:0 0 6px;color:var(--muted)}
   .kpi .num{font-size:24px;font-weight:800}
+  .mode-toggle{display:inline-flex;gap:10px;margin-right:10px;font-size:12px;
+               font-weight:700;color:#455}
+  .mode-toggle label{display:inline-flex;align-items:center;gap:4px;cursor:pointer}
+  .mode-toggle label:has(input:disabled){cursor:not-allowed;opacity:.5}
   .now-processing{margin:10px 0}
   .activity-log{max-height:260px;overflow:auto;margin-top:14px;font-size:11px;color:#555}
   .log-line{padding:4px 0;border-bottom:1px solid var(--line)}
