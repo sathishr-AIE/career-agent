@@ -1,4 +1,7 @@
 import sqlite3
+from pathlib import Path
+
+from career_agent.config import load_brief
 
 CANDIDATE_SQL = """
 SELECT j.id AS job_id, j.company, j.title, a.weighted_score
@@ -34,6 +37,32 @@ def set_run_state(conn: sqlite3.Connection, kind: str, **fields) -> None:
 
 def next_candidate(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return conn.execute(CANDIDATE_SQL).fetchone()
+
+
+def guard(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
+          brief_path: Path) -> str | None:
+    """Dashboard-side guardrail. The partial unique index is the real
+    guarantee; this exists to produce a readable message."""
+    a = conn.execute("SELECT verdict FROM assessment WHERE job_id = ?"
+                     " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+    if a is None:
+        return "This job has not been scored yet."
+    if a["verdict"] == "skip" and not allow_skip:
+        return "The gate skipped this one. Use Apply anyway to override."
+
+    brief = load_brief(brief_path)
+    used = conn.execute(
+        "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
+        " AND date(submitted_at) = date('now')").fetchone()["n"]
+    if used >= brief.daily_cap:
+        return f"Daily cap of {brief.daily_cap} reached."
+
+    paused = conn.execute(
+        "SELECT payload FROM event WHERE type='pause'"
+        " ORDER BY id DESC LIMIT 1").fetchone()
+    if paused and paused["payload"] == "on":
+        return "The agent is paused."
+    return None
 
 
 def queue_count(conn: sqlite3.Connection) -> int:

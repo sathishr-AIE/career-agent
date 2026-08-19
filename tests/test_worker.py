@@ -123,6 +123,29 @@ def test_next_candidate_respects_latest_assessment_verdict(conn):
     assert worker.queue_count(conn) == 0
 
 
+def test_guard_blocks_a_skip_without_override(conn, tmp_path):
+    job_id = _job(conn, "skip-me", verdict="skip")
+    brief_path = tmp_path / "career_brief.toml"
+    brief_path.write_text(
+        'target_titles = ["AI Engineer"]\n'
+        'search_locations = ["Chennai"]\n'
+        'daily_cap = 5\n')
+    denial = worker.guard(conn, job_id, allow_skip=False, brief_path=brief_path)
+    assert denial is not None
+    assert "override" in denial.lower()
+
+
+def test_guard_allows_a_skip_with_override(conn, tmp_path):
+    job_id = _job(conn, "skip-me-2", verdict="skip")
+    brief_path = tmp_path / "career_brief.toml"
+    brief_path.write_text(
+        'target_titles = ["AI Engineer"]\n'
+        'search_locations = ["Chennai"]\n'
+        'daily_cap = 5\n')
+    assert worker.guard(conn, job_id, allow_skip=True,
+                         brief_path=brief_path) is None
+
+
 def test_queue_count_respects_latest_assessment_verdict(conn):
     """queue_count should also only consider latest assessment per job."""
     job_id = conn.execute(

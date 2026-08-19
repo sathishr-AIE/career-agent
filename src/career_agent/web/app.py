@@ -8,7 +8,7 @@ from fastapi.templating import Jinja2Templates
 
 from career_agent import db, store
 from career_agent.apply import ats as ats_apply
-from career_agent.config import load_brief
+from career_agent.web import worker
 
 DB_PATH = Path("data/career.db")
 BRIEF_PATH = Path("career_brief.toml")
@@ -63,34 +63,9 @@ def index(request: Request, show: str = "queue"):
                  "scheduled": scheduled_task_installed()})
 
 
-def _guard(conn, job_id: int, allow_skip: bool) -> str | None:
-    """Dashboard-side guardrail. The partial unique index is the real
-    guarantee; this exists to produce a readable message."""
-    a = conn.execute("SELECT verdict FROM assessment WHERE job_id = ?"
-                     " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
-    if a is None:
-        return "This job has not been scored yet."
-    if a["verdict"] == "skip" and not allow_skip:
-        return "The gate skipped this one. Use Apply anyway to override."
-
-    brief = load_brief(BRIEF_PATH)
-    used = conn.execute(
-        "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
-        " AND date(submitted_at) = date('now')").fetchone()["n"]
-    if used >= brief.daily_cap:
-        return f"Daily cap of {brief.daily_cap} reached."
-
-    paused = conn.execute(
-        "SELECT payload FROM event WHERE type='pause'"
-        " ORDER BY id DESC LIMIT 1").fetchone()
-    if paused and paused["payload"] == "on":
-        return "The agent is paused."
-    return None
-
-
 async def _do_apply(job_id: int, allow_skip: bool, event: str | None):
     conn = _conn()
-    denial = _guard(conn, job_id, allow_skip)
+    denial = worker.guard(conn, job_id, allow_skip=allow_skip, brief_path=BRIEF_PATH)
     if denial:
         return HTMLResponse(f'<span class="denied">{denial}</span>')
 
@@ -128,7 +103,7 @@ async def send(job_id: int):
         return HTMLResponse(
             '<span class="denied">No draft to send yet. Click Apply first.</span>')
 
-    denial = _guard(conn, job_id, allow_skip=True)
+    denial = worker.guard(conn, job_id, allow_skip=True, brief_path=BRIEF_PATH)
     if denial:
         return HTMLResponse(f'<span class="denied">{denial}</span>')
 
