@@ -49,7 +49,10 @@
   {% set stages = [("Discovered", kpis.discovered), ("After Hard Filter", kpis.after_hard_filter),
                     ("Shortlisted", kpis.shortlisted), ("Applied", kpis.applied),
                     ("Responses", kpis.responses)] %}
-  {% set widest = kpis.discovered or 1 %}
+  {# Not all five stages are subsets of "discovered today" -- applied counts
+     today's submissions of jobs shortlisted earlier, and responses is all-time
+     -- so scaling against discovered alone can render a bar far past 100%. #}
+  {% set widest = stages | map(attribute=1) | max or 1 %}
   <div class="funnel">
     {% for label, value in stages %}
     <div style="width: {{ (value / widest * 100) | round | int }}%; min-width: 8%;">
@@ -75,7 +78,7 @@
   </table>
 </div>
 
-<div class="bottom-grid" style="display:grid;grid-template-columns:1.7fr .85fr;gap:11px;margin-top:11px;">
+<div class="bottom-grid">
   <div class="card panel">
     <div class="panel-head"><h2>Source Performance</h2></div>
     <table>
@@ -105,16 +108,19 @@
   </div>
 </div>
 
-<div class="bottom-grid" style="display:grid;grid-template-columns:1.7fr .85fr;gap:11px;margin-top:11px;">
+<div class="bottom-grid">
   <div class="card panel">
     <div class="panel-head"><h2>Recent Outcomes</h2></div>
     {% if not recent_outcomes %}
       <p class="rationale">No applications submitted yet.</p>
     {% else %}
       {% for o in recent_outcomes %}
-      <div class="recent-item" style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line);">
+      <div class="recent-item">
         <div><b>{{ o["title"] }}</b><br><span class="rationale">{{ o["company"] }}</span></div>
-        <span class="pill">{{ o["label"] }}</span>
+        <div style="text-align:right">
+          <span class="pill">{{ o["label"] }}</span>
+          <div class="run-meta">{{ o["activity_at"] }}</div>
+        </div>
       </div>
       {% endfor %}
     {% endif %}

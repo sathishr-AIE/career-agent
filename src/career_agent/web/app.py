@@ -17,8 +17,21 @@ DB_PATH = Path("data/career.db")
 BRIEF_PATH = Path("career_brief.toml")
 
 
+# asyncio only holds a weak reference to a running task, so a fire-and-forget
+# create_task can be garbage-collected mid-run. Tasks live here until done.
+_background_tasks: set[asyncio.Task] = set()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    conn = _conn()
+    # There is no pause/resume/stop for the pipeline by design, so a 'running'
+    # row left by a process that died mid-run would strand the Run Now button
+    # on a disabled "Running…" forever. A fresh process can only ever find it
+    # that way after a crash or restart, so clear it.
+    if worker.get_run_state(conn, "pipeline")["status"] == "running":
+        worker.set_run_state(conn, "pipeline", status="error",
+                             last_error="Interrupted by a server restart.")
     task = asyncio.create_task(worker.apply_worker_loop(_conn, BRIEF_PATH))
     yield
     task.cancel()
@@ -270,8 +283,10 @@ async def pipeline_run_now():
             '<span class="denied">A pipeline run is already in progress.</span>')
     worker.set_run_state(conn, "pipeline", status="running", last_error=None)
     store.log(conn, None, "pipeline_started")
-    asyncio.create_task(
+    task = asyncio.create_task(
         pipeline.run_background(_conn, DB_PATH, BRIEF_PATH))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return HTMLResponse("ok")
 
 

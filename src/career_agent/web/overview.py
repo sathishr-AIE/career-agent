@@ -206,15 +206,22 @@ def recent_discoveries(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
 
 
 def recent_outcomes(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
+    # Ordered by when something last *happened* on the application, not when
+    # it was sent -- an interview logged today on a six-week-old application
+    # is exactly what this panel exists to surface. Applications with no
+    # outcome yet fall back to their submission time.
     rows = conn.execute(
-        "SELECT ap.id AS application_id, j.title, j.company, ap.submitted_at"
+        "SELECT ap.id AS application_id, j.title, j.company, ap.submitted_at,"
+        "       COALESCE((SELECT MAX(o.occurred_at) FROM outcome o"
+        "                  WHERE o.application_id = ap.id), ap.submitted_at)"
+        "         AS activity_at"
         "  FROM application ap JOIN job j ON j.id = ap.job_id"
         " WHERE ap.status = 'submitted'"
-        " ORDER BY ap.submitted_at DESC LIMIT ?", (limit,)).fetchall()
+        " ORDER BY activity_at DESC LIMIT ?", (limit,)).fetchall()
     result = []
     for r in rows:
         effective = outcomes.effective_outcome(conn, r["application_id"])
         label = CALLBACK_LABELS.get(effective, "Applied")
         result.append({"title": r["title"], "company": r["company"],
-                        "label": label, "submitted_at": r["submitted_at"]})
+                        "label": label, "activity_at": r["activity_at"]})
     return result

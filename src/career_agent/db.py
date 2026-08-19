@@ -121,6 +121,11 @@ def connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL lets readers work through a writer's transaction. Without it the
+    # per-request init_schema write (every route, including the 3s status
+    # poll) contends with the pipeline's writes from its worker thread and
+    # sporadically raises "database is locked".
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 

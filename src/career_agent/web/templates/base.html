@@ -66,10 +66,30 @@
           gap:8px;z-index:50}
   .toast{background:#fff;border:1px solid var(--line);border-radius:10px;
          padding:10px 14px;box-shadow:var(--shadow);font-size:12px}
+  /* overview page */
+  .panel{padding:16px}
+  .panel-head{display:flex;justify-content:space-between;align-items:center;
+              margin-bottom:10px}
+  .panel-head h2{margin:0;font-size:13px;font-weight:800}
+  .bottom-grid{display:grid;grid-template-columns:1.7fr .85fr;gap:11px;
+               margin-top:11px}
+  .funnel{display:grid;gap:6px;margin:8px 0}
+  .funnel>div{background:linear-gradient(100deg,#6340ef,#7450ff);color:#fff;
+              border-radius:8px;padding:6px 10px;font-size:11px;font-weight:700;
+              white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .gate-pass{color:var(--green);font-weight:600}
+  .gate-review{color:var(--orange);font-weight:600}
+  .gate-fail{color:var(--red);font-weight:600}
+  .gate-pending{color:var(--muted);font-weight:600}
+  .run-meta{color:var(--muted);font-size:11px}
+  .recent-item{display:flex;justify-content:space-between;align-items:center;
+               gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
+  .recent-item:last-child{border-bottom:none}
   @media (max-width:760px){
     .app{display:block}
     .sidebar{height:auto;position:relative}
     .kpis{grid-template-columns:1fr 1fr}
+    .bottom-grid{grid-template-columns:1fr}
   }
 </style>
 <div class="app">

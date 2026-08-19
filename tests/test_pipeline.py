@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from career_agent import db
@@ -69,3 +71,21 @@ async def test_run_background_passes_paths_and_defaults_through(
     assert seen["brief"] == str(brief_path)
     assert seen["boards"] == "ats_boards.toml"
     assert seen["max_score"] == 25
+
+
+async def test_run_background_runs_run_once_off_the_serving_event_loop(
+        conn_factory, monkeypatch, tmp_path):
+    """run_once is `async def` but its discovery phase never awaits: the
+    Apify SDK's .call() blocks for minutes, 12-24 times a run. Awaiting it
+    on the serving loop froze every route, including the dashboard's own
+    3-second pipeline-status poll. It must run on a worker thread."""
+    seen = {}
+
+    async def record_thread(args):
+        seen["thread"] = threading.get_ident()
+
+    monkeypatch.setattr(pipeline.run_module, "run_once", record_thread)
+    await pipeline.run_background(conn_factory, tmp_path / "t.db",
+                                  tmp_path / "career_brief.toml")
+
+    assert seen["thread"] != threading.get_ident()

@@ -1,9 +1,10 @@
+import threading
+
 import pytest
 from fastapi.testclient import TestClient
 
 from career_agent import db
 from career_agent.web import app as web
-from career_agent.web import overview
 from career_agent.web import pipeline
 from career_agent.web import worker
 
@@ -34,6 +35,22 @@ def client(tmp_path, monkeypatch):
     conn.commit()
     monkeypatch.setattr(web, "DB_PATH", path)
     return TestClient(web.app)
+
+
+@pytest.fixture
+def running_pipeline(monkeypatch):
+    """A run_once that keeps the pipeline in 'running' until the test ends.
+    It has to be *releasable*: run_background hands run_once to
+    asyncio.to_thread, whose worker thread is non-daemon, so a fake that
+    never returns would hold the interpreter open at exit."""
+    release = threading.Event()
+
+    async def blocks(args):
+        release.wait(10)
+
+    monkeypatch.setattr(pipeline.run_module, "run_once", blocks)
+    yield
+    release.set()
 
 
 def test_index_shows_submit_and_hold_with_rationale(client):
@@ -529,12 +546,7 @@ def test_run_status_shows_stats(client, monkeypatch):
     assert "Total Applied" in r.text
 
 
-def test_pipeline_run_now_flips_status_and_logs_synchronously(client, monkeypatch):
-    async def never_finishes(args):
-        import asyncio
-        await asyncio.sleep(3600)
-
-    monkeypatch.setattr(pipeline.run_module, "run_once", never_finishes)
+def test_pipeline_run_now_flips_status_and_logs_synchronously(client, running_pipeline):
     r = client.post("/pipeline/run-now")
     assert r.status_code == 200
     conn = db.connect(web.DB_PATH)
@@ -543,12 +555,7 @@ def test_pipeline_run_now_flips_status_and_logs_synchronously(client, monkeypatc
     assert "pipeline_started" in types
 
 
-def test_pipeline_run_now_refuses_a_second_concurrent_run(client, monkeypatch):
-    async def never_finishes(args):
-        import asyncio
-        await asyncio.sleep(3600)
-
-    monkeypatch.setattr(pipeline.run_module, "run_once", never_finishes)
+def test_pipeline_run_now_refuses_a_second_concurrent_run(client, running_pipeline):
     client.post("/pipeline/run-now")
     r = client.post("/pipeline/run-now")
     assert "already" in r.text.lower()
@@ -561,15 +568,29 @@ def test_pipeline_status_shows_run_now_button_when_idle(client):
     assert "Run Now" in r.text
 
 
-def test_pipeline_status_shows_running_state(client, monkeypatch):
-    async def never_finishes(args):
-        import asyncio
-        await asyncio.sleep(3600)
-
-    monkeypatch.setattr(pipeline.run_module, "run_once", never_finishes)
+def test_pipeline_status_shows_running_state(client, running_pipeline):
     client.post("/pipeline/run-now")
     r = client.get("/pipeline/status")
     assert "Running" in r.text
+
+
+def test_startup_clears_a_pipeline_run_stranded_by_a_crash(client):
+    """A process that dies mid-run leaves run_state stuck at 'running', and
+    there are no pause/resume/stop endpoints for the pipeline -- the Run Now
+    button stays a disabled "Running…" forever. Startup is the only place
+    that can tell the difference, so it clears it."""
+    conn = db.connect(web.DB_PATH)
+    worker.set_run_state(conn, "pipeline", status="running", last_error=None)
+
+    with TestClient(web.app):  # entering the context manager runs lifespan
+        pass
+
+    conn = db.connect(web.DB_PATH)
+    state = worker.get_run_state(conn, "pipeline")
+    assert state["status"] == "error"
+    assert "restart" in state["last_error"].lower()
+    # and the page offers Run Now again rather than a dead disabled button
+    assert 'hx-post="/pipeline/run-now"' in client.get("/pipeline/status").text
 
 
 def test_root_renders_overview_not_a_redirect(client):

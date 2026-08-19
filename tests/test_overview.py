@@ -317,6 +317,30 @@ def test_recent_outcomes_labels_applied_when_no_outcome_yet(conn):
     assert outcomes_list[0]["label"] == "Applied"
 
 
+def test_recent_outcomes_orders_by_latest_outcome_not_submission(conn):
+    """The panel exists to surface outcomes as they happen. An interview
+    recorded today on a six-week-old application must outrank an application
+    sent two days ago that nothing has happened to since."""
+    old = _job(conn, "old-but-active")
+    old_app = conn.execute(
+        "INSERT INTO application (job_id, resume_version, status,"
+        " submitted_at) VALUES (?, 'v1', 'submitted', datetime('now', '-42 days'))",
+        (old,)).lastrowid
+    conn.execute("INSERT INTO outcome (application_id, type, occurred_at)"
+                 " VALUES (?, 'interview', datetime('now'))", (old_app,))
+    fresh = _job(conn, "recent-but-quiet")
+    conn.execute(
+        "INSERT INTO application (job_id, resume_version, status,"
+        " submitted_at) VALUES (?, 'v1', 'submitted', datetime('now', '-2 days'))",
+        (fresh,))
+    conn.commit()
+
+    rows = overview.recent_outcomes(conn)
+    assert [r["label"] for r in rows] == ["Interview", "Applied"]
+    # and the timestamp the template renders is the activity, not the send
+    assert rows[0]["activity_at"] > rows[1]["activity_at"]
+
+
 def test_recent_outcomes_labels_interview(conn):
     j = _job(conn, "interviewing")
     app_id = conn.execute(
