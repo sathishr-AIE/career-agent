@@ -169,7 +169,9 @@ async def queue_skip(job_id: int):
     state = worker.get_run_state(conn, "apply")
     if state["current_job_id"] == job_id:
         worker.set_run_state(conn, "apply", current_job_id=None)
-        await worker.apply_tick(conn, BRIEF_PATH)
+        nxt = worker.next_candidate(conn)
+        if nxt is not None and nxt["job_id"] != job_id:
+            await worker.apply_tick(conn, BRIEF_PATH)
     return HTMLResponse("ok")
 
 

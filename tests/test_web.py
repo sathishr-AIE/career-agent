@@ -238,7 +238,14 @@ def test_run_stop_clears_current_job(client, monkeypatch):
     assert state["current_job_id"] is None
 
 
-def test_queue_skip_clears_current_job_and_logs(client):
+def test_queue_skip_clears_current_job_and_logs(client, monkeypatch):
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', 'draft')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
     client.post("/run/start", data={"mode": "manual"})
     r = client.post("/queue/1/skip")
     assert r.status_code == 200
@@ -246,6 +253,34 @@ def test_queue_skip_clears_current_job_and_logs(client):
     assert worker.get_run_state(conn, "apply")["current_job_id"] is None
     types = {e["type"] for e in conn.execute("SELECT type FROM event")}
     assert "job_skipped" in types
+
+
+def test_queue_skip_advances_to_a_higher_ranked_candidate(client, monkeypatch):
+    """Job 1 is stuck as 'current' (e.g. left over from before job 2's
+    priority was bumped above it). Skipping job 1 must not just refuse to
+    re-tick (that's the single-candidate case above) -- it must pick up the
+    now-higher-ranked job 2, proving the fix's job-identity check advances
+    the queue rather than freezing it whenever there IS somewhere to go."""
+    conn = db.connect(web.DB_PATH)
+    conn.execute("UPDATE assessment SET verdict = 'submit' WHERE job_id = 2")
+    conn.execute("UPDATE job SET priority = 1 WHERE id = 1")
+    conn.execute("UPDATE job SET priority = 0 WHERE id = 2")
+    conn.commit()
+    worker.set_run_state(conn, "apply", status="running", mode="manual",
+                         current_job_id=1)
+
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', 'draft')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    r = client.post("/queue/1/skip")
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    state = worker.get_run_state(conn, "apply")
+    assert state["current_job_id"] == 2
 
 
 def test_queue_retry_only_accepts_failed_status(client):
