@@ -6,6 +6,8 @@ SELECT j.id AS job_id, j.company, j.title, a.weighted_score
   JOIN assessment a ON a.job_id = j.id
  WHERE j.merged_into_job_id IS NULL
    AND a.verdict IN ('submit','hold')
+   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id
+               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)
    AND NOT EXISTS (
        SELECT 1 FROM application ap
         WHERE ap.job_id = j.id
@@ -39,6 +41,8 @@ def queue_count(conn: sqlite3.Connection) -> int:
         "SELECT COUNT(*) n FROM job j JOIN assessment a ON a.job_id = j.id"
         " WHERE j.merged_into_job_id IS NULL"
         "   AND a.verdict IN ('submit','hold')"
+        "   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id"
+        "               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)"
         "   AND NOT EXISTS (SELECT 1 FROM application ap"
         "                    WHERE ap.job_id = j.id"
         "                      AND ap.status IN ('in_flight','submitted',"

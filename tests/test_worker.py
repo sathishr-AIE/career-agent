@@ -96,3 +96,52 @@ def test_next_candidate_excludes_merged_jobs(conn):
         conn.commit()
         row = worker.next_candidate(conn)
     assert dupe not in ids
+
+
+def test_next_candidate_respects_latest_assessment_verdict(conn):
+    """Jobs rescored to 'skip' should be excluded even if old assessment was 'submit'."""
+    job_id = conn.execute(
+        "INSERT INTO job (fingerprint, source, external_id, company,"
+        " company_normalized, title, title_normalized)"
+        " VALUES (?, 'ats', ?, 'Acme', 'acme', 'AI Engineer',"
+        " 'aiengineer')", ("rescored", "rescored")).lastrowid
+    # Old assessment: submit
+    conn.execute(
+        "INSERT INTO assessment (job_id, stage, weighted_score, verdict,"
+        " rationale, model, prompt_version)"
+        " VALUES (?, 'scored', ?, ?, 'r', 'm', 'v1')",
+        (job_id, 85, "submit"))
+    # New assessment: skip (newer, should be used)
+    conn.execute(
+        "INSERT INTO assessment (job_id, stage, weighted_score, verdict,"
+        " rationale, model, prompt_version)"
+        " VALUES (?, 'scored', ?, ?, 'r', 'm', 'v2')",
+        (job_id, 30, "skip"))
+    conn.commit()
+    # Job should NOT appear because latest assessment is 'skip'
+    assert worker.next_candidate(conn) is None
+    assert worker.queue_count(conn) == 0
+
+
+def test_queue_count_respects_latest_assessment_verdict(conn):
+    """queue_count should also only consider latest assessment per job."""
+    job_id = conn.execute(
+        "INSERT INTO job (fingerprint, source, external_id, company,"
+        " company_normalized, title, title_normalized)"
+        " VALUES (?, 'ats', ?, 'Acme', 'acme', 'AI Engineer',"
+        " 'aiengineer')", ("rescored2", "rescored2")).lastrowid
+    # Old assessment: submit
+    conn.execute(
+        "INSERT INTO assessment (job_id, stage, weighted_score, verdict,"
+        " rationale, model, prompt_version)"
+        " VALUES (?, 'scored', ?, ?, 'r', 'm', 'v1')",
+        (job_id, 85, "submit"))
+    # New assessment: skip (newer, should be used)
+    conn.execute(
+        "INSERT INTO assessment (job_id, stage, weighted_score, verdict,"
+        " rationale, model, prompt_version)"
+        " VALUES (?, 'scored', ?, ?, 'r', 'm', 'v2')",
+        (job_id, 30, "skip"))
+    conn.commit()
+    # Count should be 0 because latest assessment is 'skip'
+    assert worker.queue_count(conn) == 0
