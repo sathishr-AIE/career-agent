@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from career_agent import db
 from career_agent.web import app as web
+from career_agent.web import overview
 from career_agent.web import pipeline
 from career_agent.web import worker
 
@@ -203,12 +204,6 @@ def test_index_hides_banner_when_a_schedule_is_installed(client, monkeypatch):
     monkeypatch.setattr(web, "scheduled_task_installed", lambda: True)
     r = client.get("/applications")
     assert "No scheduled run is installed" not in r.text
-
-
-def test_root_redirects_to_applications(client):
-    r = client.get("/", follow_redirects=False)
-    assert r.status_code == 307
-    assert r.headers["location"] == "/applications"
 
 
 def test_run_start_sets_status_running_and_ticks_once(client, monkeypatch):
@@ -575,3 +570,36 @@ def test_pipeline_status_shows_running_state(client, monkeypatch):
     client.post("/pipeline/run-now")
     r = client.get("/pipeline/status")
     assert "Running" in r.text
+
+
+def test_root_renders_overview_not_a_redirect(client):
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code == 200
+    assert "Dashboard" in r.text
+
+
+def test_overview_shows_kpi_cards(client):
+    r = client.get("/")
+    assert "Discovered" in r.text
+    assert "Shortlisted" in r.text
+
+
+def test_overview_shows_recent_discoveries_from_fixture(client):
+    r = client.get("/")
+    assert "AI Engineer" in r.text  # job 1 from the client fixture
+    assert "Acme" in r.text
+
+
+def test_overview_ready_to_apply_cta_links_to_applications(client):
+    r = client.get("/")
+    assert 'href="/applications"' in r.text
+
+
+def test_overview_embeds_pipeline_status_polling(client):
+    r = client.get("/")
+    assert 'hx-get="/pipeline/status"' in r.text
+    # must be innerHTML, not outerHTML — outerHTML replaces the polling
+    # element itself and htmx never re-fires the poll after that (this
+    # exact regression happened once already, in the sibling plan's
+    # /run/status poller)
+    assert 'hx-swap="innerHTML"' in r.text

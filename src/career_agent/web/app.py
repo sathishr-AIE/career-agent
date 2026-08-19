@@ -5,13 +5,13 @@ from html import escape
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from career_agent import db, store
 from career_agent.apply import ats as ats_apply
 from career_agent.config import load_brief
-from career_agent.web import pipeline, worker
+from career_agent.web import overview, pipeline, worker
 
 DB_PATH = Path("data/career.db")
 BRIEF_PATH = Path("career_brief.toml")
@@ -62,9 +62,27 @@ def scheduled_task_installed(name: str = "CareerAgentDaily") -> bool:
         return False
 
 
-@app.get("/")
-def root():
-    return RedirectResponse("/applications", status_code=307)
+@app.get("/", response_class=HTMLResponse)
+def dashboard(request: Request):
+    conn = _conn()
+    brief = load_brief(BRIEF_PATH)
+    today_submitted = conn.execute(
+        "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
+        " AND date(submitted_at) = date('now')").fetchone()["n"]
+    kpi_data = overview.kpis(conn)
+    return templates.TemplateResponse(
+        request=request, name="overview.html",
+        context={"active_nav": "dashboard", "brief": brief,
+                 "daily_cap": brief.daily_cap,
+                 "today_submitted": today_submitted,
+                 "kpis": kpi_data,
+                 "outcome_summary": overview.outcome_summary(conn),
+                 "source_performance": overview.source_performance(conn),
+                 "score_distribution": overview.score_distribution(conn),
+                 "recent_discoveries": overview.recent_discoveries(conn),
+                 "recent_outcomes": overview.recent_outcomes(conn),
+                 "shortlisted_count": kpi_data["shortlisted"],
+                 "pipeline_state": worker.get_run_state(conn, "pipeline")})
 
 
 @app.get("/applications", response_class=HTMLResponse)

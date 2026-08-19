@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Dashboard</h1>
+<p class="rationale">Your daily job discovery and application command center.</p>
+
+<!-- innerHTML, not outerHTML: the polling element must survive its own swap,
+     or htmx drops it from the DOM and the poll never fires again — this bit
+     the sibling plan's /run/status poller the same way before it was fixed. -->
+<div id="pipeline-status-poller" hx-get="/pipeline/status" hx-trigger="load, every 3s"
+     hx-swap="innerHTML">
+  {% include "_pipeline_status.html" %}
+</div>
+
+<div class="kpis">
+  <div class="card kpi">
+    <h3>Discovered</h3><div class="num">{{ kpis.discovered }}</div>
+    <svg viewBox="0 0 64 28" width="64" height="28">
+      <polyline points="{{ kpis.sparklines.discovered }}" fill="none" stroke="#5b36e8" stroke-width="2"/>
+    </svg>
+  </div>
+  <div class="card kpi">
+    <h3>After Hard Filter</h3><div class="num">{{ kpis.after_hard_filter }}</div>
+    <svg viewBox="0 0 64 28" width="64" height="28">
+      <polyline points="{{ kpis.sparklines.after_hard_filter }}" fill="none" stroke="#3f78df" stroke-width="2"/>
+    </svg>
+  </div>
+  <div class="card kpi">
+    <h3>Shortlisted</h3><div class="num">{{ kpis.shortlisted }}</div>
+    <svg viewBox="0 0 64 28" width="64" height="28">
+      <polyline points="{{ kpis.sparklines.shortlisted }}" fill="none" stroke="#22a665" stroke-width="2"/>
+    </svg>
+  </div>
+  <div class="card kpi">
+    <h3>Applied</h3><div class="num">{{ kpis.applied }}</div>
+    <svg viewBox="0 0 64 28" width="64" height="28">
+      <polyline points="{{ kpis.sparklines.applied }}" fill="none" stroke="#ee9412" stroke-width="2"/>
+    </svg>
+  </div>
+  <div class="card kpi">
+    <h3>Responses</h3><div class="num">{{ kpis.responses }}</div>
+    <svg viewBox="0 0 64 28" width="64" height="28">
+      <polyline points="{{ kpis.sparklines.responses }}" fill="none" stroke="#27a49a" stroke-width="2"/>
+    </svg>
+  </div>
+</div>
+
+<div class="card panel">
+  <div class="panel-head"><h2>Pipeline Overview</h2></div>
+  {% set stages = [("Discovered", kpis.discovered), ("After Hard Filter", kpis.after_hard_filter),
+                    ("Shortlisted", kpis.shortlisted), ("Applied", kpis.applied),
+                    ("Responses", kpis.responses)] %}
+  {% set widest = kpis.discovered or 1 %}
+  <div class="funnel">
+    {% for label, value in stages %}
+    <div style="width: {{ (value / widest * 100) | round | int }}%; min-width: 8%;">
+      {{ label }}: {{ value }}</div>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="card panel">
+  <div class="panel-head"><h2>Recent Discoveries</h2></div>
+  <table>
+    <tr><th>Job Title</th><th>Company</th><th>Source</th><th>Score</th><th>Location</th><th>Gate</th></tr>
+    {% for d in recent_discoveries %}
+    <tr>
+      <td><b>{{ d["title"] }}</b></td>
+      <td>{{ d["company"] }}</td>
+      <td>{{ d["source"] }}</td>
+      <td>{{ (d["weighted_score"] or 0) | round | int if d["weighted_score"] else "—" }}</td>
+      <td>{{ d["location"] or "—" }}</td>
+      <td class="gate-{{ d['gate'] }}">{{ d["gate"] | capitalize }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="bottom-grid" style="display:grid;grid-template-columns:1.7fr .85fr;gap:11px;margin-top:11px;">
+  <div class="card panel">
+    <div class="panel-head"><h2>Source Performance</h2></div>
+    <table>
+      <tr><th>Source</th><th>Discovered</th><th>Pass Rate</th><th>Shortlist Rate</th><th>Applied</th><th>Response Rate</th></tr>
+      {% for s in source_performance %}
+      <tr>
+        <td><b>{{ s["source"] }}</b></td>
+        <td>{{ s["discovered"] }}</td>
+        <td>{{ s["pass_rate"] }}%</td>
+        <td>{{ s["shortlist_rate"] }}%</td>
+        <td>{{ s["applied"] }}</td>
+        <td>{{ s["response_rate"] }}%</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  <div class="card panel">
+    <div class="panel-head"><h2>Score Distribution</h2></div>
+    {% if score_distribution.total == 0 %}
+      <p class="rationale">No scored jobs yet.</p>
+    {% else %}
+      <div>80–100 (High): {{ score_distribution.high }}%</div>
+      <div>60–79 (Good): {{ score_distribution.good }}%</div>
+      <div>40–59 (Fair): {{ score_distribution.fair }}%</div>
+      <div>0–39 (Low): {{ score_distribution.low }}%</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="bottom-grid" style="display:grid;grid-template-columns:1.7fr .85fr;gap:11px;margin-top:11px;">
+  <div class="card panel">
+    <div class="panel-head"><h2>Recent Outcomes</h2></div>
+    {% if not recent_outcomes %}
+      <p class="rationale">No applications submitted yet.</p>
+    {% else %}
+      {% for o in recent_outcomes %}
+      <div class="recent-item" style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line);">
+        <div><b>{{ o["title"] }}</b><br><span class="rationale">{{ o["company"] }}</span></div>
+        <span class="pill">{{ o["label"] }}</span>
+      </div>
+      {% endfor %}
+    {% endif %}
+  </div>
+  <div class="card panel">
+    <div class="panel-head"><h2>Outcome Summary <span style="font-weight:600;color:var(--muted)">(This Month)</span></h2></div>
+    <div>Applied: {{ outcome_summary.applied }}</div>
+    <div>Responses: {{ outcome_summary.responses }}</div>
+    <div>Interviews: {{ outcome_summary.interviews }}</div>
+    <div>Offers: {{ outcome_summary.offers }}</div>
+    <div>Callback Rate: {{ outcome_summary.callback_rate }}%</div>
+    <div>Interview Rate: {{ outcome_summary.interview_rate }}%</div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:11px;padding:16px;display:flex;justify-content:space-between;align-items:center;">
+  <div>
+    <h3 style="margin:0 0 4px">Ready to apply?</h3>
+    <p style="margin:0;color:var(--muted)">You have <b>{{ shortlisted_count }} shortlisted jobs</b>.
+      Review and apply from the Applications page.</p>
+  </div>
+  <a class="btn primary" href="/applications">View Shortlisted Jobs →</a>
+</div>
+{% endblock %}
