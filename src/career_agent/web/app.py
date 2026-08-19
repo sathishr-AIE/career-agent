@@ -2,7 +2,7 @@ import subprocess
 from html import escape
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
@@ -123,3 +123,96 @@ def dismiss(job_id: int):
     conn = _conn()
     store.log(conn, job_id, "human_dismissed")
     return HTMLResponse('<span class="done">Dismissed</span>')
+
+
+@app.post("/run/start")
+async def run_start(mode: str = Form(...)):
+    conn = _conn()
+    worker.set_run_state(conn, "apply", status="running", mode=mode)
+    conn.execute("UPDATE run_state SET started_at = datetime('now')"
+                 " WHERE kind = 'apply'")
+    conn.commit()
+    store.log(conn, None, "run_started", mode)
+    await worker.apply_tick(conn, BRIEF_PATH)
+    return HTMLResponse("ok")
+
+
+@app.post("/run/pause")
+def run_pause():
+    conn = _conn()
+    worker.set_run_state(conn, "apply", status="paused")
+    store.log(conn, None, "run_paused")
+    return HTMLResponse("ok")
+
+
+@app.post("/run/resume")
+async def run_resume():
+    conn = _conn()
+    worker.set_run_state(conn, "apply", status="running")
+    store.log(conn, None, "run_resumed")
+    await worker.apply_tick(conn, BRIEF_PATH)
+    return HTMLResponse("ok")
+
+
+@app.post("/run/stop")
+def run_stop():
+    conn = _conn()
+    worker.set_run_state(conn, "apply", status="stopped", current_job_id=None)
+    store.log(conn, None, "run_stopped")
+    return HTMLResponse("ok")
+
+
+@app.post("/queue/{job_id}/skip")
+async def queue_skip(job_id: int):
+    conn = _conn()
+    store.log(conn, job_id, "job_skipped", "skipped by user")
+    state = worker.get_run_state(conn, "apply")
+    if state["current_job_id"] == job_id:
+        worker.set_run_state(conn, "apply", current_job_id=None)
+        await worker.apply_tick(conn, BRIEF_PATH)
+    return HTMLResponse("ok")
+
+
+@app.post("/queue/{job_id}/retry")
+def queue_retry(job_id: int):
+    conn = _conn()
+    app_row = conn.execute(
+        "SELECT status FROM application WHERE job_id = ?"
+        " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+    if app_row is None or app_row["status"] != "failed":
+        return HTMLResponse(
+            '<span class="denied">Only a failed application can be'
+            ' retried.</span>')
+    lowest = conn.execute(
+        "SELECT MIN(priority) p FROM job").fetchone()["p"]
+    new_priority = (lowest - 1) if lowest is not None else 0
+    conn.execute("UPDATE job SET priority = ? WHERE id = ?",
+                 (new_priority, job_id))
+    conn.commit()
+    store.log(conn, job_id, "job_skipped", "retry requested; requeued")
+    return HTMLResponse('<span class="done">Requeued</span>')
+
+
+@app.post("/queue/{job_id}/priority")
+def queue_priority(job_id: int, direction: str = Form(...)):
+    conn = _conn()
+    order = conn.execute(
+        "SELECT id, priority FROM job WHERE merged_into_job_id IS NULL"
+        " ORDER BY priority ASC NULLS LAST, id ASC").fetchall()
+    ids = [r["id"] for r in order]
+    if job_id not in ids:
+        return HTMLResponse('<span class="denied">Not in the queue.</span>')
+    pos = ids.index(job_id)
+    neighbor_pos = pos - 1 if direction == "up" else pos + 1
+    if not (0 <= neighbor_pos < len(ids)):
+        return HTMLResponse("ok")  # already at the edge; nothing to swap
+    for i, row in enumerate(order):
+        conn.execute("UPDATE job SET priority = ? WHERE id = ?", (i, row["id"]))
+    conn.commit()
+    a, b = ids[pos], ids[neighbor_pos]
+    pa = conn.execute("SELECT priority FROM job WHERE id = ?", (a,)).fetchone()["priority"]
+    pb = conn.execute("SELECT priority FROM job WHERE id = ?", (b,)).fetchone()["priority"]
+    conn.execute("UPDATE job SET priority = ? WHERE id = ?", (pb, a))
+    conn.execute("UPDATE job SET priority = ? WHERE id = ?", (pa, b))
+    conn.commit()
+    return HTMLResponse("ok")

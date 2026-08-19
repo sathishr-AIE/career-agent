@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from career_agent import db
 from career_agent.web import app as web
+from career_agent.web import worker
 
 
 @pytest.fixture
@@ -170,3 +171,114 @@ def test_index_hides_banner_when_a_schedule_is_installed(client, monkeypatch):
     monkeypatch.setattr(web, "scheduled_task_installed", lambda: True)
     r = client.get("/")
     assert "No scheduled run is installed" not in r.text
+
+
+def test_run_start_sets_status_running_and_ticks_once(client, monkeypatch):
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', 'draft')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    r = client.post("/run/start", data={"mode": "manual"})
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    state = worker.get_run_state(conn, "apply")
+    assert state["status"] == "running"
+    assert state["mode"] == "manual"
+    assert state["current_job_id"] == 1  # job 1 is the higher-scored fixture row
+
+
+def test_run_pause_sets_status_paused(client, monkeypatch):
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', 'draft')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    client.post("/run/start", data={"mode": "manual"})
+    r = client.post("/run/pause")
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["status"] == "paused"
+
+
+def test_run_resume_sets_status_running(client, monkeypatch):
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', 'draft')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    client.post("/run/start", data={"mode": "manual"})
+    client.post("/run/pause")
+    r = client.post("/run/resume")
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["status"] == "running"
+
+
+def test_run_stop_clears_current_job(client, monkeypatch):
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', 'draft')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    client.post("/run/start", data={"mode": "manual"})
+    r = client.post("/run/stop")
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    state = worker.get_run_state(conn, "apply")
+    assert state["status"] == "stopped"
+    assert state["current_job_id"] is None
+
+
+def test_queue_skip_clears_current_job_and_logs(client):
+    client.post("/run/start", data={"mode": "manual"})
+    r = client.post("/queue/1/skip")
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["current_job_id"] is None
+    types = {e["type"] for e in conn.execute("SELECT type FROM event")}
+    assert "job_skipped" in types
+
+
+def test_queue_retry_only_accepts_failed_status(client):
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'v1', 'submitted')")
+    conn.commit()
+    r = client.post("/queue/1/retry")
+    assert r.status_code == 200
+    assert "failed" in r.text.lower()
+
+
+def test_queue_retry_on_a_failed_job_bumps_priority_to_front(client):
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'v1', 'failed')")
+    conn.execute("UPDATE job SET priority = 5 WHERE id = 2")
+    conn.commit()
+    r = client.post("/queue/1/retry")
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    row = conn.execute("SELECT priority FROM job WHERE id = 1").fetchone()
+    assert row["priority"] < 5
+
+
+def test_queue_priority_swaps_with_neighbor(client):
+    conn = db.connect(web.DB_PATH)
+    conn.execute("UPDATE job SET priority = 0 WHERE id = 1")
+    conn.execute("UPDATE job SET priority = 1 WHERE id = 2")
+    conn.commit()
+    r = client.post("/queue/2/priority", data={"direction": "up"})
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    p1 = conn.execute("SELECT priority FROM job WHERE id = 1").fetchone()["priority"]
+    p2 = conn.execute("SELECT priority FROM job WHERE id = 2").fetchone()["priority"]
+    assert p2 < p1
