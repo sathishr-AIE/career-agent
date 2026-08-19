@@ -10,6 +10,7 @@ from fastapi.templating import Jinja2Templates
 
 from career_agent import db, store
 from career_agent.apply import ats as ats_apply
+from career_agent.config import load_brief
 from career_agent.web import worker
 
 DB_PATH = Path("data/career.db")
@@ -67,15 +68,26 @@ def root():
 
 
 @app.get("/applications", response_class=HTMLResponse)
-def index(request: Request, show: str = "queue"):
+def applications(request: Request, show: str = "queue"):
     conn = _conn()
     verdicts = ["skip"] if show == "skipped" else ["submit", "hold"]
     sql = LIST_SQL.format(placeholders=",".join("?" * len(verdicts)))
     rows = conn.execute(sql, verdicts).fetchall()
+    all_rows = conn.execute(
+        LIST_SQL.format(placeholders="?,?,?"), ["submit", "hold", "skip"]
+    ).fetchall()
+    brief = load_brief(BRIEF_PATH)
+    today_submitted = conn.execute(
+        "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
+        " AND date(submitted_at) = date('now')").fetchone()["n"]
     return templates.TemplateResponse(
-        request=request, name="index.html",
-        context={"jobs": rows, "show": show,
-                 "scheduled": scheduled_task_installed()})
+        request=request, name="applications.html",
+        context={"jobs": rows if show != "skipped" else all_rows,
+                 "skipped_jobs": [r for r in all_rows if r["verdict"] == "skip"],
+                 "show": show, "scheduled": scheduled_task_installed(),
+                 "active_nav": "applications", "brief": brief,
+                 "daily_cap": brief.daily_cap,
+                 "today_submitted": today_submitted})
 
 
 async def _do_apply(job_id: int, allow_skip: bool, event: str | None):

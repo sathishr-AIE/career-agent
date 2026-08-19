@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Applications</h1>
+
+<div hx-get="/run/status" hx-trigger="load, every 2s" hx-swap="outerHTML">
+  <div id="run-status">Loading…</div>
+</div>
+
+{% if not scheduled %}
+<p class="rationale">
+  No scheduled run is installed, so nothing runs unless you start it.
+  Run <code>career-agent run</code>, or install the daily task with
+  <code>scripts\install-scheduler.ps1</code>.
+</p>
+{% endif %}
+
+<div class="tabs">
+  <button class="active" onclick="showTab('queue')">Queue</button>
+  <button onclick="showTab('all')">All Applications</button>
+  <button onclick="showTab('skipped')">Skipped</button>
+</div>
+
+<div id="tab-queue" class="tab-panel active">
+  {% set queue_rows = jobs | selectattr("verdict", "in", ["submit", "hold"]) | rejectattr("terminal_status") | list %}
+  {% if not queue_rows %}
+  <p class="rationale">Nothing to apply to — run discovery, or check Skipped.</p>
+  {% else %}
+  <table>
+    <tr><th>#</th><th>Score</th><th>Role</th><th>Source</th><th>Verdict</th><th></th></tr>
+    {% for j in queue_rows %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td>{{ (j["score"] or 0) | round | int }}</td>
+      <td><a href="{{ j['url'] }}">{{ j["title"] }}</a> at {{ j["company"] }}</td>
+      <td>{{ j["source"] }}</td>
+      <td class="{{ j['verdict'] }}">{{ j["verdict"] }}</td>
+      <td>
+        <button hx-post="/queue/{{ j['id'] }}/priority" hx-vals='{"direction":"up"}'>▲</button>
+        <button hx-post="/queue/{{ j['id'] }}/priority" hx-vals='{"direction":"down"}'>▼</button>
+        <button hx-post="/queue/{{ j['id'] }}/skip">Skip</button>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+
+<div id="tab-all" class="tab-panel">
+  <table>
+    <tr><th>Score</th><th>Role</th><th>Source</th><th>Verdict</th><th></th></tr>
+    {% for j in jobs %}
+    <tr>
+      <td>{{ (j["score"] or 0) | round | int }}</td>
+      <td>
+        <a href="{{ j['url'] }}">{{ j["title"] }}</a> at {{ j["company"] }}<br>
+        <span class="rationale">{{ j["rationale"] }}</span>
+      </td>
+      <td>{{ j["source"] }}</td>
+      <td class="{{ j['verdict'] }}">{{ j["verdict"] }}</td>
+      <td>
+        {% if j["terminal_status"] in ("in_flight", "submitted") %}
+          <span class="done">Applied</span>
+        {% elif j["terminal_status"] == "held_unknown" %}
+          <span class="denied">Held — confirm manually, then clear it</span>
+        {% elif j["terminal_status"] == "failed_permanent" %}
+          <span class="denied">Failed permanently — see the event log</span>
+        {% elif j["has_draft"] %}
+          <button hx-post="/send/{{ j['id'] }}" hx-swap="outerHTML">Send</button>
+        {% elif j["verdict"] == "skip" %}
+          <button hx-post="/override/{{ j['id'] }}" hx-swap="outerHTML">Apply anyway</button>
+        {% else %}
+          <button hx-post="/apply/{{ j['id'] }}" hx-swap="outerHTML">Apply</button>
+          <button hx-post="/dismiss/{{ j['id'] }}" hx-swap="outerHTML">Dismiss</button>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div id="tab-skipped" class="tab-panel">
+  <p class="rationale">
+    These were skipped by the gate. Applying anyway is recorded as an override,
+    which is how the gate gets caught being too strict.
+  </p>
+  <table>
+    <tr><th>Score</th><th>Role</th><th>Source</th><th></th></tr>
+    {% for j in skipped_jobs %}
+    <tr>
+      <td>{{ (j["score"] or 0) | round | int }}</td>
+      <td><a href="{{ j['url'] }}">{{ j["title"] }}</a> at {{ j["company"] }}<br>
+        <span class="rationale">{{ j["rationale"] }}</span></td>
+      <td>{{ j["source"] }}</td>
+      <td><button hx-post="/override/{{ j['id'] }}" hx-swap="outerHTML">Apply anyway</button></td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<script>
+function showTab(name) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
+
+let lastEventCount = null;
+document.body.addEventListener('htmx:afterSettle', function(evt) {
+  if (evt.target.id !== 'run-status') return;
+  const lines = evt.target.querySelectorAll('.log-line').length;
+  if (lastEventCount !== null && lines > lastEventCount) {
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.textContent = evt.target.querySelector('.log-line').textContent;
+    document.getElementById('toasts').appendChild(toast);
+    setTimeout(() => toast.remove(), 5000);
+  }
+  lastEventCount = lines;
+});
+</script>
+{% endblock %}

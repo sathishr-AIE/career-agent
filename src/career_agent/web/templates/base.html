@@ -1,0 +1,101 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Career Agent</title>
+<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+<style>
+  :root{
+    --bg:#f5f7fb; --panel:rgba(255,255,255,.86); --line:rgba(145,157,184,.22);
+    --text:#121827; --muted:#687187; --purple:#6845f5; --blue:#3b82f6;
+    --green:#16a36a; --orange:#ea8d0b; --red:#df4e6b;
+    --shadow:0 10px 28px rgba(44,52,80,.08); --radius:14px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+       background:var(--bg);color:var(--text);font-size:14px}
+  .app{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+  .sidebar{background:var(--panel);border-right:1px solid var(--line);
+           padding:16px 12px;display:flex;flex-direction:column;gap:12px;
+           position:sticky;top:0;height:100vh}
+  .brand{font-weight:800;font-size:16px;padding:4px 8px 12px}
+  .nav{display:flex;flex-direction:column;gap:4px}
+  .nav a{display:block;text-decoration:none;color:#273049;padding:9px 11px;
+         border-radius:10px;font-weight:600}
+  .nav a:hover{background:rgba(104,69,245,.08)}
+  .nav a.active{background:linear-gradient(100deg,#6340ef,#7450ff);color:#fff}
+  .card{background:var(--panel);border:1px solid var(--line);
+        border-radius:var(--radius);box-shadow:var(--shadow);padding:14px}
+  .brief-head{display:flex;justify-content:space-between;font-weight:800;
+              font-size:12px;margin-bottom:10px}
+  .kv{display:grid;gap:8px;font-size:12px}
+  .kv span{display:block;color:#8b93a5;font-size:10px}
+  .main{padding:20px;min-width:0}
+  .btn{border:1px solid var(--line);background:#fff;color:#263047;
+       border-radius:8px;padding:8px 12px;font-size:12px;font-weight:700;
+       cursor:pointer}
+  .btn.primary{background:linear-gradient(110deg,#5e3de9,#7655ff);
+               border-color:#6444ec;color:#fff}
+  .pill{border-radius:999px;padding:5px 10px;font-weight:800;font-size:10px;
+        display:inline-block}
+  .status-idle,.status-stopped{background:#eef0f4;color:#5c667b}
+  .status-running{background:#dcf8e8;color:#15934e}
+  .status-paused{background:#fff0d7;color:#d77e00}
+  .status-error{background:#fde2e6;color:#b42318}
+  .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:14px 0}
+  .kpi h3{font-size:11px;margin:0 0 6px;color:var(--muted)}
+  .kpi .num{font-size:24px;font-weight:800}
+  .now-processing{margin:10px 0}
+  .activity-log{max-height:260px;overflow:auto;margin-top:14px;font-size:11px;color:#555}
+  .log-line{padding:4px 0;border-bottom:1px solid var(--line)}
+  .denied{color:var(--red)}.done{color:var(--green)}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line)}
+  .tabs{display:flex;gap:8px;margin:12px 0}
+  .tabs button{border:1px solid var(--line);background:#fff;border-radius:999px;
+               padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer}
+  .tabs button.active{background:var(--purple);color:#fff;border-color:var(--purple)}
+  .tab-panel{display:none}.tab-panel.active{display:block}
+  #toasts{position:fixed;top:16px;right:16px;display:flex;flex-direction:column;
+          gap:8px;z-index:50}
+  .toast{background:#fff;border:1px solid var(--line);border-radius:10px;
+         padding:10px 14px;box-shadow:var(--shadow);font-size:12px}
+  @media (max-width:760px){
+    .app{display:block}
+    .sidebar{height:auto;position:relative}
+    .kpis{grid-template-columns:1fr 1fr}
+  }
+</style>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">✦ Career Agent</div>
+    <nav class="nav">
+      <a href="/" {% if active_nav == "dashboard" %}class="active"{% endif %}>Dashboard</a>
+      <a href="#">Discoveries</a>
+      <a href="#">Shortlisted</a>
+      <a href="/applications" {% if active_nav == "applications" %}class="active"{% endif %}>Applications</a>
+      <a href="#">Pipeline</a>
+      <a href="#">Calendar</a>
+      <a href="#">Outcomes</a>
+      <a href="#">Settings</a>
+    </nav>
+    <div class="card">
+      <div class="brief-head"><span>Today's Progress</span></div>
+      <div>{{ today_submitted }} / {{ daily_cap }} applications submitted today</div>
+    </div>
+    <div class="card">
+      <div class="brief-head">
+        <span>Career Brief</span>
+      </div>
+      <div class="kv">
+        <div><span>Target Titles</span><b>{{ brief.target_titles | join(", ") }}</b></div>
+        <div><span>Locations</span><b>{{ brief.locations | join(", ") or "Any" }}</b></div>
+        <div><span>Remote OK</span><b>{{ "Yes" if brief.remote_ok else "No" }}</b></div>
+        <div><span>Daily Cap</span><b>{{ brief.daily_cap }}</b></div>
+        <div><span>Gate Threshold</span><b>{{ brief.gate_threshold }}</b></div>
+      </div>
+    </div>
+  </aside>
+  <main class="main">
+    {% block content %}{% endblock %}
+  </main>
+</div>
+<div id="toasts"></div>

@@ -41,7 +41,12 @@ def test_index_shows_submit_and_hold_with_rationale(client):
 
 
 def test_index_hides_skips_by_default(client):
-    assert "ML Engineer" not in client.get("/applications").text
+    """The Skipped tab's markup is always present in the response (tabs are
+    client-side CSS toggles, per the applications.html design), but the
+    Queue tab itself must not list a skip-verdict job."""
+    r = client.get("/applications")
+    queue_html = r.text.split('id="tab-queue"')[1].split('id="tab-all"')[0]
+    assert "ML Engineer" not in queue_html
 
 
 def test_skipped_view_shows_them(client):
@@ -344,6 +349,24 @@ def test_run_status_shows_pause_button_and_current_job_when_running(client, monk
     r = client.get("/run/status")
     assert "Pause" in r.text
     assert "AI Engineer" in r.text  # current job's title, from the fixture
+
+
+def test_applications_page_has_nav_and_tabs(client):
+    r = client.get("/applications")
+    assert 'href="/"' in r.text  # Dashboard nav link
+    assert 'href="/applications"' in r.text
+    assert "Queue" in r.text and "Skipped" in r.text
+
+
+def test_applications_page_embeds_run_status_polling(client):
+    r = client.get("/applications")
+    assert 'hx-get="/run/status"' in r.text
+    assert "every 2s" in r.text
+
+
+def test_applications_page_shows_career_brief_panel(client):
+    r = client.get("/applications")
+    assert "Career Brief" in r.text
 
 
 def test_run_status_shows_stats(client, monkeypatch):
