@@ -56,18 +56,26 @@ def save_assessment(conn, job_id: int, v: Verdict, model: str,
     conn.commit()
 
 
-def unscored_jobs(conn, prompt_version: str, limit: int) -> list[sqlite3.Row]:
+def unscored_jobs(conn, prompt_version: str,
+                  limit: int | None = None) -> list[sqlite3.Row]:
     """Jobs with no assessment at the current prompt version, excluding
     hard-filter skips and merged duplicates. Bumping the version brings
-    previously scored jobs back, which is what makes prompt changes measurable."""
-    return conn.execute(
-        "SELECT j.* FROM job j"
-        " WHERE j.merged_into_job_id IS NULL"
-        "   AND NOT EXISTS (SELECT 1 FROM assessment a WHERE a.job_id = j.id"
-        "                     AND (a.stage = 'hard'"
-        "                          OR a.prompt_version = ?))"
-        " ORDER BY j.discovered_at DESC LIMIT ?",
-        (prompt_version, limit)).fetchall()
+    previously scored jobs back, which is what makes prompt changes measurable.
+
+    limit=None returns the whole pool, which is what callers want: rationing
+    rows here would let hard-filtered jobs consume a scoring budget they
+    never spend a model call against."""
+    sql = ("SELECT j.* FROM job j"
+           " WHERE j.merged_into_job_id IS NULL"
+           "   AND NOT EXISTS (SELECT 1 FROM assessment a WHERE a.job_id = j.id"
+           "                     AND (a.stage = 'hard'"
+           "                          OR a.prompt_version = ?))"
+           " ORDER BY j.discovered_at DESC")
+    params: list = [prompt_version]
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    return conn.execute(sql, params).fetchall()
 
 
 def facts(conn) -> list[str]:

@@ -71,9 +71,14 @@ async def run_once(args) -> None:
     log.info("discovered %d, %d new after dedupe and staleness",
              len(jobs), new_count)
 
-    # 4-5. hard filter, then score survivors
+    # 4-5. hard filter the whole pool, then score as many survivors as the
+    # budget allows. The sweep is deterministic, local, free, and PERSISTED,
+    # and unscored_jobs already excludes stage='hard' -- so one pass retires
+    # every job that can never pass and the next run finds real candidates
+    # immediately. Breaking early instead would leave the pool dirty and
+    # reproduce the bug on the following run.
     scored = skipped = 0
-    for row in store.unscored_jobs(conn, gate.PROMPT_VERSION, args.max_score):
+    for row in store.unscored_jobs(conn, gate.PROMPT_VERSION):
         job = _row_to_job(row)
 
         reason = hardfilter.check(job, brief)
@@ -81,6 +86,9 @@ async def run_once(args) -> None:
             store.save_hard_skip(conn, row["id"], reason)
             skipped += 1
             continue
+
+        if scored >= args.max_score:
+            continue  # budget spent; this survivor carries to the next run
 
         verdict = await gate.score(job, brief, store.facts(conn), _ask)
         store.save_assessment(conn, row["id"], verdict, MODEL_ID,
