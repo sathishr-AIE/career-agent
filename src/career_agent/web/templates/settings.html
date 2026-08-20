@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Settings</h1>
+
+{% if saved %}
+<div class="card" style="margin-bottom:12px"><span class="done">Settings saved.</span>
+  <span class="rationale">They take effect on the next run — no restart needed.</span></div>
+{% endif %}
+{% if errors %}
+<div class="card" style="margin-bottom:12px">
+  <span class="denied"><b>Nothing was saved.</b></span>
+  <ul class="rationale">
+    {% for field, message in errors.items() %}<li>{{ field }}: {{ message }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% if brief_error %}
+<div class="card" style="margin-bottom:12px">
+  <span class="denied"><b>Career brief unavailable.</b> {{ brief_error }}</span>
+  <div class="rationale">Agent Settings below still work. The brief section is
+    hidden rather than pre-filled with defaults, because saving those would
+    overwrite the file with a brief you never chose.</div>
+</div>
+{% endif %}
+
+<form method="post" action="/settings">
+  {% if brief %}
+  <div class="card panel">
+    <div class="panel-head"><h2>Career Brief</h2>
+      <span class="run-meta">saves to career_brief.toml</span></div>
+    <!-- Marks the brief half as submitted. Without it, a POST from a page
+         whose brief section was hidden looks identical to one where the user
+         cleared every field, and the save would fail on an empty brief. -->
+    <input type="hidden" name="brief_present" value="1">
+
+    {% macro textfield(name, label, value, hint="") %}
+    <div class="field">
+      <label for="{{ name }}">{{ label }}</label>
+      <input type="text" id="{{ name }}" name="{{ name }}" value="{{ value }}">
+      {% if hint %}<span class="hint">{{ hint }}</span>{% endif %}
+      {% if errors.get(name) %}<span class="err">{{ errors[name] }}</span>{% endif %}
+    </div>
+    {% endmacro %}
+
+    {{ textfield("target_titles", "Target titles",
+                 form.target_titles if form else brief.target_titles | join(", "),
+                 "Comma-separated. At least one required.") }}
+    {{ textfield("title_families", "Title families",
+                 form.title_families if form else brief.title_families | join(", "),
+                 "Comma-separated. The hard filter matches these against job titles.") }}
+    {{ textfield("search_locations", "Search locations",
+                 form.search_locations if form else brief.search_locations | join(", "),
+                 "What we ASK sources for. Each city multiplies daily Actor runs.") }}
+    {{ textfield("locations", "Accepted locations",
+                 form.locations if form else brief.locations | join(", "),
+                 "What the hard filter ACCEPTS on the way back. Usually a superset.") }}
+    {{ textfield("work_authorization", "Work authorization",
+                 form.work_authorization if form else brief.work_authorization | join(", ")) }}
+    {{ textfield("excluded_companies", "Excluded companies",
+                 form.excluded_companies if form else brief.excluded_companies | join(", ")) }}
+    {{ textfield("non_negotiables", "Non-negotiables",
+                 form.non_negotiables if form else brief.non_negotiables | join(", ")) }}
+
+    <div class="field checkbox">
+      <input type="checkbox" id="remote_ok" name="remote_ok"
+             {% if (form.remote_ok if form else brief.remote_ok) %}checked{% endif %}>
+      <label for="remote_ok">Remote acceptable</label>
+    </div>
+
+    <div class="field">
+      <label for="salary_floor_inr">Salary floor (INR/year)</label>
+      <input type="number" id="salary_floor_inr" name="salary_floor_inr" min="0"
+             value="{{ form.salary_floor_inr if form else (brief.salary_floor_inr or '') }}">
+      <span class="hint">Leave blank for no floor. 0 would mean something else.</span>
+      {% if errors.get("salary_floor_inr") %}<span class="err">{{ errors["salary_floor_inr"] }}</span>{% endif %}
+    </div>
+
+    <div class="field">
+      <label for="daily_cap">Daily application cap</label>
+      <input type="number" id="daily_cap" name="daily_cap" min="1"
+             value="{{ form.daily_cap if form else brief.daily_cap }}">
+      {% if errors.get("daily_cap") %}<span class="err">{{ errors["daily_cap"] }}</span>{% endif %}
+    </div>
+
+    <div class="field">
+      <label for="gate_threshold">Gate threshold</label>
+      <input type="number" id="gate_threshold" name="gate_threshold" min="0" max="100"
+             value="{{ form.gate_threshold if form else brief.gate_threshold }}">
+      <span class="hint">Weighted score at or above this scores "submit".</span>
+      {% if errors.get("gate_threshold") %}<span class="err">{{ errors["gate_threshold"] }}</span>{% endif %}
+    </div>
+
+    <div class="field">
+      <label for="staleness_days">Staleness (days)</label>
+      <input type="number" id="staleness_days" name="staleness_days" min="1"
+             value="{{ form.staleness_days if form else brief.staleness_days }}">
+      {% if errors.get("staleness_days") %}<span class="err">{{ errors["staleness_days"] }}</span>{% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="card panel" style="margin-top:11px">
+    <div class="panel-head"><h2>Agent Settings</h2>
+      <span class="run-meta">saves to the database</span></div>
+
+    <div class="field">
+      <label for="scoring_model">Scoring model</label>
+      <select id="scoring_model" name="scoring_model">
+        {% set current = form.scoring_model if form else settings["scoring_model"] %}
+        {% for m in scoring_models %}
+        <option value="{{ m }}" {% if m == current %}selected{% endif %}>{{ model_labels[m] }}</option>
+        {% endfor %}
+      </select>
+      <span class="hint">Recorded on every verdict, so past scores stay attributable.</span>
+      {% if errors.get("scoring_model") %}<span class="err">{{ errors["scoring_model"] }}</span>{% endif %}
+    </div>
+
+    <div class="field">
+      <label for="max_score_per_run">Jobs scored per run</label>
+      <input type="number" id="max_score_per_run" name="max_score_per_run" min="0"
+             value="{{ form.max_score_per_run if form else settings['max_score_per_run'] }}">
+      <span class="hint">Caps model calls, not jobs examined. 0 runs discovery
+        and the hard filter only.</span>
+      {% if errors.get("max_score_per_run") %}<span class="err">{{ errors["max_score_per_run"] }}</span>{% endif %}
+    </div>
+  </div>
+
+  <button class="btn primary" style="margin-top:11px" type="submit">Save settings</button>
+</form>
+{% endblock %}

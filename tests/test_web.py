@@ -3,7 +3,8 @@ import threading
 import pytest
 from fastapi.testclient import TestClient
 
-from career_agent import db
+from career_agent import db, store
+from career_agent.config import load_brief
 from career_agent.web import app as web
 from career_agent.web import pipeline
 from career_agent.web import worker
@@ -624,3 +625,104 @@ def test_overview_embeds_pipeline_status_polling(client):
     # exact regression happened once already, in the sibling plan's
     # /run/status poller)
     assert 'hx-swap="innerHTML"' in r.text
+
+
+BRIEF_TOML = """\
+# Keep this comment.
+target_titles = ["AI Engineer"]
+search_locations = ["Chennai"]
+locations = ["Chennai", "Remote"]
+remote_ok = true
+salary_floor_inr = 1200000
+daily_cap = 5
+gate_threshold = 72
+staleness_days = 30
+"""
+
+
+@pytest.fixture
+def brief_path(tmp_path, monkeypatch):
+    p = tmp_path / "career_brief.toml"
+    p.write_text(BRIEF_TOML, encoding="utf-8")
+    monkeypatch.setattr(web, "BRIEF_PATH", p)
+    return p
+
+
+def _form(**overrides):
+    # brief_present mirrors the hidden input the rendered Career Brief
+    # section always carries when the brief loaded (see brief_path fixture),
+    # so this models a real submission of that section, not one with it
+    # hidden.
+    base = {"target_titles": "AI Engineer", "title_families": "",
+            "search_locations": "Chennai", "locations": "Chennai, Remote",
+            "work_authorization": "", "excluded_companies": "",
+            "non_negotiables": "", "remote_ok": "on",
+            "salary_floor_inr": "1200000", "daily_cap": "5",
+            "gate_threshold": "72", "staleness_days": "30",
+            "scoring_model": "claude-sonnet-5", "max_score_per_run": "25",
+            "brief_present": "1"}
+    return {**base, **overrides}
+
+
+def test_settings_page_renders_current_values(client, brief_path):
+    r = client.get("/settings")
+    assert r.status_code == 200
+    assert "Career Brief" in r.text
+    assert "Agent Settings" in r.text
+    assert "claude-sonnet-5" in r.text
+    assert "AI Engineer" in r.text
+
+
+def test_settings_nav_link_is_wired_up(client, brief_path):
+    assert 'href="/settings"' in client.get("/settings").text
+
+
+def test_saving_persists_the_agent_settings(client, brief_path):
+    r = client.post("/settings", data=_form(
+        scoring_model="claude-haiku-4-5-20251001", max_score_per_run="40"))
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    s = store.get_settings(conn)
+    assert s["scoring_model"] == "claude-haiku-4-5-20251001"
+    assert s["max_score_per_run"] == 40
+
+
+def test_saving_writes_the_brief_and_keeps_its_comments(client, brief_path):
+    client.post("/settings", data=_form(daily_cap="9",
+                                        target_titles="AI Engineer, ML Engineer"))
+    text = brief_path.read_text(encoding="utf-8")
+    assert "# Keep this comment." in text
+    brief = load_brief(brief_path)
+    assert brief.daily_cap == 9
+    assert brief.target_titles == ["AI Engineer", "ML Engineer"]
+
+
+def test_an_invalid_brief_leaves_both_stores_untouched(client, brief_path):
+    before = brief_path.read_text(encoding="utf-8")
+    r = client.post("/settings", data=_form(
+        target_titles="",                      # violates min_length=1
+        scoring_model="claude-haiku-4-5-20251001"))
+    assert r.status_code == 200
+    assert "target_titles" in r.text
+    assert brief_path.read_text(encoding="utf-8") == before
+    conn = db.connect(web.DB_PATH)
+    assert store.get_settings(conn)["scoring_model"] == "claude-sonnet-5"
+
+
+def test_an_unknown_model_is_rejected(client, brief_path):
+    before = brief_path.read_text(encoding="utf-8")
+    r = client.post("/settings", data=_form(scoring_model="gpt-4"))
+    assert "scoring_model" in r.text
+    assert brief_path.read_text(encoding="utf-8") == before
+
+
+def test_a_missing_brief_file_does_not_crash_the_page(client, tmp_path,
+                                                      monkeypatch):
+    """Rendering brief defaults would be a trap: saving them would then
+    write a brief the user never chose over the file they lost."""
+    monkeypatch.setattr(web, "BRIEF_PATH", tmp_path / "gone.toml")
+    r = client.get("/settings")
+    assert r.status_code == 200
+    assert "could not be read" in r.text
+    # the Agent Settings half still works, since it does not need the file
+    assert "Scoring model" in r.text

@@ -7,10 +7,12 @@ from pathlib import Path
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
 
 from career_agent import db, store
 from career_agent.apply import ats as ats_apply
-from career_agent.config import load_brief
+from career_agent.config import (MODEL_LABELS, SCORING_MODELS, CareerBrief,
+                                 load_brief, save_brief)
 from career_agent.web import overview, pipeline, worker
 
 DB_PATH = Path("data/career.db")
@@ -356,3 +358,133 @@ def queue_priority(job_id: int, direction: str = Form(...)):
     conn.execute("UPDATE job SET priority = ? WHERE id = ?", (pa, b))
     conn.commit()
     return HTMLResponse("ok")
+
+
+def _split_list(raw: str) -> list[str]:
+    """List fields are comma-separated text inputs, which keeps the form
+    static HTML with no JS array widgets."""
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _validate_brief(target_titles, title_families, search_locations, locations,
+                    work_authorization, excluded_companies, non_negotiables,
+                    remote_ok, salary_floor_inr, daily_cap, gate_threshold,
+                    staleness_days, errors) -> CareerBrief | None:
+    """Build a CareerBrief from the form, recording any problems in `errors`.
+    Validation is the pydantic model's job -- min_length on target_titles and
+    search_locations, daily_cap >= 1, 0 <= gate_threshold <= 100,
+    staleness_days >= 1 -- so no second rule set is written here."""
+    try:
+        return CareerBrief(
+            target_titles=_split_list(target_titles),
+            title_families=_split_list(title_families),
+            search_locations=_split_list(search_locations),
+            locations=_split_list(locations),
+            work_authorization=_split_list(work_authorization),
+            excluded_companies=_split_list(excluded_companies),
+            non_negotiables=_split_list(non_negotiables),
+            remote_ok=remote_ok is not None,
+            salary_floor_inr=(int(salary_floor_inr)
+                              if salary_floor_inr.strip() else None),
+            daily_cap=daily_cap, gate_threshold=gate_threshold,
+            staleness_days=staleness_days)
+    except ValidationError as exc:
+        for err in exc.errors():
+            field = err["loc"][0] if err["loc"] else "form"
+            errors[str(field)] = err["msg"]
+    except ValueError:
+        errors["salary_floor_inr"] = "must be a whole number, or blank"
+    return None
+
+
+def _settings_context(conn, *, brief=None, settings=None, form=None,
+                      errors=None, saved=False) -> dict:
+    """Values shown come from the stores unless a failed submission is being
+    re-rendered, in which case the user's own input is preserved."""
+    brief_error = None
+    if brief is None:
+        try:
+            brief = load_brief(BRIEF_PATH)
+        except Exception as exc:
+            # Falling back to CareerBrief() defaults would be a trap: saving
+            # them would overwrite the file the user lost with a brief they
+            # never chose. Disable that half of the form instead.
+            brief_error = f"{BRIEF_PATH} could not be read: {exc}"
+    settings = settings or store.get_settings(conn)
+    today_submitted = conn.execute(
+        "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
+        " AND date(submitted_at) = date('now')").fetchone()["n"]
+    return {"active_nav": "settings", "brief": brief,
+            "brief_error": brief_error,
+            "daily_cap": brief.daily_cap if brief else "-",
+            "today_submitted": today_submitted,
+            "settings": settings, "scoring_models": SCORING_MODELS,
+            "model_labels": MODEL_LABELS, "form": form or {},
+            "errors": errors or {}, "saved": saved}
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request):
+    conn = _conn()
+    return templates.TemplateResponse(request=request, name="settings.html",
+                                      context=_settings_context(conn))
+
+
+@app.post("/settings", response_class=HTMLResponse)
+def settings_save(request: Request,
+                  target_titles: str = Form(""),
+                  title_families: str = Form(""),
+                  search_locations: str = Form(""),
+                  locations: str = Form(""),
+                  work_authorization: str = Form(""),
+                  excluded_companies: str = Form(""),
+                  non_negotiables: str = Form(""),
+                  remote_ok: str | None = Form(None),
+                  salary_floor_inr: str = Form(""),
+                  daily_cap: int = Form(5),
+                  gate_threshold: int = Form(72),
+                  staleness_days: int = Form(30),
+                  scoring_model: str = Form(...),
+                  max_score_per_run: int = Form(25),
+                  brief_present: str | None = Form(None)):
+    conn = _conn()
+    form = {"target_titles": target_titles, "title_families": title_families,
+            "search_locations": search_locations, "locations": locations,
+            "work_authorization": work_authorization,
+            "excluded_companies": excluded_companies,
+            "non_negotiables": non_negotiables, "remote_ok": remote_ok,
+            "salary_floor_inr": salary_floor_inr, "daily_cap": daily_cap,
+            "gate_threshold": gate_threshold, "staleness_days": staleness_days,
+            "scoring_model": scoring_model,
+            "max_score_per_run": max_score_per_run}
+    errors: dict[str, str] = {}
+
+    # Validate EVERYTHING before writing ANYTHING: a partial save would leave
+    # the DB describing a state the TOML does not.
+    #
+    # brief_present is the hidden marker the brief section renders. When the
+    # TOML could not be read that section is hidden, and this POST carries
+    # only Agent Settings -- which must still save, exactly as the banner on
+    # that page promises.
+    brief = _validate_brief(
+        target_titles, title_families, search_locations, locations,
+        work_authorization, excluded_companies, non_negotiables,
+        remote_ok, salary_floor_inr, daily_cap, gate_threshold,
+        staleness_days, errors) if brief_present else None
+
+    if scoring_model not in SCORING_MODELS:
+        errors["scoring_model"] = f"unknown scoring model: {scoring_model}"
+    if max_score_per_run < 0:
+        errors["max_score_per_run"] = "cannot be negative"
+
+    if errors:
+        return templates.TemplateResponse(
+            request=request, name="settings.html",
+            context=_settings_context(conn, form=form, errors=errors))
+
+    if brief is not None:
+        save_brief(BRIEF_PATH, brief)
+    store.save_settings(conn, scoring_model, max_score_per_run)
+    return templates.TemplateResponse(
+        request=request, name="settings.html",
+        context=_settings_context(conn, saved=True))
