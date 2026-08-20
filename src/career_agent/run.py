@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import functools
 import logging
 import os
 from pathlib import Path
@@ -12,8 +13,6 @@ from career_agent import db, discovery, gate, hardfilter, outcomes, store
 from career_agent.config import load_boards, load_brief
 
 log = logging.getLogger(__name__)
-
-MODEL_ID = "claude-agent-sdk"
 
 
 class AuthError(RuntimeError):
@@ -32,14 +31,15 @@ def verify_auth() -> None:
             "put the result in .env")
 
 
-async def _ask(prompt: str) -> str:
+async def _ask(prompt: str, model: str | None = None) -> str:
     """One tool-less call for gate scoring."""
     from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions,
                                   TextBlock, query)
 
     chunks = []
     async for message in query(prompt=prompt,
-                               options=ClaudeAgentOptions(tools=None)):
+                               options=ClaudeAgentOptions(tools=None,
+                                                          model=model)):
         if isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, TextBlock):
@@ -50,12 +50,20 @@ async def _ask(prompt: str) -> str:
 async def run_once(args) -> None:
     verify_auth()
 
-    if args.max_score == 0:
-        log.warning("--max-score 0: scoring is disabled this run; only "
-                     "discovery and the hard filter will run")
-
     conn = db.connect(Path(args.db))
     db.init_schema(conn)
+
+    settings = store.get_settings(conn)
+    scoring_model = settings["scoring_model"]
+    # An explicit --max-score overrides the stored setting for THIS RUN only
+    # and is not persisted; omitting it uses the Settings value.
+    max_score = (args.max_score if getattr(args, "max_score", None) is not None
+                 else settings["max_score_per_run"])
+    ask = functools.partial(_ask, model=scoring_model)
+
+    if max_score == 0:
+        log.warning("scoring cap is 0: scoring is disabled this run; only "
+                    "discovery and the hard filter will run")
 
     brief = load_brief(Path(args.brief))
     boards = load_boards(Path(args.boards))
@@ -87,11 +95,11 @@ async def run_once(args) -> None:
             skipped += 1
             continue
 
-        if scored >= args.max_score:
+        if scored >= max_score:
             continue  # budget spent; this survivor carries to the next run
 
-        verdict = await gate.score(job, brief, store.facts(conn), _ask)
-        store.save_assessment(conn, row["id"], verdict, MODEL_ID,
+        verdict = await gate.score(job, brief, store.facts(conn), ask)
+        store.save_assessment(conn, row["id"], verdict, scoring_model,
                               gate.PROMPT_VERSION)
         scored += 1
 
@@ -119,9 +127,9 @@ def main() -> None:
     parser.add_argument("--db", default="data/career.db")
     parser.add_argument("--brief", default="career_brief.toml")
     parser.add_argument("--boards", default="ats_boards.toml")
-    parser.add_argument("--max-score", type=int, default=25, dest="max_score",
-                        help="cap scored jobs per run; the rest carry to the "
-                             "next run, which keeps the prompt cache warm")
+    parser.add_argument("--max-score", type=int, default=None, dest="max_score",
+                        help="cap model calls this run, overriding the stored "
+                             "Settings value; omit to use that value")
     # Deliberately no --location flag. Search locations come from the brief.
     args = parser.parse_args()
 

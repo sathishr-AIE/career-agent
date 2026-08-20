@@ -51,7 +51,7 @@ async def test_run_once_derives_no_response_after_scoring(
         await run_once(_Args(tmp_path / "t.db", max_score=0))
 
     assert len(calls) == 1
-    assert "max-score 0" in caplog.text
+    assert "scoring cap is 0" in caplog.text
 
 
 TEST_BRIEF = """\
@@ -155,3 +155,68 @@ async def test_hard_skips_persist_so_the_next_run_finds_real_candidates(
     # remaining pool is exactly the one real candidate
     remaining = store.unscored_jobs(conn, gate.PROMPT_VERSION)
     assert [r["external_id"] for r in remaining] == ["near0"]
+
+
+async def test_scoring_model_comes_from_settings(tmp_path, monkeypatch):
+    db_path, brief_path, conn = _prepare(tmp_path, monkeypatch)
+    _seed_job(conn, "near0", "Chennai")
+    conn.commit()
+    from career_agent import store
+    store.save_settings(conn, "claude-haiku-4-5-20251001", 25)
+
+    seen = {}
+
+    async def fake_score(job, brief, facts, ask):
+        seen["model"] = ask.keywords["model"]
+        return VERDICT
+
+    monkeypatch.setattr("career_agent.gate.score", fake_score)
+    await run_once(_Args(db_path, max_score=None, brief=brief_path))
+
+    assert seen["model"] == "claude-haiku-4-5-20251001"
+    conn = db.connect(db_path)
+    row = conn.execute("SELECT model FROM assessment"
+                       " WHERE stage = 'scored'").fetchone()
+    assert row["model"] == "claude-haiku-4-5-20251001", \
+        "the stored verdict must be attributable to the model that produced it"
+
+
+async def test_omitted_max_score_uses_the_stored_setting(tmp_path, monkeypatch):
+    db_path, brief_path, conn = _prepare(tmp_path, monkeypatch)
+    for i in range(4):
+        _seed_job(conn, f"near{i}", "Chennai")
+    conn.commit()
+    from career_agent import store
+    store.save_settings(conn, "claude-sonnet-5", 2)
+
+    calls = []
+
+    async def fake_score(job, brief, facts, ask):
+        calls.append(job.external_id)
+        return VERDICT
+
+    monkeypatch.setattr("career_agent.gate.score", fake_score)
+    await run_once(_Args(db_path, max_score=None, brief=brief_path))
+    assert len(calls) == 2
+
+
+async def test_explicit_max_score_overrides_the_setting(tmp_path, monkeypatch):
+    db_path, brief_path, conn = _prepare(tmp_path, monkeypatch)
+    for i in range(4):
+        _seed_job(conn, f"near{i}", "Chennai")
+    conn.commit()
+    from career_agent import store
+    store.save_settings(conn, "claude-sonnet-5", 2)
+
+    calls = []
+
+    async def fake_score(job, brief, facts, ask):
+        calls.append(job.external_id)
+        return VERDICT
+
+    monkeypatch.setattr("career_agent.gate.score", fake_score)
+    await run_once(_Args(db_path, max_score=3, brief=brief_path))
+    assert len(calls) == 3
+    # the override is for this run only and must not be persisted
+    conn = db.connect(db_path)
+    assert store.get_settings(conn)["max_score_per_run"] == 2

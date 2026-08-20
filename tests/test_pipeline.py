@@ -70,7 +70,7 @@ async def test_run_background_passes_paths_and_defaults_through(
     assert seen["db"] == str(db_path)
     assert seen["brief"] == str(brief_path)
     assert seen["boards"] == "ats_boards.toml"
-    assert seen["max_score"] == 25
+    assert seen["max_score"] is None
 
 
 async def test_run_background_runs_run_once_off_the_serving_event_loop(

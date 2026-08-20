@@ -8,7 +8,7 @@ from career_agent.web import worker
 
 async def run_background(conn_factory, db_path, brief_path,
                          boards_path: str = "ats_boards.toml",
-                         max_score: int = 25) -> None:
+                         max_score: int | None = None) -> None:
     """Runs the existing discover+hard-filter+score pipeline
     (run.run_once, unchanged) in the background, tracking progress in the
     'pipeline' row of run_state. The caller (the /pipeline/run-now
