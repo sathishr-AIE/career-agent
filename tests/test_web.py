@@ -726,3 +726,41 @@ def test_a_missing_brief_file_does_not_crash_the_page(client, tmp_path,
     assert "could not be read" in r.text
     # the Agent Settings half still works, since it does not need the file
     assert "Scoring model" in r.text
+
+
+def test_a_non_numeric_daily_cap_is_rejected_without_a_422(client, brief_path):
+    """daily_cap is declared as a str Form field and parsed by hand, exactly
+    like salary_floor_inr already was -- an int-typed Form field with no
+    `required` on its <input> would let FastAPI 422 the request before
+    settings_save ever runs, skipping the friendly error page entirely.
+
+    A genuinely blank value can't demonstrate this: FastAPI's own Form()
+    machinery already treats an empty submitted value the same as a
+    missing one and silently substitutes the field's default, for str
+    fields as much as int ones -- so it never reaches our code either way.
+    A non-numeric value is what actually used to 422 with the old int-typed
+    declaration, so that's what this exercises."""
+    before = brief_path.read_text(encoding="utf-8")
+    r = client.post("/settings", data=_form(daily_cap="lots"))
+    assert r.status_code == 200
+    assert "daily_cap" in r.text
+    assert brief_path.read_text(encoding="utf-8") == before
+    conn = db.connect(web.DB_PATH)
+    assert store.get_settings(conn)["scoring_model"] == "claude-sonnet-5"
+
+
+def test_agent_settings_still_save_when_the_brief_is_missing(client, tmp_path,
+                                                              monkeypatch):
+    """The whole point of brief_present: when the TOML can't be read the
+    brief section is hidden, so a real submission from that page carries no
+    brief fields and no brief_present marker at all -- and Agent Settings
+    must still save rather than being rejected for a blank brief."""
+    monkeypatch.setattr(web, "BRIEF_PATH", tmp_path / "gone.toml")
+    r = client.post("/settings", data={
+        "scoring_model": "claude-haiku-4-5-20251001",
+        "max_score_per_run": "40"})
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    s = store.get_settings(conn)
+    assert s["scoring_model"] == "claude-haiku-4-5-20251001"
+    assert s["max_score_per_run"] == 40

@@ -366,6 +366,21 @@ def _split_list(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
+def _parse_int(raw: str, field: str, errors: dict) -> int | None:
+    """Numeric fields are declared as str Form fields, exactly like
+    salary_floor_inr, so a non-numeric value fails through our own 'Nothing
+    was saved' page instead of FastAPI's automatic 422 -- which would bypass
+    settings_save entirely and lose every other field the user typed. (A
+    genuinely blank field never reaches here at all: FastAPI's Form()
+    already treats an empty submitted value the same as a missing one and
+    substitutes the field's default before this function is ever called.)"""
+    try:
+        return int(raw)
+    except ValueError:
+        errors[field] = "must be a whole number"
+        return None
+
+
 def _validate_brief(target_titles, title_families, search_locations, locations,
                     work_authorization, excluded_companies, non_negotiables,
                     remote_ok, salary_floor_inr, daily_cap, gate_threshold,
@@ -441,11 +456,11 @@ def settings_save(request: Request,
                   non_negotiables: str = Form(""),
                   remote_ok: str | None = Form(None),
                   salary_floor_inr: str = Form(""),
-                  daily_cap: int = Form(5),
-                  gate_threshold: int = Form(72),
-                  staleness_days: int = Form(30),
+                  daily_cap: str = Form("5"),
+                  gate_threshold: str = Form("72"),
+                  staleness_days: str = Form("30"),
                   scoring_model: str = Form(...),
-                  max_score_per_run: int = Form(25),
+                  max_score_per_run: str = Form("25"),
                   brief_present: str | None = Form(None)):
     conn = _conn()
     form = {"target_titles": target_titles, "title_families": title_families,
@@ -459,6 +474,17 @@ def settings_save(request: Request,
             "max_score_per_run": max_score_per_run}
     errors: dict[str, str] = {}
 
+    # Every numeric field arrives as text and is parsed here, not declared
+    # int on the route -- an int-typed Form field with no `required` on its
+    # <input> lets FastAPI 422 the request before this function ever runs,
+    # bypassing the "Nothing was saved" page and losing every other field
+    # the user typed.
+    daily_cap_n = _parse_int(daily_cap, "daily_cap", errors)
+    gate_threshold_n = _parse_int(gate_threshold, "gate_threshold", errors)
+    staleness_days_n = _parse_int(staleness_days, "staleness_days", errors)
+    max_score_per_run_n = _parse_int(
+        max_score_per_run, "max_score_per_run", errors)
+
     # Validate EVERYTHING before writing ANYTHING: a partial save would leave
     # the DB describing a state the TOML does not.
     #
@@ -466,15 +492,18 @@ def settings_save(request: Request,
     # TOML could not be read that section is hidden, and this POST carries
     # only Agent Settings -- which must still save, exactly as the banner on
     # that page promises.
-    brief = _validate_brief(
-        target_titles, title_families, search_locations, locations,
-        work_authorization, excluded_companies, non_negotiables,
-        remote_ok, salary_floor_inr, daily_cap, gate_threshold,
-        staleness_days, errors) if brief_present else None
+    brief = None
+    if brief_present and None not in (daily_cap_n, gate_threshold_n,
+                                      staleness_days_n):
+        brief = _validate_brief(
+            target_titles, title_families, search_locations, locations,
+            work_authorization, excluded_companies, non_negotiables,
+            remote_ok, salary_floor_inr, daily_cap_n, gate_threshold_n,
+            staleness_days_n, errors)
 
     if scoring_model not in SCORING_MODELS:
         errors["scoring_model"] = f"unknown scoring model: {scoring_model}"
-    if max_score_per_run < 0:
+    if max_score_per_run_n is not None and max_score_per_run_n < 0:
         errors["max_score_per_run"] = "cannot be negative"
 
     if errors:
@@ -484,7 +513,7 @@ def settings_save(request: Request,
 
     if brief is not None:
         save_brief(BRIEF_PATH, brief)
-    store.save_settings(conn, scoring_model, max_score_per_run)
+    store.save_settings(conn, scoring_model, max_score_per_run_n)
     return templates.TemplateResponse(
         request=request, name="settings.html",
         context=_settings_context(conn, saved=True))
