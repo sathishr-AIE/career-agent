@@ -10,7 +10,8 @@ from apify_client import ApifyClient
 from dotenv import load_dotenv
 
 from career_agent import db, discovery, gate, hardfilter, outcomes, store
-from career_agent.config import load_boards, load_brief
+from career_agent.config import (DEFAULT_SCORING_MODEL, SCORING_MODELS,
+                                 load_boards, load_brief)
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +33,12 @@ def verify_auth() -> None:
 
 
 async def _ask(prompt: str, model: str | None = None) -> str:
-    """One tool-less call for gate scoring."""
+    """One call for gate scoring, with the CLI's default tool set.
+
+    `tools=None` is NOT "no tools" -- it means "don't override", so the SDK
+    hands Claude its usual built-ins. `tools=[]` is what actually disables
+    them. Scoring only ever needs the text back, so the default set is
+    harmless here; the wording is what was wrong, not the argument."""
     from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions,
                                   TextBlock, query)
 
@@ -55,6 +61,15 @@ async def run_once(args) -> None:
 
     settings = store.get_settings(conn)
     scoring_model = settings["scoring_model"]
+    if scoring_model not in SCORING_MODELS:
+        # Retiring a model leaves stored rows (and db.py's schema default)
+        # holding an id save_settings would now reject. Sending it anyway
+        # would fail every scoring call; refusing to run would strand the
+        # user with no way in but SQL. Fall back and say so.
+        log.warning("stored scoring model %r is not a known model; falling "
+                    "back to %s. Pick one in Settings to silence this.",
+                    scoring_model, DEFAULT_SCORING_MODEL)
+        scoring_model = DEFAULT_SCORING_MODEL
     # An explicit --max-score overrides the stored setting for THIS RUN only
     # and is not persisted; omitting it uses the Settings value.
     max_score = (args.max_score if getattr(args, "max_score", None) is not None

@@ -1,9 +1,12 @@
+import os
+import tomllib
 from pathlib import Path
 
 import pydantic
 import pytest
 
-from career_agent.config import CareerBrief, load_boards, load_brief, save_brief
+from career_agent.config import (CareerBrief, load_boards, load_brief,
+                                 save_brief)
 
 BRIEF = """
 target_titles = ["AI Engineer", "ML Engineer"]
@@ -132,3 +135,50 @@ def test_save_brief_creates_a_file_that_does_not_exist(tmp_path):
     save_brief(p, CareerBrief(target_titles=["AI Engineer"],
                               search_locations=["Chennai"]))
     assert load_brief(p).target_titles == ["AI Engineer"]
+
+
+def test_save_brief_never_exposes_a_truncated_file(tmp_path, monkeypatch):
+    """save_brief must not truncate the live file: the worker's guard() and
+    the dashboard routes call load_brief on every tick and every request, so
+    a reader landing mid-write would get an unparseable TOML and fail a run
+    or 500 a page. The write goes to a sibling temp file and is swapped in
+    with os.replace, so a reader sees either the old brief or the new one."""
+    p = tmp_path / "brief.toml"
+    p.write_text(BRIEF, encoding="utf-8")
+    brief = load_brief(p)
+    brief.daily_cap = 9
+
+    seen = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        # what a concurrent reader would see at the last possible instant
+        # before the swap -- under write_text this was empty or partial
+        seen.append(Path(dst).read_bytes())
+        return real_replace(src, dst)
+
+    monkeypatch.setattr("career_agent.config.os.replace", spy)
+    save_brief(p, brief)
+
+    assert seen, "save_brief no longer goes through os.replace"
+    still_readable = CareerBrief(**tomllib.loads(seen[0].decode("utf-8")))
+    assert still_readable.daily_cap == 5, \
+        "the old brief must stay whole and parseable right up to the swap"
+    assert load_brief(p).daily_cap == 9
+    assert list(tmp_path.iterdir()) == [p], "left a stray temp file behind"
+
+
+def test_save_brief_leaves_no_temp_file_when_the_write_fails(tmp_path,
+                                                             monkeypatch):
+    p = tmp_path / "brief.toml"
+    p.write_text(BRIEF, encoding="utf-8")
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("career_agent.config.os.replace", boom)
+    with pytest.raises(OSError):
+        save_brief(p, load_brief(p))
+
+    assert list(tmp_path.iterdir()) == [p], "left a stray temp file behind"
+    assert p.read_text(encoding="utf-8") == BRIEF

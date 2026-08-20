@@ -73,9 +73,9 @@ def test_settings_default_to_sonnet_and_25(conn):
 
 
 def test_save_settings_round_trips(conn):
-    store.save_settings(conn, "claude-haiku-4-5-20251001", 50)
+    store.save_settings(conn, "claude-haiku-4-5", 50)
     s = store.get_settings(conn)
-    assert s["scoring_model"] == "claude-haiku-4-5-20251001"
+    assert s["scoring_model"] == "claude-haiku-4-5"
     assert s["max_score_per_run"] == 50
 
 

@@ -162,7 +162,7 @@ async def test_scoring_model_comes_from_settings(tmp_path, monkeypatch):
     _seed_job(conn, "near0", "Chennai")
     conn.commit()
     from career_agent import store
-    store.save_settings(conn, "claude-haiku-4-5-20251001", 25)
+    store.save_settings(conn, "claude-haiku-4-5", 25)
 
     seen = {}
 
@@ -173,12 +173,46 @@ async def test_scoring_model_comes_from_settings(tmp_path, monkeypatch):
     monkeypatch.setattr("career_agent.gate.score", fake_score)
     await run_once(_Args(db_path, max_score=None, brief=brief_path))
 
-    assert seen["model"] == "claude-haiku-4-5-20251001"
+    assert seen["model"] == "claude-haiku-4-5"
     conn = db.connect(db_path)
     row = conn.execute("SELECT model FROM assessment"
                        " WHERE stage = 'scored'").fetchone()
-    assert row["model"] == "claude-haiku-4-5-20251001", \
+    assert row["model"] == "claude-haiku-4-5", \
         "the stored verdict must be attributable to the model that produced it"
+
+
+async def test_a_retired_stored_model_falls_back_instead_of_being_sent(
+        tmp_path, monkeypatch, caplog):
+    """save_settings validates against SCORING_MODELS, but rows written
+    before a model was retired -- and db.py's schema default, which repeats
+    the id as a bare literal -- can still hold an id that is no longer
+    allowed. Sending it would fail every scoring call; refusing to run would
+    strand the user. Fall back to the default and warn."""
+    from career_agent.config import DEFAULT_SCORING_MODEL
+
+    db_path, brief_path, conn = _prepare(tmp_path, monkeypatch)
+    _seed_job(conn, "near0", "Chennai")
+    # bypasses save_settings on purpose: this is a row from an older release
+    conn.execute("UPDATE setting SET scoring_model = 'claude-retired-3'")
+    conn.commit()
+
+    seen = {}
+
+    async def fake_score(job, brief, facts, ask):
+        seen["model"] = ask.keywords["model"]
+        return VERDICT
+
+    monkeypatch.setattr("career_agent.gate.score", fake_score)
+    with caplog.at_level(logging.WARNING):
+        await run_once(_Args(db_path, max_score=None, brief=brief_path))
+
+    assert seen["model"] == DEFAULT_SCORING_MODEL
+    assert "claude-retired-3" in caplog.text
+    conn = db.connect(db_path)
+    row = conn.execute("SELECT model FROM assessment"
+                       " WHERE stage = 'scored'").fetchone()
+    assert row["model"] == DEFAULT_SCORING_MODEL, \
+        "the verdict must record the model that actually produced it"
 
 
 async def test_omitted_max_score_uses_the_stored_setting(tmp_path, monkeypatch):

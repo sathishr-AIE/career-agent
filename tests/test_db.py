@@ -111,11 +111,11 @@ def test_setting_row_is_seeded(conn):
 def test_setting_seeding_does_not_clobber_a_saved_choice(conn):
     """init_schema runs on every web request; re-seeding must not reset
     the user's model choice back to the default."""
-    conn.execute("UPDATE setting SET scoring_model = 'claude-haiku-4-5-20251001',"
+    conn.execute("UPDATE setting SET scoring_model = 'claude-haiku-4-5',"
                  " max_score_per_run = 50")
     conn.commit()
     db.init_schema(conn)
     assert conn.execute("SELECT COUNT(*) n FROM setting").fetchone()["n"] == 1
     row = conn.execute("SELECT * FROM setting").fetchone()
-    assert row["scoring_model"] == "claude-haiku-4-5-20251001"
+    assert row["scoring_model"] == "claude-haiku-4-5"
     assert row["max_score_per_run"] == 50

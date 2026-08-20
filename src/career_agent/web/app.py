@@ -370,10 +370,15 @@ def _parse_int(raw: str, field: str, errors: dict) -> int | None:
     """Numeric fields are declared as str Form fields, exactly like
     salary_floor_inr, so a non-numeric value fails through our own 'Nothing
     was saved' page instead of FastAPI's automatic 422 -- which would bypass
-    settings_save entirely and lose every other field the user typed. (A
-    genuinely blank field never reaches here at all: FastAPI's Form()
-    already treats an empty submitted value the same as a missing one and
-    substitutes the field's default before this function is ever called.)"""
+    settings_save entirely and lose every other field the user typed.
+
+    Their Form() defaults are "" for the same reason blankness is an error
+    here: FastAPI substitutes a field's default for an empty submitted
+    value, so a *value* default would turn "the user cleared the box" into a
+    silent revert to that value, reported as "Settings saved"."""
+    if not raw.strip():
+        errors[field] = "is required"
+        return None
     try:
         return int(raw)
     except ValueError:
@@ -412,20 +417,19 @@ def _validate_brief(target_titles, title_families, search_locations, locations,
     return None
 
 
-def _settings_context(conn, *, brief=None, settings=None, form=None,
-                      errors=None, saved=False) -> dict:
+def _settings_context(conn, *, form=None, errors=None, saved=False) -> dict:
     """Values shown come from the stores unless a failed submission is being
     re-rendered, in which case the user's own input is preserved."""
+    brief = None
     brief_error = None
-    if brief is None:
-        try:
-            brief = load_brief(BRIEF_PATH)
-        except Exception as exc:
-            # Falling back to CareerBrief() defaults would be a trap: saving
-            # them would overwrite the file the user lost with a brief they
-            # never chose. Disable that half of the form instead.
-            brief_error = f"{BRIEF_PATH} could not be read: {exc}"
-    settings = settings or store.get_settings(conn)
+    try:
+        brief = load_brief(BRIEF_PATH)
+    except Exception as exc:
+        # Falling back to CareerBrief() defaults would be a trap: saving
+        # them would overwrite the file the user lost with a brief they
+        # never chose. Disable that half of the form instead.
+        brief_error = f"{BRIEF_PATH} could not be read: {exc}"
+    settings = store.get_settings(conn)
     today_submitted = conn.execute(
         "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
         " AND date(submitted_at) = date('now')").fetchone()["n"]
@@ -456,11 +460,11 @@ def settings_save(request: Request,
                   non_negotiables: str = Form(""),
                   remote_ok: str | None = Form(None),
                   salary_floor_inr: str = Form(""),
-                  daily_cap: str = Form("5"),
-                  gate_threshold: str = Form("72"),
-                  staleness_days: str = Form("30"),
+                  daily_cap: str = Form(""),
+                  gate_threshold: str = Form(""),
+                  staleness_days: str = Form(""),
                   scoring_model: str = Form(...),
-                  max_score_per_run: str = Form("25"),
+                  max_score_per_run: str = Form(""),
                   brief_present: str | None = Form(None)):
     conn = _conn()
     form = {"target_titles": target_titles, "title_families": title_families,
@@ -479,19 +483,25 @@ def settings_save(request: Request,
     # <input> lets FastAPI 422 the request before this function ever runs,
     # bypassing the "Nothing was saved" page and losing every other field
     # the user typed.
-    daily_cap_n = _parse_int(daily_cap, "daily_cap", errors)
-    gate_threshold_n = _parse_int(gate_threshold, "gate_threshold", errors)
-    staleness_days_n = _parse_int(staleness_days, "staleness_days", errors)
+    #
+    # max_score_per_run is an Agent Setting: its <input> is on the page
+    # unconditionally, so it is always required.
     max_score_per_run_n = _parse_int(
         max_score_per_run, "max_score_per_run", errors)
 
+    # The brief numerics are required only when brief_present says their
+    # section was actually on the page. When the TOML could not be read that
+    # section is hidden and this POST carries none of its fields, so
+    # demanding three numbers here would break the "Agent Settings still
+    # save" promise the banner on that page makes.
+    daily_cap_n = gate_threshold_n = staleness_days_n = None
+    if brief_present:
+        daily_cap_n = _parse_int(daily_cap, "daily_cap", errors)
+        gate_threshold_n = _parse_int(gate_threshold, "gate_threshold", errors)
+        staleness_days_n = _parse_int(staleness_days, "staleness_days", errors)
+
     # Validate EVERYTHING before writing ANYTHING: a partial save would leave
     # the DB describing a state the TOML does not.
-    #
-    # brief_present is the hidden marker the brief section renders. When the
-    # TOML could not be read that section is hidden, and this POST carries
-    # only Agent Settings -- which must still save, exactly as the banner on
-    # that page promises.
     brief = None
     if brief_present and None not in (daily_cap_n, gate_threshold_n,
                                       staleness_days_n):

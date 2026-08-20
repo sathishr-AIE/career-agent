@@ -673,17 +673,22 @@ def test_settings_page_renders_current_values(client, brief_path):
     assert "AI Engineer" in r.text
 
 
-def test_settings_nav_link_is_wired_up(client, brief_path):
-    assert 'href="/settings"' in client.get("/settings").text
+def test_settings_nav_link_is_active_on_the_settings_page(client, brief_path):
+    """base.html emits href="/settings" in the sidebar of EVERY page, so the
+    bare link proves nothing about which page rendered. Only the active
+    highlight, which comes from active_nav, does."""
+    assert '<a href="/settings" class="active">' in client.get("/settings").text
+    # ...and it is not lit on a page that isn't Settings
+    assert '<a href="/settings" class="active">' not in client.get("/").text
 
 
 def test_saving_persists_the_agent_settings(client, brief_path):
     r = client.post("/settings", data=_form(
-        scoring_model="claude-haiku-4-5-20251001", max_score_per_run="40"))
+        scoring_model="claude-haiku-4-5", max_score_per_run="40"))
     assert r.status_code == 200
     conn = db.connect(web.DB_PATH)
     s = store.get_settings(conn)
-    assert s["scoring_model"] == "claude-haiku-4-5-20251001"
+    assert s["scoring_model"] == "claude-haiku-4-5"
     assert s["max_score_per_run"] == 40
 
 
@@ -701,7 +706,7 @@ def test_an_invalid_brief_leaves_both_stores_untouched(client, brief_path):
     before = brief_path.read_text(encoding="utf-8")
     r = client.post("/settings", data=_form(
         target_titles="",                      # violates min_length=1
-        scoring_model="claude-haiku-4-5-20251001"))
+        scoring_model="claude-haiku-4-5"))
     assert r.status_code == 200
     assert "target_titles" in r.text
     assert brief_path.read_text(encoding="utf-8") == before
@@ -732,14 +737,10 @@ def test_a_non_numeric_daily_cap_is_rejected_without_a_422(client, brief_path):
     """daily_cap is declared as a str Form field and parsed by hand, exactly
     like salary_floor_inr already was -- an int-typed Form field with no
     `required` on its <input> would let FastAPI 422 the request before
-    settings_save ever runs, skipping the friendly error page entirely.
-
-    A genuinely blank value can't demonstrate this: FastAPI's own Form()
-    machinery already treats an empty submitted value the same as a
-    missing one and silently substitutes the field's default, for str
-    fields as much as int ones -- so it never reaches our code either way.
-    A non-numeric value is what actually used to 422 with the old int-typed
-    declaration, so that's what this exercises."""
+    settings_save ever runs, skipping the friendly error page entirely. A
+    non-numeric value is what used to 422 under the old int-typed
+    declaration, so that's what this exercises; the blank case, which is a
+    different bug, is covered by the test below."""
     before = brief_path.read_text(encoding="utf-8")
     r = client.post("/settings", data=_form(daily_cap="lots"))
     assert r.status_code == 200
@@ -757,10 +758,44 @@ def test_agent_settings_still_save_when_the_brief_is_missing(client, tmp_path,
     must still save rather than being rejected for a blank brief."""
     monkeypatch.setattr(web, "BRIEF_PATH", tmp_path / "gone.toml")
     r = client.post("/settings", data={
-        "scoring_model": "claude-haiku-4-5-20251001",
+        "scoring_model": "claude-haiku-4-5",
         "max_score_per_run": "40"})
     assert r.status_code == 200
+    assert "Settings saved" in r.text
+    assert "Nothing was saved" not in r.text
     conn = db.connect(web.DB_PATH)
     s = store.get_settings(conn)
-    assert s["scoring_model"] == "claude-haiku-4-5-20251001"
+    assert s["scoring_model"] == "claude-haiku-4-5"
     assert s["max_score_per_run"] == 40
+
+
+def test_a_blank_numeric_is_an_error_not_a_silent_revert(client, brief_path):
+    """The nastiest shape of the Form()-default trap. FastAPI substitutes a
+    field's default for an EMPTY submitted value, so while these fields
+    defaulted to "5"/"72"/"30"/"25", clearing the daily cap box and saving
+    reported "Settings saved" while quietly reverting four values the user
+    never chose -- rewriting the version-controlled TOML and, via
+    gate_threshold, changing which jobs get submitted. The defaults are ""
+    now, so a cleared box is a field error and nothing is written."""
+    before = brief_path.read_text(encoding="utf-8")
+    settings_before = dict(store.get_settings(db.connect(web.DB_PATH)))
+
+    r = client.post("/settings", data=_form(
+        daily_cap="", gate_threshold="80", staleness_days="45",
+        max_score_per_run="40", scoring_model="claude-haiku-4-5"))
+
+    assert r.status_code == 200
+    assert "Nothing was saved" in r.text
+    assert "Settings saved" not in r.text
+    assert "daily_cap" in r.text
+    # all-or-nothing: neither store moved, and the TOML is byte-identical
+    assert brief_path.read_text(encoding="utf-8") == before
+    assert dict(store.get_settings(db.connect(web.DB_PATH))) == settings_before
+
+
+def test_a_blank_max_score_per_run_is_an_error_too(client, brief_path):
+    """max_score_per_run is an Agent Setting, so unlike the brief numerics
+    it is required on every POST, brief_present or not."""
+    r = client.post("/settings", data=_form(max_score_per_run=""))
+    assert "Nothing was saved" in r.text
+    assert "max_score_per_run" in r.text
