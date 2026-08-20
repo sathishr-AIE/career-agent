@@ -1,6 +1,7 @@
 import tomllib
 from pathlib import Path
 
+import tomlkit
 from pydantic import BaseModel, Field
 
 # Operational, not part of the career brief. Validated in Python rather than
@@ -49,3 +50,24 @@ def load_brief(path: Path) -> CareerBrief:
 def load_boards(path: Path) -> list[Board]:
     with open(path, "rb") as f:
         return [Board(**b) for b in tomllib.load(f).get("board", [])]
+
+
+def save_brief(path: Path, brief: CareerBrief) -> None:
+    """Write the brief back preserving comments, key order, and formatting.
+    The file is version controlled and its comments explain non-obvious
+    consequences ("adding a city multiplies daily Actor runs"), so a
+    round-trip write is the only acceptable kind."""
+    if path.exists():
+        doc = tomlkit.parse(path.read_text(encoding="utf-8"))
+    else:
+        doc = tomlkit.document()
+
+    for field, value in brief.model_dump().items():
+        if value is None:
+            # TOML has no null; absent is how "unset" is spelled, and
+            # load_brief will fall back to the pydantic default.
+            doc.pop(field, None)
+        else:
+            doc[field] = value
+
+    path.write_text(tomlkit.dumps(doc), encoding="utf-8")
