@@ -3,6 +3,17 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+# Operational, not part of the career brief. Validated in Python rather than
+# by a CHECK constraint so retiring or adding a model is a constant edit, not
+# a schema migration.
+SCORING_MODELS = ("claude-sonnet-5", "claude-haiku-4-5-20251001")
+DEFAULT_SCORING_MODEL = SCORING_MODELS[0]
+
+MODEL_LABELS = {
+    "claude-sonnet-5": "Sonnet — better judgement (default)",
+    "claude-haiku-4-5-20251001": "Haiku — faster, lighter on rate limits",
+}
+
 
 class CareerBrief(BaseModel):
     target_titles: list[str] = Field(min_length=1)

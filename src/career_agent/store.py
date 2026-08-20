@@ -1,7 +1,7 @@
 import sqlite3
 
 from career_agent import normalize
-from career_agent.config import CareerBrief
+from career_agent.config import SCORING_MODELS, CareerBrief
 from career_agent.models import Job, Verdict
 
 
@@ -73,3 +73,19 @@ def unscored_jobs(conn, prompt_version: str, limit: int) -> list[sqlite3.Row]:
 def facts(conn) -> list[str]:
     rows = conn.execute("SELECT claim, evidence FROM fact ORDER BY id").fetchall()
     return [f"{r['claim']} (evidence: {r['evidence']})" for r in rows]
+
+
+def get_settings(conn) -> sqlite3.Row:
+    return conn.execute("SELECT * FROM setting WHERE id = 1").fetchone()
+
+
+def save_settings(conn, scoring_model: str, max_score_per_run: int) -> None:
+    if scoring_model not in SCORING_MODELS:
+        raise ValueError(f"unknown scoring model: {scoring_model}")
+    if max_score_per_run < 0:
+        raise ValueError("max_score_per_run cannot be negative")
+    conn.execute(
+        "UPDATE setting SET scoring_model = ?, max_score_per_run = ?,"
+        " updated_at = datetime('now') WHERE id = 1",
+        (scoring_model, max_score_per_run))
+    conn.commit()

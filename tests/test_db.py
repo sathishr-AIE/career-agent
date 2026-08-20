@@ -100,3 +100,22 @@ def test_job_priority_defaults_to_null(conn):
     j = _job(conn)
     row = conn.execute("SELECT priority FROM job WHERE id = ?", (j,)).fetchone()
     assert row["priority"] is None
+
+
+def test_setting_row_is_seeded(conn):
+    row = conn.execute("SELECT * FROM setting").fetchone()
+    assert row["scoring_model"] == "claude-sonnet-5"
+    assert row["max_score_per_run"] == 25
+
+
+def test_setting_seeding_does_not_clobber_a_saved_choice(conn):
+    """init_schema runs on every web request; re-seeding must not reset
+    the user's model choice back to the default."""
+    conn.execute("UPDATE setting SET scoring_model = 'claude-haiku-4-5-20251001',"
+                 " max_score_per_run = 50")
+    conn.commit()
+    db.init_schema(conn)
+    assert conn.execute("SELECT COUNT(*) n FROM setting").fetchone()["n"] == 1
+    row = conn.execute("SELECT * FROM setting").fetchone()
+    assert row["scoring_model"] == "claude-haiku-4-5-20251001"
+    assert row["max_score_per_run"] == 50

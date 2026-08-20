@@ -86,6 +86,14 @@ CREATE TABLE IF NOT EXISTS run_state (
     updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS setting (
+    id                INTEGER PRIMARY KEY CHECK (id = 1),
+    scoring_model     TEXT NOT NULL DEFAULT 'claude-sonnet-5',
+    max_score_per_run INTEGER NOT NULL DEFAULT 25
+                        CHECK (max_score_per_run >= 0),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS fact (
     id         INTEGER PRIMARY KEY,
     claim      TEXT NOT NULL,
@@ -134,6 +142,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.execute("INSERT OR IGNORE INTO run_state (kind, mode)"
                  " VALUES ('apply', 'manual')")
     conn.execute("INSERT OR IGNORE INTO run_state (kind) VALUES ('pipeline')")
+    conn.execute("INSERT OR IGNORE INTO setting (id) VALUES (1)")
     _add_column_if_missing(conn, "job", "priority", "INTEGER")
     conn.commit()
 

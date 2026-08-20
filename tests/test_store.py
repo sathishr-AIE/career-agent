@@ -64,3 +64,34 @@ def test_unscored_excludes_merged_jobs(conn):
 def test_facts_returns_claims(conn):
     conn.execute("INSERT INTO fact (claim, evidence) VALUES ('Built RAG', 'proj X')")
     assert store.facts(conn) == ["Built RAG (evidence: proj X)"]
+
+
+def test_settings_default_to_sonnet_and_25(conn):
+    s = store.get_settings(conn)
+    assert s["scoring_model"] == "claude-sonnet-5"
+    assert s["max_score_per_run"] == 25
+
+
+def test_save_settings_round_trips(conn):
+    store.save_settings(conn, "claude-haiku-4-5-20251001", 50)
+    s = store.get_settings(conn)
+    assert s["scoring_model"] == "claude-haiku-4-5-20251001"
+    assert s["max_score_per_run"] == 50
+
+
+def test_save_settings_rejects_an_unknown_model(conn):
+    with pytest.raises(ValueError, match="unknown scoring model"):
+        store.save_settings(conn, "gpt-4", 25)
+    assert store.get_settings(conn)["scoring_model"] == "claude-sonnet-5"
+
+
+def test_save_settings_rejects_a_negative_cap(conn):
+    with pytest.raises(ValueError):
+        store.save_settings(conn, "claude-sonnet-5", -1)
+    assert store.get_settings(conn)["max_score_per_run"] == 25
+
+
+def test_save_settings_allows_zero_cap(conn):
+    """0 is meaningful: discovery and the hard filter run, scoring does not."""
+    store.save_settings(conn, "claude-sonnet-5", 0)
+    assert store.get_settings(conn)["max_score_per_run"] == 0
