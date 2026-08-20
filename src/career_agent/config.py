@@ -66,8 +66,14 @@ def save_brief(path: Path, brief: CareerBrief) -> None:
         if value is None:
             # TOML has no null; absent is how "unset" is spelled, and
             # load_brief will fall back to the pydantic default.
-            doc.pop(field, None)
-        else:
+            if field in doc:
+                doc.pop(field)
+        elif field not in doc or doc[field] != value:
+            # Assigning unconditionally would replace the item wholesale,
+            # discarding its original formatting (e.g. a manually wrapped
+            # multi-line array) even when the value didn't change. Only
+            # touch keys whose value actually changed, so an untouched
+            # field's diff stays silent.
             doc[field] = value
 
     path.write_text(tomlkit.dumps(doc), encoding="utf-8")

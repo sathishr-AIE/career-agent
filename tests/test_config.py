@@ -99,6 +99,34 @@ def test_save_brief_omits_an_unset_salary_floor(tmp_path):
     assert load_brief(p).salary_floor_inr is None
 
 
+def test_save_brief_preserves_multiline_array_formatting_when_untouched(tmp_path):
+    """Assigning to a tomlkit item wholesale replaces its formatting, even
+    when the new value equals the old one. A save that only changes
+    daily_cap must not collapse an unrelated hand-wrapped array."""
+    wrapped = (
+        'target_titles = ["AI Engineer"]\n'
+        'title_families = ["ai engineer", "machine learning engineer",\n'
+        '                  "applied ai engineer", "ml engineer", "data scientist"]\n'
+        'search_locations = ["Chennai"]\n'
+        'daily_cap = 5\n'
+    )
+    p = tmp_path / "brief.toml"
+    p.write_text(wrapped, encoding="utf-8")
+    brief = load_brief(p)
+    brief.daily_cap = 9
+    save_brief(p, brief)
+    text = p.read_text(encoding="utf-8")
+    assert (
+        'title_families = ["ai engineer", "machine learning engineer",\n'
+        '                  "applied ai engineer", "ml engineer", "data scientist"]'
+    ) in text
+    assert load_brief(p).daily_cap == 9
+    assert load_brief(p).title_families == [
+        "ai engineer", "machine learning engineer",
+        "applied ai engineer", "ml engineer", "data scientist",
+    ]
+
+
 def test_save_brief_creates_a_file_that_does_not_exist(tmp_path):
     p = tmp_path / "new.toml"
     save_brief(p, CareerBrief(target_titles=["AI Engineer"],
