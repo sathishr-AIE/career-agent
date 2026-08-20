@@ -98,10 +98,20 @@ async def test_max_score_caps_model_calls_not_rows_examined(
     """The bug: --max-score was a LIMIT on rows pulled, so jobs the hard
     filter rejects consumed the budget and a run scored ~nothing."""
     db_path, brief_path, conn = _prepare(tmp_path, monkeypatch)
-    for i in range(20):
+    # Interleaved on purpose: near2 is the row that trips the "budget spent"
+    # branch (it's the 3rd survivor against a budget of 2), and far10..19
+    # are dead-end rows seeded AFTER it. Under `continue` those far rows
+    # still get visited and hard-filtered this sweep; under `break` the loop
+    # would stop at near2 and they'd never be swept -- that's what makes
+    # `hard == 20` below distinguish the two, unlike an all-far-then-all-near
+    # ordering where nothing follows the last survivor either way.
+    for i in range(10):
         _seed_job(conn, f"far{i}", "San Francisco, CA")   # fail the filter
-    for i in range(3):
-        _seed_job(conn, f"near{i}", "Chennai")            # pass it
+    for i in range(2):
+        _seed_job(conn, f"near{i}", "Chennai")            # pass it, get scored
+    _seed_job(conn, "near2", "Chennai")                   # pass it, budget spent
+    for i in range(10, 20):
+        _seed_job(conn, f"far{i}", "San Francisco, CA")   # fail it, seeded after
     conn.commit()
 
     calls = []
@@ -123,9 +133,14 @@ async def test_max_score_caps_model_calls_not_rows_examined(
 async def test_hard_skips_persist_so_the_next_run_finds_real_candidates(
         tmp_path, monkeypatch):
     db_path, brief_path, conn = _prepare(tmp_path, monkeypatch)
-    for i in range(5):
+    # Interleaved on purpose, same reasoning as the test above: near0 trips
+    # the "budget spent" branch immediately (max_score=0), and far2..4 are
+    # seeded AFTER it so only `continue` (not `break`) would still sweep them.
+    for i in range(2):
         _seed_job(conn, f"far{i}", "San Francisco, CA")
     _seed_job(conn, "near0", "Chennai")
+    for i in range(2, 5):
+        _seed_job(conn, f"far{i}", "San Francisco, CA")
     conn.commit()
 
     async def fake_score(job, brief, facts, ask):
