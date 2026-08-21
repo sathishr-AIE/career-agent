@@ -82,11 +82,14 @@
         {% elif j["terminal_status"] == "failed_permanent" %}
           <span class="denied">Failed permanently — see the event log</span>
         {% elif j["has_draft"] %}
-          <button hx-post="/send/{{ j['id'] }}" hx-swap="outerHTML">Send</button>
+          <button hx-post="/send/{{ j['id'] }}" hx-swap="outerHTML"
+                  title="Submission is not implemented yet (v3). This will tell you so rather than pretending.">Send</button>
         {% elif j["verdict"] == "skip" %}
-          <button hx-post="/override/{{ j['id'] }}" hx-swap="outerHTML">Apply anyway</button>
+          <button hx-post="/override/{{ j['id'] }}" hx-swap="outerHTML"
+                  title="Records an override of the gate's skip, and tracks it. Submission is manual.">Track anyway</button>
         {% else %}
-          <button hx-post="/apply/{{ j['id'] }}" hx-swap="outerHTML">Apply</button>
+          <button hx-post="/apply/{{ j['id'] }}" hx-swap="outerHTML"
+                  title="Opens the posting and tracks it. Submission is manual — see the roadmap.">Open &amp; track</button>
           <button hx-post="/dismiss/{{ j['id'] }}" hx-swap="outerHTML">Dismiss</button>
         {% endif %}
       </td>
@@ -108,7 +111,8 @@
       <td><a href="{{ j['url'] }}">{{ j["title"] }}</a> at {{ j["company"] }}<br>
         <span class="rationale">{{ j["rationale"] }}</span></td>
       <td>{{ j["source"] }}</td>
-      <td><button hx-post="/override/{{ j['id'] }}" hx-swap="outerHTML">Apply anyway</button></td>
+      <td><button hx-post="/override/{{ j['id'] }}" hx-swap="outerHTML"
+                  title="Records an override of the gate's skip, and tracks it. Submission is manual.">Track anyway</button></td>
     </tr>
     {% endfor %}
   </table>

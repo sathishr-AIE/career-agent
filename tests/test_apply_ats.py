@@ -20,6 +20,36 @@ async def _ok(_url):
     return {"note": "filled"}
 
 
+async def test_a_real_send_is_refused_while_the_filler_is_a_stub(conn):
+    """No filler means the production path, where _default_filler fills
+    nothing. Marking that 'submitted' would write a false row into the
+    callback-rate denominator, which is the evidence the v1 -> v2 gate needs.
+    Refuse before touching the database."""
+    out = await ats_apply.submit(conn, 1, dry_run=False)
+    assert out["ok"] is False
+    assert "not implemented" in out["reason"].lower()
+    assert conn.execute(
+        "SELECT COUNT(*) n FROM application").fetchone()["n"] == 0
+
+
+async def test_a_dry_run_is_still_allowed_on_the_stub(conn, monkeypatch):
+    """Drafting still works -- it is how the dashboard records intent."""
+    monkeypatch.setattr(ats_apply, "_default_filler", _ok)
+    out = await ats_apply.submit(conn, 1, dry_run=True)
+    assert out["ok"] is True
+    assert conn.execute(
+        "SELECT status FROM application").fetchone()["status"] == "draft"
+
+
+async def test_an_injected_filler_is_still_allowed_to_send(conn):
+    """The guard targets the stub, not real submission. Once a genuine filler
+    exists it is passed in, and this path must not be blocked by the flag."""
+    out = await ats_apply.submit(conn, 1, dry_run=False, filler=_ok)
+    assert out["ok"] is True
+    assert conn.execute(
+        "SELECT status FROM application").fetchone()["status"] == "submitted"
+
+
 async def test_dry_run_records_a_draft_and_does_not_send(conn):
     out = await ats_apply.submit(conn, 1, dry_run=True, filler=_ok)
     assert out["ok"] is True

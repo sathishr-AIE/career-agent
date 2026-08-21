@@ -61,16 +61,59 @@ Every submission carries an explainable decision record: why it qualified, what 
 
 ## Status
 
-**Early / pre-implementation.** The product vision is defined; the stack and architecture are not yet chosen. See [`docs/product-vision.md`](docs/product-vision.md) for the full vision.
+**v1 is implemented and runnable** — discovery, the quality gate, a live dashboard, and outcome tracking. See [`docs/product-vision.md`](docs/product-vision.md) for the full vision this is building toward.
+
+> **It does not submit applications.** Applying is manual, by design: auto-submission is
+> deferred to v3, gated on per-role tailoring landing first and on outcome data showing
+> tailored applications actually convert. The dashboard finds and scores roles and tracks
+> what you did about them — you apply on the site yourself. See
+> [the v1 design's phase table](docs/superpowers/specs/2026-08-18-career-agent-v1-design.md)
+> for the reasoning: *"An application is a consumable resource. There is roughly one useful
+> attempt per company per role."* Naukri submission is not planned at any version — it is a
+> discovery source only.
+
+## Running it
+
+**Prerequisites:** Python 3.13+ and [uv](https://docs.astral.sh/uv/).
+
+```bash
+uv venv
+uv pip install -e ".[dev]"
+playwright install chromium   # needed to actually submit applications
+cp .env.example .env          # fill in CLAUDE_CODE_OAUTH_TOKEN and APIFY_TOKEN
+```
+
+`CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token`; it's required even for `serve` alone, since the dashboard's discovery run uses it. `APIFY_TOKEN` is only needed to actually discover jobs (Run Now / `career-agent run`).
+
+Edit `career_brief.toml` (target roles, locations, salary floor, daily application cap, non-negotiables) and `ats_boards.toml` (company ATS boards to also search) before your first real run — both are read from the current directory.
+
+Two commands, via the `career-agent` console script (`--help` for all flags):
+
+- **`career-agent run`** — one-shot: discovers jobs, hard-filters, and scores them against `career_brief.toml`. Writes to `data/career.db`. This is what a scheduled task would call daily (see `scripts/install-scheduler.ps1`).
+- **`career-agent serve`** — starts the dashboard at [http://localhost:8000](http://localhost:8000):
+  - **`/`** — Overview: KPIs, the discovery→apply funnel, source performance, score distribution, recent discoveries/outcomes, and a **Run Now** button that triggers the same discover+score pipeline as `career-agent run`, in the background.
+  - **`/applications`** — the live application queue: Start/Pause/Resume/Stop a worker that walks scored jobs, applying automatically (**Auto** mode) or pausing for your review before each send (**Manual** mode, the default).
 
 ### Roadmap
 
-| Stage | Scope |
-| --- | --- |
-| **v0** | Career brief + professional narrative capture; job discovery across selected sources; fit scoring and the quality gate — report only, no submissions. |
-| **v1** | Per-role resume/application tailoring and autonomous submission within limits; application pipeline and decision records. |
-| **v2** | Response loop: recruiter-message classification, interview scheduling, reminders, follow-ups. |
-| **v3** | Insight layer: outcome analysis, narrative performance, gap detection, weekly review. |
+This is the roadmap as built, from
+[the v1 design](docs/superpowers/specs/2026-08-18-career-agent-v1-design.md). Each phase
+has an explicit gate that must be met before the next one starts — the gates are the
+point, not decoration.
+
+| Phase | Delivers | Gate to advance |
+| --- | --- | --- |
+| **v1** *(shipped)* | Discovery, hard filter, scored gate, dashboard, manual apply, outcome tracking | The gate agrees with your judgment, and callback data exists |
+| **v2** | Per-role tailoring from the facts store, resume rendering | Nothing claimed that you cannot defend |
+| **v3** | Auto-submission within limits | Tailoring proven, and outcomes show tailored applications convert |
+
+Deferred and unscheduled: recruiter-message handling and calendar (v2); **Naukri
+submission — no Actor exists and no connector is planned, so Naukri stays discovery-only
+at every version**; warm-path and referral detection (unscheduled).
+
+An earlier draft of this README carried a different, pre-implementation roadmap that
+listed autonomous submission under v1. That numbering was superseded by the design spec
+above and was wrong about what v1 does.
 
 ## Repository layout
 

@@ -9,6 +9,17 @@ RESUME_VERSION = "base-v1"
 MAX_ATTEMPTS = 3
 BLOCKING = ("in_flight", "submitted", "held_unknown", "failed_permanent")
 
+# Auto-submission is v3, gated on tailoring plus outcome evidence, and Naukri
+# submission is not planned at all -- see the Deferred section of
+# docs/superpowers/specs/2026-08-18-career-agent-v1-design.md. Until a real
+# filler exists, _default_filler opens the page and returns a hardcoded dict
+# without touching the form, so a real send would mark the row 'submitted'
+# having sent nothing. That false row is not merely cosmetic: it lands in the
+# callback-rate denominator, and derive_no_response would later stamp it
+# 'no_response'. Callback data is exactly the evidence the v1 -> v2 gate turns
+# on, so poisoning it costs more than the missing feature does.
+SUBMISSION_IMPLEMENTED = False
+
 
 class CaptchaEncountered(Exception):
     """The site showed a captcha, so it has already classified this session as
@@ -45,6 +56,14 @@ def sweep_stale_in_flight(conn: sqlite3.Connection, minutes: int = 15) -> int:
 
 async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
                  filler: Callable[[str], Awaitable[dict]] | None = None) -> dict:
+    # Refuse a real send on the stub filler, before anything is written. An
+    # injected filler means a caller supplied a real one (or a test double),
+    # so it is allowed through; only the _default_filler path is blocked.
+    if not dry_run and filler is None and not SUBMISSION_IMPLEMENTED:
+        return {"ok": False, "reason":
+                "Submission is not implemented yet (planned for v3; Naukri "
+                "never). Apply on the site yourself, then record the outcome."}
+
     live = conn.execute(
         f"SELECT status FROM application WHERE job_id = ? AND status IN "
         f"({','.join('?' * len(BLOCKING))})", (job_id, *BLOCKING)).fetchone()
