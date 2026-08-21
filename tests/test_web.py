@@ -799,3 +799,84 @@ def test_a_blank_max_score_per_run_is_an_error_too(client, brief_path):
     r = client.post("/settings", data=_form(max_score_per_run=""))
     assert "Nothing was saved" in r.text
     assert "max_score_per_run" in r.text
+
+
+def test_marking_applied_creates_the_denominator(client):
+    r = client.post("/applied/1", data={"when": "2026-08-20"})
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    row = conn.execute(
+        "SELECT status, submitted_at FROM application WHERE job_id = 1"
+    ).fetchone()
+    assert row["status"] == "submitted"
+    assert row["submitted_at"] == "2026-08-20"
+
+
+def test_marking_applied_defaults_to_today(client):
+    client.post("/applied/1", data={"when": ""})
+    conn = db.connect(web.DB_PATH)
+    today = conn.execute("SELECT date('now') d").fetchone()["d"]
+    row = conn.execute(
+        "SELECT submitted_at FROM application WHERE job_id = 1").fetchone()
+    assert row["submitted_at"] == today
+
+
+def test_marking_applied_twice_is_refused_readably(client):
+    client.post("/applied/1", data={"when": "2026-08-20"})
+    r = client.post("/applied/1", data={"when": "2026-08-21"})
+    assert r.status_code == 200, "a readable message, not a 500"
+    assert "already" in r.text.lower()
+
+
+def test_a_malformed_date_is_an_error_not_a_422(client):
+    r = client.post("/applied/1", data={"when": "last tuesday"})
+    assert r.status_code == 200, "friendly error, not FastAPI's raw 422"
+    assert "date" in r.text.lower()
+    conn = db.connect(web.DB_PATH)
+    assert conn.execute(
+        "SELECT COUNT(*) n FROM application").fetchone()["n"] == 0
+
+
+def test_recording_an_outcome_persists_it(client):
+    client.post("/applied/1", data={"when": "2026-08-20"})
+    conn = db.connect(web.DB_PATH)
+    app_id = conn.execute("SELECT id FROM application").fetchone()["id"]
+
+    r = client.post(f"/outcome/{app_id}",
+                    data={"type": "screen", "occurred_at": "2026-08-21",
+                          "notes": "recruiter call"})
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    row = conn.execute("SELECT type, derived, notes FROM outcome").fetchone()
+    assert row["type"] == "screen"
+    assert row["derived"] == 0
+    assert row["notes"] == "recruiter call"
+
+
+def test_recording_no_response_by_hand_is_refused(client):
+    client.post("/applied/1", data={"when": "2026-08-20"})
+    conn = db.connect(web.DB_PATH)
+    app_id = conn.execute("SELECT id FROM application").fetchone()["id"]
+
+    r = client.post(f"/outcome/{app_id}",
+                    data={"type": "no_response", "occurred_at": "2026-08-21"})
+    assert r.status_code == 200
+    assert "derived" in r.text.lower()
+    conn = db.connect(web.DB_PATH)
+    assert conn.execute("SELECT COUNT(*) n FROM outcome").fetchone()["n"] == 0
+
+
+def test_an_outcome_on_an_unsubmitted_application_is_refused(client):
+    """The UI does not offer this, so it guards a forged request."""
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'base-v1', 'draft')")
+    conn.commit()
+    app_id = conn.execute("SELECT id FROM application").fetchone()["id"]
+
+    r = client.post(f"/outcome/{app_id}",
+                    data={"type": "screen", "occurred_at": "2026-08-21"})
+    assert r.status_code == 200
+    assert "submitted" in r.text.lower()
+    conn = db.connect(web.DB_PATH)
+    assert conn.execute("SELECT COUNT(*) n FROM outcome").fetchone()["n"] == 0

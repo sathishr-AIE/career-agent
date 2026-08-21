@@ -1,4 +1,6 @@
 import asyncio
+import datetime as dt
+import sqlite3
 import subprocess
 from contextlib import asynccontextmanager
 from html import escape
@@ -9,7 +11,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
-from career_agent import db, store
+from career_agent import db, outcomes, store
 from career_agent.apply import ats as ats_apply
 from career_agent.config import (MODEL_LABELS, SCORING_MODELS, CareerBrief,
                                  load_brief, save_brief)
@@ -190,6 +192,63 @@ def dismiss(job_id: int):
     conn = _conn()
     store.log(conn, job_id, "human_dismissed")
     return HTMLResponse('<span class="done">Dismissed</span>')
+
+
+def _parse_date(raw: str, field: str, errors: dict) -> str | None:
+    """Accept an ISO date, defaulting to today when blank. Parsed here, not
+    declared as a typed Form parameter: a typed parameter makes FastAPI
+    reject a bad value with a raw 422 before this handler runs, which skips
+    the friendly error page entirely."""
+    raw = (raw or "").strip()
+    if not raw:
+        return dt.date.today().isoformat()
+    try:
+        return dt.date.fromisoformat(raw).isoformat()
+    except ValueError:
+        errors[field] = "must be a date like 2026-08-20"
+        return None
+
+
+@app.post("/applied/{job_id}", response_class=HTMLResponse)
+def mark_applied(job_id: int, when: str = Form("")):
+    conn = _conn()
+    errors: dict[str, str] = {}
+    day = _parse_date(when, "when", errors)
+    if errors:
+        return HTMLResponse(
+            f'<span class="denied">{escape(errors["when"])}</span>')
+
+    try:
+        store.mark_applied(conn, job_id, day)
+    except sqlite3.IntegrityError:
+        return HTMLResponse('<span class="denied">This job already has a'
+                            ' live application.</span>')
+    return HTMLResponse('<span class="done">Marked applied</span>')
+
+
+@app.post("/outcome/{application_id}", response_class=HTMLResponse)
+def record_outcome(application_id: int, type: str = Form(""),
+                   occurred_at: str = Form(""), notes: str = Form("")):
+    conn = _conn()
+    row = conn.execute("SELECT status FROM application WHERE id = ?",
+                       (application_id,)).fetchone()
+    if row is None or row["status"] != "submitted":
+        return HTMLResponse('<span class="denied">This application is not'
+                            ' submitted yet. Mark the job applied before'
+                            ' recording what came back.</span>')
+
+    errors: dict[str, str] = {}
+    day = _parse_date(occurred_at, "occurred_at", errors)
+    if errors:
+        return HTMLResponse(
+            f'<span class="denied">{escape(errors["occurred_at"])}</span>')
+
+    try:
+        outcomes.record(conn, application_id, type, day,
+                        notes=notes.strip() or None)
+    except ValueError as exc:
+        return HTMLResponse(f'<span class="denied">{escape(str(exc))}</span>')
+    return HTMLResponse('<span class="done">Recorded</span>')
 
 
 def _run_status_context(conn) -> dict:
