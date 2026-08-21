@@ -174,6 +174,15 @@ async def override(job_id: int):
     return await _do_apply(job_id, allow_skip=True, event="human_override")
 
 
+def _unpark(conn, job_id: int) -> None:
+    """Release a run parked on this job. Manual mode leaves the run 'running'
+    with current_job_id set to a drafted job awaiting review, and apply_tick
+    returns early on every iteration while it is set -- so a run left parked
+    on a job the user has already resolved never advances again."""
+    if worker.get_run_state(conn, "apply")["current_job_id"] == job_id:
+        worker.set_run_state(conn, "apply", current_job_id=None)
+
+
 @app.post("/send/{job_id}", response_class=HTMLResponse)
 async def send(job_id: int):
     conn = _conn()
@@ -195,11 +204,16 @@ async def send(job_id: int):
     except Exception as exc:
         return HTMLResponse(f'<span class="denied">{escape(str(exc))}</span>')
     if not result["ok"]:
+        # A categorical refusal -- submission is not implemented, which is
+        # every real send today -- can never succeed on a retry, so the only
+        # way forward is applying on the site: stop parking the run on it. A
+        # transient failure (a captcha hold, a filler that errored) stays
+        # parked, because that draft is still the thing to retry and the
+        # status card should keep pointing at it.
+        if result.get("unsupported"):
+            _unpark(conn, job_id)
         return HTMLResponse(f'<span class="denied">{escape(result["reason"])}</span>')
-    # the run was parked on this draft awaiting review; unpark it, or the
-    # worker loop returns early forever and the run never advances
-    if worker.get_run_state(conn, "apply")["current_job_id"] == job_id:
-        worker.set_run_state(conn, "apply", current_job_id=None)
+    _unpark(conn, job_id)
     return HTMLResponse('<span class="done">Sent</span>')
 
 
@@ -239,7 +253,17 @@ def mark_applied(job_id: int, when: str = Form("")):
     except sqlite3.IntegrityError:
         return HTMLResponse('<span class="denied">This job already has a'
                             ' live application.</span>')
-    return HTMLResponse('<span class="done">Marked applied</span>')
+    _unpark(conn, job_id)
+
+    # A manual application counts against daily_cap like any other (see
+    # worker.guard), and reaching it auto-pauses the apply run. Say so here,
+    # or the pause looks unrelated to the click that caused it.
+    cap = load_brief(BRIEF_PATH).daily_cap
+    today_submitted = conn.execute(
+        "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
+        " AND date(submitted_at) = date('now')").fetchone()["n"]
+    note = f" — daily cap of {cap} reached" if today_submitted >= cap else ""
+    return HTMLResponse(f'<span class="done">Marked applied{note}</span>')
 
 
 @app.post("/outcome/{application_id}", response_class=HTMLResponse)

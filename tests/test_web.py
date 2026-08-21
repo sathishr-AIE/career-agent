@@ -911,6 +911,9 @@ def test_the_outcome_form_does_not_offer_no_response(client):
 
 
 def test_a_recorded_outcome_is_shown(client):
+    """"Interview" is on the page either way -- every MANUAL_TYPES label is an
+    <option> in the outcome form -- so this has to assert on the effective
+    outcome label the cell leads with, not on the page."""
     client.post("/applied/1", data={"when": "2026-08-20"})
     conn = db.connect(web.DB_PATH)
     app_id = conn.execute("SELECT id FROM application").fetchone()["id"]
@@ -918,4 +921,103 @@ def test_a_recorded_outcome_is_shown(client):
                 data={"type": "interview", "occurred_at": "2026-08-21"})
 
     r = client.get("/applications")
-    assert "Interview" in r.text
+    label = r.text.split('class="outcome-cell"')[1].split("</span>")[0]
+    assert "Interview" in label
+    assert "Awaiting response" not in r.text, "an outcome exists now"
+
+
+
+def test_marking_applied_clears_the_run_state_so_the_worker_can_advance(
+        client, monkeypatch):
+    """Manual mode parks the run on a draft, and marking applied is now the
+    sanctioned way to resolve one. If it doesn't release current_job_id,
+    apply_tick returns early forever and the run is dead."""
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', 'draft')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    client.post("/run/start", data={"mode": "manual"})
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["current_job_id"] == 1
+
+    r = client.post("/applied/1", data={"when": "2026-08-20"})
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["current_job_id"] is None
+
+
+def test_send_unparks_the_run_when_submission_is_not_implemented(client):
+    """The real refusal path, with no monkeypatched submit: production always
+    takes it (SUBMISSION_IMPLEMENTED is False), so unparking only on ok would
+    leave the run parked forever on a job Send can never resolve."""
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'base-v1', 'draft')")
+    conn.commit()
+    worker.set_run_state(conn, "apply", status="running", mode="manual",
+                         current_job_id=1)
+
+    r = client.post("/send/1")
+    assert r.status_code == 200
+    assert "not implemented" in r.text.lower()
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["current_job_id"] is None
+
+
+def test_send_stays_parked_on_a_transient_failure(client, monkeypatch):
+    """A captcha hold or an errored filler can succeed on a retry, so the run
+    keeps pointing at that draft -- only a categorical refusal unparks."""
+    async def refuses(conn, job_id, dry_run, filler=None):
+        return {"ok": False, "held": True,
+                "reason": "captcha encountered; held for review"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", refuses)
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'base-v1', 'draft')")
+    conn.commit()
+    worker.set_run_state(conn, "apply", status="running", mode="manual",
+                         current_job_id=1)
+
+    r = client.post("/send/1")
+    assert "captcha" in r.text.lower()
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["current_job_id"] == 1
+
+
+def test_the_skipped_tab_offers_outcome_controls_for_an_applied_job(client):
+    """Job 2 is the skip-verdict fixture. An override is the most valuable
+    label the system produces, so it has to be able to reach the callback
+    denominator from the tab it lives in."""
+    client.post("/applied/2", data={"when": "2026-08-20"})
+    conn = db.connect(web.DB_PATH)
+    app_id = conn.execute(
+        "SELECT id FROM application WHERE job_id = 2").fetchone()["id"]
+
+    skipped = client.get("/applications").text.split('id="tab-skipped"')[1]
+    assert f'hx-post="/outcome/{app_id}"' in skipped
+
+
+def test_the_skipped_tab_offers_mark_applied_and_keeps_track_anyway(client):
+    skipped = client.get("/applications").text.split('id="tab-skipped"')[1]
+    assert 'hx-post="/applied/2"' in skipped
+    assert "Track anyway" in skipped
+
+
+def test_marking_applied_says_when_it_hits_the_daily_cap(client, brief_path):
+    """A hand-marked row counts against daily_cap like any other and the run
+    auto-pauses at it, so the click that caused the pause has to say so."""
+    brief_path.write_text(BRIEF_TOML.replace("daily_cap = 5", "daily_cap = 1"),
+                          encoding="utf-8")
+    r = client.post("/applied/1", data={"when": ""})
+    assert "Marked applied" in r.text
+    assert "daily cap of 1 reached" in r.text
+
+
+def test_marking_applied_stays_quiet_below_the_daily_cap(client, brief_path):
+    r = client.post("/applied/1", data={"when": ""})
+    assert "Marked applied" in r.text
+    assert "daily cap" not in r.text
