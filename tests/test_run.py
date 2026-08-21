@@ -254,3 +254,72 @@ async def test_explicit_max_score_overrides_the_setting(tmp_path, monkeypatch):
     # the override is for this run only and must not be persisted
     conn = db.connect(db_path)
     assert store.get_settings(conn)["max_score_per_run"] == 2
+
+
+async def test_run_once_reports_stages_in_order(tmp_path, monkeypatch):
+    db_path, brief_path, conn = _prepare(tmp_path, monkeypatch)
+    _seed_job(conn, "near0", "Chennai")
+    conn.commit()
+
+    async def fake_score(job, brief, facts, ask):
+        return VERDICT
+
+    monkeypatch.setattr("career_agent.gate.score", fake_score)
+
+    seen = []
+
+    def progress(**kw):
+        if "stage" in kw:
+            seen.append(kw["stage"])
+
+    await run_once(_Args(db_path, max_score=5, brief=brief_path),
+                   progress=progress)
+
+    assert seen == ["discover", "clean", "filter", "score", "ready"]
+
+
+async def test_run_once_reports_counters_matching_what_it_did(
+        tmp_path, monkeypatch):
+    db_path, brief_path, conn = _prepare(tmp_path, monkeypatch)
+    _seed_job(conn, "near0", "Chennai")               # passes the filter
+    _seed_job(conn, "near1", "Chennai")               # passes the filter
+    _seed_job(conn, "far0", "San Francisco, CA")      # fails it
+    conn.commit()
+
+    async def fake_score(job, brief, facts, ask):
+        return VERDICT
+
+    monkeypatch.setattr("career_agent.gate.score", fake_score)
+
+    latest = {}
+
+    def progress(**kw):
+        latest.update(kw)
+
+    await run_once(_Args(db_path, max_score=5, brief=brief_path),
+                   progress=progress)
+
+    assert latest["passed"] == 2
+    assert latest["scored"] == 2
+    assert latest["shortlisted"] == 2, "VERDICT's verdict is 'submit'"
+    assert latest["stage"] == "ready"
+
+
+async def test_run_once_works_without_a_progress_callback(
+        tmp_path, monkeypatch):
+    """The CLI path. Omitting progress must change nothing."""
+    db_path, brief_path, conn = _prepare(tmp_path, monkeypatch)
+    _seed_job(conn, "near0", "Chennai")
+    conn.commit()
+
+    async def fake_score(job, brief, facts, ask):
+        return VERDICT
+
+    monkeypatch.setattr("career_agent.gate.score", fake_score)
+
+    await run_once(_Args(db_path, max_score=5, brief=brief_path))
+
+    conn = db.connect(db_path)
+    assert conn.execute(
+        "SELECT COUNT(*) n FROM assessment WHERE stage='scored'"
+    ).fetchone()["n"] == 1

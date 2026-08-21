@@ -53,7 +53,12 @@ async def _ask(prompt: str, model: str | None = None) -> str:
     return "".join(chunks)
 
 
-async def run_once(args) -> None:
+async def run_once(args, progress=None) -> None:
+    # Injected rather than writing run_state directly: run.py is the CLI
+    # module and must not depend on the web layer. Same shape as the `ask`
+    # callable gate.score takes.
+    progress = progress or (lambda **kw: None)
+
     verify_auth()
 
     conn = db.connect(Path(args.db))
@@ -83,16 +88,24 @@ async def run_once(args) -> None:
     brief = load_brief(Path(args.brief))
     boards = load_boards(Path(args.boards))
 
+    progress(stage="discover",
+             message="Starting discovery across LinkedIn, Naukri, and ATS boards.")
+
     # 1-2. fetch and normalize
     jobs = discovery.run_discovery(
         brief, boards,
         apify_client=ApifyClient(os.environ["APIFY_TOKEN"]),
         http_client=httpx.Client())
 
+    progress(stage="clean", found=len(jobs),
+             message=f"Discovery returned {len(jobs)} listings.")
+
     # 3. dedupe and drop stale
     new_count = store.upsert_jobs(conn, jobs, brief)
     log.info("discovered %d, %d new after dedupe and staleness",
              len(jobs), new_count)
+    progress(stage="filter", duplicates=len(jobs) - new_count,
+             message=f"{len(jobs) - new_count} duplicate or stale listings removed.")
 
     # 4-5. hard filter the whole pool, then score as many survivors as the
     # budget allows. The sweep is deterministic, local, free, and PERSISTED,
@@ -100,7 +113,8 @@ async def run_once(args) -> None:
     # every job that can never pass and the next run finds real candidates
     # immediately. Breaking early instead would leave the pool dirty and
     # reproduce the bug on the following run.
-    scored = skipped = 0
+    scored = skipped = passed = shortlisted = 0
+    announced_scoring = False
     for row in store.unscored_jobs(conn, gate.PROMPT_VERSION):
         job = _row_to_job(row)
 
@@ -110,15 +124,28 @@ async def run_once(args) -> None:
             skipped += 1
             continue
 
+        passed += 1
+        if not announced_scoring:
+            progress(stage="score",
+                     message="Scoring hard-filter survivors against your brief.")
+            announced_scoring = True
+
         if scored >= max_score:
+            progress(passed=passed)
             continue  # budget spent; this survivor carries to the next run
 
         verdict = await gate.score(job, brief, store.facts(conn), ask)
         store.save_assessment(conn, row["id"], verdict, scoring_model,
                               gate.PROMPT_VERSION)
         scored += 1
+        if verdict.verdict in ("submit", "hold"):
+            shortlisted += 1
+        progress(passed=passed, scored=scored, shortlisted=shortlisted)
 
     log.info("hard-filtered %d, scored %d", skipped, scored)
+    progress(stage="ready", passed=passed, scored=scored,
+             shortlisted=shortlisted,
+             message=f"Run complete — {shortlisted} job(s) ready for review.")
 
     derived = outcomes.derive_no_response(conn)
     log.info("derived %d no_response outcome(s)", derived)
