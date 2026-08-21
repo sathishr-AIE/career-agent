@@ -804,6 +804,22 @@ def test_a_blank_max_score_per_run_is_an_error_too(client, brief_path):
     assert "max_score_per_run" in r.text
 
 
+def test_the_apply_activity_log_excludes_pipeline_events(client):
+    conn = db.connect(web.DB_PATH)
+    for i in range(12):
+        conn.execute("INSERT INTO event (job_id, type, payload)"
+                     " VALUES (NULL, 'pipeline_progress', ?)", (f"step {i}",))
+    conn.execute("INSERT INTO event (job_id, type) VALUES (1, 'human_applied')")
+    conn.commit()
+
+    r = client.get("/run/status")
+
+    assert "human_applied" in r.text, (
+        "a dozen pipeline rows must not push the apply events out of a "
+        "LIMIT 10 log")
+    assert "pipeline_progress" not in r.text
+
+
 def test_marking_applied_creates_the_denominator(client):
     r = client.post("/applied/1", data={"when": "2026-08-20"})
     assert r.status_code == 200

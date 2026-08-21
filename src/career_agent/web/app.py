@@ -324,6 +324,10 @@ def _run_status_context(conn) -> dict:
     }
     recent_events = conn.execute(
         "SELECT type, payload, occurred_at FROM event"
+        # the pipeline's own feed lives on the Overview page; an apply
+        # activity log that shows discovery progress is showing the wrong
+        # thing, and at ~10 rows a run it would show nothing else
+        " WHERE type NOT LIKE 'pipeline_%'"
         " ORDER BY id DESC LIMIT 10").fetchall()
     return {"run_state": state, "current_job": current_job, "stats": stats,
             "recent_events": recent_events}
