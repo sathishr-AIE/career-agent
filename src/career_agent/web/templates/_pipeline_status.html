@@ -1,14 +1,65 @@
+{% set s = pipeline_state %}
+{% set stage_keys = stages | map(attribute=0) | list %}
+{% set idx = stage_keys.index(s["stage"]) if s["stage"] in stage_keys else -1 %}
+{% set pct = 0 if idx < 0 else ((idx + 1) * 100 // stages | length) %}
+
 <div id="pipeline-status">
-  {% if pipeline_state["status"] in ("idle", "error") %}
+  {% if s["status"] in ("idle", "error") %}
     <button class="btn primary" hx-post="/pipeline/run-now"
-            hx-target="#pipeline-status" hx-swap="outerHTML">▶ Run Now</button>
+            hx-target="#pipeline-status" hx-swap="outerHTML"
+            onclick="openRunMonitor()">▶ Run Now</button>
   {% else %}
-    <button class="btn" disabled>◌ Running…</button>
+    <button class="btn" onclick="openRunMonitor()">◌ Running… (view)</button>
   {% endif %}
-  <span class="pill status-{{ pipeline_state["status"] }}">
-    {{ pipeline_state["status"] | capitalize }}</span>
-  <span class="run-meta">Last update: {{ pipeline_state["updated_at"] }}</span>
-  {% if pipeline_state["last_error"] %}
-    <span class="denied">{{ pipeline_state["last_error"] }}</span>
+  <span class="pill status-{{ s["status"] }}">{{ s["status"] | capitalize }}</span>
+  <span class="run-meta">Last update: {{ s["updated_at"] }}</span>
+  {% if s["last_error"] %}
+    <span class="denied">{{ s["last_error"] }}</span>
   {% endif %}
+
+  <div id="monitor-body" data-status="{{ s['status'] }}"
+       data-started="{{ s['started_at'] or '' }}">
+    <div class="pipeline-track">
+      {% for key, label in stages %}
+      <div class="stage {{ 'done' if loop.index0 < idx else ('active' if loop.index0 == idx else '') }}">
+        <div class="stage-dot">{{ loop.index }}</div>
+        <div class="stage-label">{{ label }}</div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="progress-line"><div class="progress-bar" style="width:{{ pct }}%"></div></div>
+    <div class="progress-meta">
+      <span>{{ stages[idx][1] if idx >= 0 else "Not started" }}</span>
+      <span>{{ pct }}%</span>
+    </div>
+
+    <div class="live-counters">
+      <div class="live-counter"><div class="counter-top">Jobs Found</div>
+        <div class="counter-num">{{ s["found"] }}</div></div>
+      <div class="live-counter"><div class="counter-top">Passed Filter</div>
+        <div class="counter-num">{{ s["passed"] }}</div></div>
+      <div class="live-counter"><div class="counter-top">AI Scored</div>
+        <div class="counter-num">{{ s["scored"] }} / {{ max_score }}</div></div>
+      <div class="live-counter"><div class="counter-top">Shortlisted</div>
+        <div class="counter-num">{{ s["shortlisted"] }}</div></div>
+    </div>
+
+    <h3>Live activity</h3>
+    <div class="activity">
+      {% for e in feed %}
+      <div class="activity-item">
+        <span class="activity-text">{{ e["payload"] }}</span>
+        <span class="activity-time">{{ e["occurred_at"] }}</span>
+      </div>
+      {% else %}
+      <div class="rationale">No activity yet.</div>
+      {% endfor %}
+    </div>
+
+    <div class="summary-row"><span>Duplicates removed</span><b>{{ s["duplicates"] }}</b></div>
+    <div class="live-note"><strong>No automatic applications.</strong> This run
+      discovers, filters, deduplicates, and scores jobs. Applying stays a
+      deliberate human action from the Applications flow.</div>
+  </div>
 </div>

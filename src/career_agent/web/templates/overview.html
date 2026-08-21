@@ -3,12 +3,59 @@
 <h1>Dashboard</h1>
 <p class="rationale">Your daily job discovery and application command center.</p>
 
-<!-- innerHTML, not outerHTML: the polling element must survive its own swap,
-     or htmx drops it from the DOM and the poll never fires again — this bit
-     the sibling plan's /run/status poller the same way before it was fixed. -->
-<div id="pipeline-status-poller" hx-get="/pipeline/status" hx-trigger="load, every 3s"
-     hx-swap="innerHTML">
-  {% include "_pipeline_status.html" %}
+<!-- Shell outside the polled region on purpose: open/closed is client
+     state, and the 3s swap would otherwise slam it shut (or reopen one
+     the user closed) on every tick. Same fix as the Applications page's
+     Auto/Manual toggle. -->
+<div class="live-overlay" id="runOverlay" aria-hidden="true">
+  <div class="live-modal" role="dialog" aria-modal="true">
+    <div class="live-inner">
+      <div class="live-head">
+        <h2 class="live-title">Career Agent is running</h2>
+        <button class="live-close" onclick="closeRunMonitor()"
+                aria-label="Close">×</button>
+      </div>
+      <!-- innerHTML, not outerHTML: the polling element must survive its own
+           swap, or htmx drops it from the DOM and the poll never fires again
+           — this bit the sibling plan's /run/status poller the same way
+           before it was fixed. -->
+      <div id="pipeline-status-poller" hx-get="/pipeline/status"
+           hx-trigger="load, every 3s" hx-swap="innerHTML">
+        {% include "_pipeline_status.html" %}
+      </div>
+      <div class="live-footer">
+        <span class="live-footer-meta" id="elapsedTime"></span>
+        <button class="btn" onclick="closeRunMonitor()">Continue working</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function openRunMonitor(){document.getElementById('runOverlay').classList.add('open')}
+function closeRunMonitor(){
+  document.getElementById('runOverlay').classList.remove('open');
+  const body = document.getElementById('monitor-body');
+  if (body && body.dataset.status === 'running')
+    document.getElementById('runToast').classList.add('open');
+}
+// Elapsed ticks client-side so it counts smoothly instead of jumping every
+// poll. started_at is UTC, matching datetime('now').
+setInterval(function(){
+  const body = document.getElementById('monitor-body');
+  const el = document.getElementById('elapsedTime');
+  if (!body || !el) return;
+  if (body.dataset.status !== 'running' || !body.dataset.started) {
+    el.textContent = ''; return;
+  }
+  const started = new Date(body.dataset.started.replace(' ', 'T') + 'Z');
+  const sec = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  el.textContent = 'Elapsed ' + String(Math.floor(sec / 60)).padStart(2, '0')
+                 + ':' + String(sec % 60).padStart(2, '0');
+}, 1000);
+</script>
+<div class="run-toast" id="runToast" onclick="openRunMonitor()">
+  <span class="toast-dot"></span><span>Career Agent is still running…</span>
 </div>
 
 <div class="kpis">

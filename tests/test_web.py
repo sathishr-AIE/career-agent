@@ -579,6 +579,36 @@ def test_pipeline_status_shows_running_state(client, running_pipeline):
     assert "Running" in r.text
 
 
+def test_pipeline_status_renders_the_stage_track(client):
+    r = client.get("/pipeline/status")
+    for label in ("Discover", "Clean", "Filter", "Score", "Ready"):
+        assert label in r.text
+
+
+def test_pipeline_status_renders_the_counters(client):
+    conn = db.connect(web.DB_PATH)
+    worker.set_run_state(conn, "pipeline", stage="score", found=91,
+                         duplicates=7, passed=27, scored=14, shortlisted=6)
+    r = client.get("/pipeline/status")
+    assert "Jobs Found" in r.text and "91" in r.text
+    assert "Passed Filter" in r.text and "27" in r.text
+    assert "Shortlisted" in r.text and "6" in r.text
+
+
+def test_pipeline_status_renders_the_activity_feed(client):
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO event (job_id, type, payload)"
+                 " VALUES (NULL, 'pipeline_progress', 'Discovery returned 40.')")
+    conn.commit()
+    r = client.get("/pipeline/status")
+    assert "Discovery returned 40." in r.text
+
+
+def test_the_no_auto_apply_note_is_present(client):
+    r = client.get("/pipeline/status")
+    assert "No automatic applications" in r.text
+
+
 def test_startup_clears_a_pipeline_run_stranded_by_a_crash(client):
     """A process that dies mid-run leaves run_state stuck at 'running', and
     there are no pause/resume/stop endpoints for the pipeline -- the Run Now
@@ -629,6 +659,16 @@ def test_overview_embeds_pipeline_status_polling(client):
     # exact regression happened once already, in the sibling plan's
     # /run/status poller)
     assert 'hx-swap="innerHTML"' in r.text
+
+
+def test_the_modal_shell_is_outside_the_poller(client):
+    """Open/closed is client state and the poller replaces its target every
+    3s. Inside the polled region, every swap would slam the modal shut or
+    reopen one the user closed -- the bug already fixed once for the
+    Auto/Manual toggle."""
+    r = client.get("/")
+    before = r.text.split('id="pipeline-status-poller"')[0]
+    assert 'id="runOverlay"' in before, "modal shell precedes the poller"
 
 
 BRIEF_TOML = """\

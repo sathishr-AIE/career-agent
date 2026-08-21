@@ -58,6 +58,11 @@ SELECT j.id, j.company, j.title, j.location, j.source, j.url,
  ORDER BY a.weighted_score DESC NULLS LAST, j.discovered_at DESC
 """
 
+# order matters: the template renders anything before the current stage as
+# done and the current one as active
+STAGES = (("discover", "Discover"), ("clean", "Clean"), ("filter", "Filter"),
+          ("score", "Score"), ("ready", "Ready"))
+
 
 def _conn():
     conn = db.connect(DB_PATH)
@@ -411,9 +416,18 @@ async def pipeline_run_now():
 @app.get("/pipeline/status", response_class=HTMLResponse)
 def pipeline_status(request: Request):
     conn = _conn()
+    state = worker.get_run_state(conn, "pipeline")
+    feed = conn.execute(
+        "SELECT payload, occurred_at FROM event"
+        " WHERE type = 'pipeline_progress'"
+        " ORDER BY id DESC LIMIT 12").fetchall()
+    settings = store.get_settings(conn)
     return templates.TemplateResponse(
         request=request, name="_pipeline_status.html",
-        context={"pipeline_state": worker.get_run_state(conn, "pipeline")})
+        context={"pipeline_state": state,
+                 "feed": list(reversed(feed)),   # oldest first, newest last
+                 "stages": STAGES,
+                 "max_score": settings["max_score_per_run"]})
 
 
 @app.post("/queue/{job_id}/skip")
