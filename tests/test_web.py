@@ -153,14 +153,17 @@ def test_send_after_apply_performs_a_real_submission(client, monkeypatch):
     assert "human_confirmed_send" in types
 
 
-def test_index_offers_send_once_a_draft_exists(client):
+def test_index_offers_mark_applied_when_a_draft_exists(client):
+    """The All Applications tab has no Send/Apply UI (Task 4 removed it): a
+    job with only a draft application row has no submitted row, so it is
+    untracked and gets the same Mark applied control as any other job."""
     conn = db.connect(web.DB_PATH)
     conn.execute("INSERT INTO application (job_id, resume_version, status)"
                  " VALUES (1, 'v1', 'draft')")
     conn.commit()
     r = client.get("/applications")
-    assert '/send/1' in r.text
-    assert '/apply/1' not in r.text
+    assert '/send/1' not in r.text
+    assert 'hx-post="/applied/1"' in r.text
     # and it leaves the Queue tab: a drafted job is in progress, not queued
     queue_html = r.text.split('id="tab-queue"')[1].split('id="tab-all"')[0]
     assert "AI Engineer" not in queue_html
@@ -171,8 +174,8 @@ def test_index_requeues_a_job_that_drafted_then_failed(client):
     job that drafted and then failed transiently carries both a 'draft' row
     and a later 'failed' row. has_draft must track the LATEST row (here,
     'failed'), not blanket row-membership -- else the job stays permanently
-    hidden from the Queue tab and stuck showing a stale Send button, even
-    though worker.next_candidate now treats it as retryable again."""
+    hidden from the Queue tab, even though worker.next_candidate now treats
+    it as retryable again."""
     conn = db.connect(web.DB_PATH)
     conn.execute("INSERT INTO application (job_id, resume_version, status)"
                  " VALUES (1, 'v1', 'draft')")
@@ -183,9 +186,9 @@ def test_index_requeues_a_job_that_drafted_then_failed(client):
     # back in the Queue tab, like any other retryable job
     queue_html = r.text.split('id="tab-queue"')[1].split('id="tab-all"')[0]
     assert "AI Engineer" in queue_html
-    # All Applications: Apply/Dismiss again, not a stale Send button
+    # All Applications: Mark applied/Dismiss again, not a stale Send button
     all_html = r.text.split('id="tab-all"')[1].split('id="tab-skipped"')[0]
-    assert '/apply/1' in all_html
+    assert 'hx-post="/applied/1"' in all_html
     assert '/send/1' not in all_html
 
 
@@ -880,3 +883,39 @@ def test_an_outcome_on_an_unsubmitted_application_is_refused(client):
     assert "submitted" in r.text.lower()
     conn = db.connect(web.DB_PATH)
     assert conn.execute("SELECT COUNT(*) n FROM outcome").fetchone()["n"] == 0
+
+
+def test_all_applications_offers_mark_applied_for_an_untracked_job(client):
+    r = client.get("/applications")
+    assert 'hx-post="/applied/1"' in r.text
+    assert "Mark applied" in r.text
+
+
+def test_all_applications_offers_outcome_controls_once_submitted(client):
+    client.post("/applied/1", data={"when": "2026-08-20"})
+    conn = db.connect(web.DB_PATH)
+    app_id = conn.execute("SELECT id FROM application").fetchone()["id"]
+
+    r = client.get("/applications")
+    assert f'hx-post="/outcome/{app_id}"' in r.text
+    assert "Awaiting response" in r.text, "no outcome recorded yet"
+
+
+def test_the_outcome_form_does_not_offer_no_response(client):
+    client.post("/applied/1", data={"when": "2026-08-20"})
+    r = client.get("/applications")
+    outcome_form = r.text.split('hx-post="/outcome/')[1]
+    assert 'value="screen"' in outcome_form
+    assert 'value="no_response"' not in outcome_form, (
+        "derived, never entered")
+
+
+def test_a_recorded_outcome_is_shown(client):
+    client.post("/applied/1", data={"when": "2026-08-20"})
+    conn = db.connect(web.DB_PATH)
+    app_id = conn.execute("SELECT id FROM application").fetchone()["id"]
+    client.post(f"/outcome/{app_id}",
+                data={"type": "interview", "occurred_at": "2026-08-21"})
+
+    r = client.get("/applications")
+    assert "Interview" in r.text

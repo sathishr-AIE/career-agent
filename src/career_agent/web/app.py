@@ -115,6 +115,18 @@ def applications(request: Request, show: str = "queue"):
     today_submitted = conn.execute(
         "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
         " AND date(submitted_at) = date('now')").fetchone()["n"]
+
+    # application id + current effective outcome per job, for the outcome
+    # controls. One effective_outcome call per submitted row, matching what
+    # overview.recent_outcomes already does and bounded by the page size.
+    applied = {}
+    for r in conn.execute(
+            "SELECT id, job_id FROM application WHERE status = 'submitted'"):
+        applied[r["job_id"]] = {
+            "application_id": r["id"],
+            "outcome": outcomes.effective_outcome(conn, r["id"]),
+        }
+
     return templates.TemplateResponse(
         request=request, name="applications.html",
         context={"jobs": rows if show != "skipped" else all_rows,
@@ -123,6 +135,10 @@ def applications(request: Request, show: str = "queue"):
                  "active_nav": "applications", "brief": brief,
                  "daily_cap": brief.daily_cap,
                  "today_submitted": today_submitted,
+                 "applied": applied,
+                 "manual_types": outcomes.MANUAL_TYPES,
+                 "outcome_labels": overview.CALLBACK_LABELS,
+                 "today": dt.date.today().isoformat(),
                  # first paint of the polled fragment, so the page ships the
                  # real status (and the mode toggle) instead of "Loading…"
                  **_run_status_context(conn)})
