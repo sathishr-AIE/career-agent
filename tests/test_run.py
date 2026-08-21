@@ -280,15 +280,29 @@ async def test_run_once_reports_stages_in_order(tmp_path, monkeypatch):
 
 async def test_run_once_reports_counters_matching_what_it_did(
         tmp_path, monkeypatch):
+    """passed, scored, and shortlisted must be independently correct, not
+    just equal to each other -- so this fixture forces them to distinct
+    values: 5 survivors, a budget of 3, and a verdict mix (submit, hold,
+    skip) so shortlisted's submit/hold filter actually gets exercised."""
     db_path, brief_path, conn = _prepare(tmp_path, monkeypatch)
-    _seed_job(conn, "near0", "Chennai")               # passes the filter
-    _seed_job(conn, "near1", "Chennai")               # passes the filter
-    _seed_job(conn, "far0", "San Francisco, CA")      # fails it
+    for i in range(5):
+        _seed_job(conn, f"near{i}", "Chennai")            # all pass the filter
+    _seed_job(conn, "far0", "San Francisco, CA")          # fails it
     conn.commit()
 
-    async def fake_score(job, brief, facts, ask):
-        return VERDICT
+    # Keyed by call order, not job identity: unscored_jobs' row order isn't
+    # a contract this test should depend on, so whichever 3 of the 5
+    # survivors get scored, they land one each on submit/hold/skip.
+    verdicts_by_call_order = ["submit", "hold", "skip"]
 
+    async def fake_score(job, brief, facts, ask):
+        v = verdicts_by_call_order[len(calls)]
+        calls.append(job.external_id)
+        return Verdict(role_fit=80, credibility=80, opportunity=80,
+                       application_quality=80, eligibility_soft=80,
+                       verdict=v, rationale="ok")
+
+    calls = []
     monkeypatch.setattr("career_agent.gate.score", fake_score)
 
     latest = {}
@@ -296,13 +310,48 @@ async def test_run_once_reports_counters_matching_what_it_did(
     def progress(**kw):
         latest.update(kw)
 
-    await run_once(_Args(db_path, max_score=5, brief=brief_path),
+    await run_once(_Args(db_path, max_score=3, brief=brief_path),
                    progress=progress)
 
-    assert latest["passed"] == 2
-    assert latest["scored"] == 2
-    assert latest["shortlisted"] == 2, "VERDICT's verdict is 'submit'"
+    assert latest["passed"] == 5
+    assert latest["scored"] == 3
+    assert latest["shortlisted"] == 2, "2 of 3 scored verdicts are submit/hold"
     assert latest["stage"] == "ready"
+
+
+async def test_run_once_reports_passed_climbing_past_a_spent_budget(
+        tmp_path, monkeypatch):
+    """Once the score budget is spent, each further survivor still fires
+    progress(passed=passed) -- no scored/shortlisted, since none was scored.
+    That call must be observable while a callback is watching, proving the
+    whole-pool sweep keeps reporting even after `scored` caps out."""
+    db_path, brief_path, conn = _prepare(tmp_path, monkeypatch)
+    for i in range(5):
+        _seed_job(conn, f"near{i}", "Chennai")            # all pass the filter
+    conn.commit()
+
+    async def fake_score(job, brief, facts, ask):
+        return VERDICT
+
+    monkeypatch.setattr("career_agent.gate.score", fake_score)
+
+    calls = []
+    await run_once(_Args(db_path, max_score=2, brief=brief_path),
+                   progress=lambda **kw: calls.append(kw))
+
+    # The budget-exhausted branch's signature: "passed" present, "scored"
+    # absent (the per-score-call and the "ready" call both always carry
+    # "scored").
+    budget_spent_calls = [c for c in calls
+                          if "passed" in c and "scored" not in c]
+    assert budget_spent_calls, \
+        "no progress call observed once the budget was spent"
+    assert max(c["passed"] for c in budget_spent_calls) == 5, \
+        "passed must keep climbing for every survivor, not just the scored ones"
+
+    scored_calls = [c for c in calls if "scored" in c]
+    assert max(c["scored"] for c in scored_calls) == 2, \
+        "scored must stay capped at the budget"
 
 
 async def test_run_once_works_without_a_progress_callback(
