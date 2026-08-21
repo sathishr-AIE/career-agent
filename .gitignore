@@ -42,3 +42,8 @@ desktop.ini
 # --- Project-specific ---
 *.db
 screenshots/
+
+# Isolation worktrees. Never tracked: a worktree nested in an
+# un-ignored path is also a path git resolves through the parent
+# checkout, which is why worktree creation refuses it.
+.claude/worktrees/
