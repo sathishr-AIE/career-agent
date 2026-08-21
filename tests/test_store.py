@@ -124,7 +124,10 @@ def test_mark_applied_promotes_an_existing_draft(conn):
     assert rows[0]["id"] == app_id
     assert rows[0]["status"] == "submitted"
     assert rows[0]["submitted_at"] == "2026-08-20"
-    assert rows[0]["answers"] == '{"note": "x"}', "draft's record preserved"
+    assert rows[0]["answers"] is None, (
+        "a manual application's contents are genuinely unknown; the draft's "
+        "answers are precisely what was NOT sent, so NULL says so rather "
+        "than inheriting the stub filler's placeholder")
 
 
 def test_mark_applied_inserts_when_there_is_no_draft(conn):

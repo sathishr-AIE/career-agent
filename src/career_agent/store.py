@@ -126,9 +126,13 @@ def mark_applied(conn, job_id: int, when: str) -> int:
         app_id = cur.lastrowid
     else:
         app_id = draft["id"]
+        # answers is nulled rather than kept: the draft's answers are
+        # precisely what was NOT sent, so carrying the stub filler's
+        # placeholder forward would make the row read as a record of what the
+        # human submitted -- which a future real Send is meant to rely on.
         conn.execute(
-            "UPDATE application SET status = 'submitted', submitted_at = ?"
-            " WHERE id = ?", (when, app_id))
+            "UPDATE application SET status = 'submitted', submitted_at = ?,"
+            " answers = NULL WHERE id = ?", (when, app_id))
 
     conn.commit()
     log(conn, job_id, "human_marked_applied", when)
