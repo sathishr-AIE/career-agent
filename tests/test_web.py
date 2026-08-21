@@ -46,7 +46,7 @@ def running_pipeline(monkeypatch):
     never returns would hold the interpreter open at exit."""
     release = threading.Event()
 
-    async def blocks(args):
+    async def blocks(args, progress=None):
         release.wait(10)
 
     monkeypatch.setattr(pipeline.run_module, "run_once", blocks)

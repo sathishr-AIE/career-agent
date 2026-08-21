@@ -19,7 +19,7 @@ def conn_factory(tmp_path):
 
 async def test_run_background_sets_idle_and_logs_completion_on_success(
         conn_factory, monkeypatch, tmp_path):
-    async def fake_run_once(args):
+    async def fake_run_once(args, progress=None):
         pass
 
     monkeypatch.setattr(pipeline.run_module, "run_once", fake_run_once)
@@ -37,7 +37,7 @@ async def test_run_background_sets_idle_and_logs_completion_on_success(
 
 async def test_run_background_sets_error_and_logs_on_failure(
         conn_factory, monkeypatch, tmp_path):
-    async def boom(args):
+    async def boom(args, progress=None):
         raise RuntimeError("apify token missing")
 
     monkeypatch.setattr(pipeline.run_module, "run_once", boom)
@@ -56,7 +56,7 @@ async def test_run_background_passes_paths_and_defaults_through(
         conn_factory, monkeypatch, tmp_path):
     seen = {}
 
-    async def spy(args):
+    async def spy(args, progress=None):
         seen["db"] = args.db
         seen["brief"] = args.brief
         seen["boards"] = args.boards
@@ -81,7 +81,7 @@ async def test_run_background_runs_run_once_off_the_serving_event_loop(
     3-second pipeline-status poll. It must run on a worker thread."""
     seen = {}
 
-    async def record_thread(args):
+    async def record_thread(args, progress=None):
         seen["thread"] = threading.get_ident()
 
     monkeypatch.setattr(pipeline.run_module, "run_once", record_thread)
@@ -89,3 +89,51 @@ async def test_run_background_runs_run_once_off_the_serving_event_loop(
                                   tmp_path / "career_brief.toml")
 
     assert seen["thread"] != threading.get_ident()
+
+
+async def test_progress_is_written_to_the_pipeline_row(
+        conn_factory, monkeypatch, tmp_path):
+    async def fake_run_once(args, progress=None):
+        progress(stage="score", found=40, scored=3, shortlisted=2)
+
+    monkeypatch.setattr(pipeline.run_module, "run_once", fake_run_once)
+    await pipeline.run_background(conn_factory, tmp_path / "t.db",
+                                  tmp_path / "career_brief.toml")
+
+    conn = conn_factory()
+    row = worker.get_run_state(conn, "pipeline")
+    assert row["stage"] == "score"
+    assert row["found"] == 40
+    assert row["scored"] == 3
+    assert row["shortlisted"] == 2
+
+
+async def test_progress_does_not_touch_the_apply_row(
+        conn_factory, monkeypatch, tmp_path):
+    async def fake_run_once(args, progress=None):
+        progress(stage="score", found=40)
+
+    monkeypatch.setattr(pipeline.run_module, "run_once", fake_run_once)
+    await pipeline.run_background(conn_factory, tmp_path / "t.db",
+                                  tmp_path / "career_brief.toml")
+
+    conn = conn_factory()
+    assert worker.get_run_state(conn, "apply")["stage"] is None
+    assert worker.get_run_state(conn, "apply")["found"] == 0
+
+
+async def test_a_message_becomes_an_activity_event(
+        conn_factory, monkeypatch, tmp_path):
+    async def fake_run_once(args, progress=None):
+        progress(stage="clean", message="Discovery returned 40 listings.")
+
+    monkeypatch.setattr(pipeline.run_module, "run_once", fake_run_once)
+    await pipeline.run_background(conn_factory, tmp_path / "t.db",
+                                  tmp_path / "career_brief.toml")
+
+    conn = conn_factory()
+    row = conn.execute(
+        "SELECT type, payload FROM event WHERE type = 'pipeline_progress'"
+    ).fetchone()
+    assert row is not None
+    assert row["payload"] == "Discovery returned 40 listings."

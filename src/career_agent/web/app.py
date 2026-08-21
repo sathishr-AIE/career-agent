@@ -382,7 +382,9 @@ async def pipeline_run_now():
     if state["status"] not in ("idle", "error"):
         return HTMLResponse(
             '<span class="denied">A pipeline run is already in progress.</span>')
-    worker.set_run_state(conn, "pipeline", status="running", last_error=None)
+    worker.set_run_state(conn, "pipeline", status="running", last_error=None,
+                         stage=None, found=0, duplicates=0, passed=0,
+                         scored=0, shortlisted=0)
     store.log(conn, None, "pipeline_started")
     task = asyncio.create_task(
         pipeline.run_background(_conn, DB_PATH, BRIEF_PATH))
