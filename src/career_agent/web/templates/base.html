@@ -100,9 +100,21 @@
        border-radius:7px;padding:5px 7px;font:inherit;font-size:11px}
   .outcome-form input[type=text]{min-width:120px}
   /* live run monitor */
-  .live-overlay{display:none;position:fixed;inset:0;background:rgba(18,24,39,.5);
+  .live-overlay{position:fixed;inset:0;background:rgba(18,24,39,.5);
                 z-index:100;align-items:center;justify-content:center;padding:20px}
   .live-overlay.open{display:flex}
+  /* Closed: unwrap the overlay/modal/inner chrome (display:contents keeps
+     their children rendering, just without a box of their own) so the
+     idle-state Run Now button/pill -- which must always be reachable, since
+     clicking it is the only path that ever adds .open -- renders in normal
+     page flow instead of vanishing with the rest of the modal. Only the
+     modal-only chrome is actually hidden when closed. */
+  .live-overlay:not(.open),
+  .live-overlay:not(.open) .live-modal,
+  .live-overlay:not(.open) .live-inner{display:contents}
+  .live-overlay:not(.open) .live-head,
+  .live-overlay:not(.open) #monitor-body,
+  .live-overlay:not(.open) .live-footer{display:none}
   .live-modal{background:#fff;border-radius:var(--radius);box-shadow:var(--shadow);
               width:100%;max-width:560px;max-height:90vh;overflow:auto}
   .live-inner{padding:18px 20px}
@@ -140,11 +152,16 @@
                 padding:9px 10px}
   .counter-top{font-size:10px;color:var(--muted);font-weight:700;margin-bottom:4px}
   .counter-num{font-size:17px;font-weight:800}
-  .activity{max-height:180px;overflow:auto;border:1px solid var(--line);
-            border-radius:10px;margin-top:6px}
+  /* column-reverse + DOM rendered newest-first (see app.py) keeps the feed
+     anchored to the newest line without JS re-scrolling after every 3s
+     poll swap: the DOM's first child (newest) sits at flex main-start,
+     which column-reverse puts at the bottom. */
+  .activity{display:flex;flex-direction:column-reverse;max-height:180px;
+            overflow:auto;border:1px solid var(--line);border-radius:10px;
+            margin-top:6px}
   .activity-item{display:flex;justify-content:space-between;gap:10px;
                  padding:7px 10px;border-bottom:1px solid var(--line);font-size:11px}
-  .activity-item:last-child{border-bottom:none}
+  .activity-item:first-child{border-bottom:none}
   .activity-text{color:var(--text)}
   .activity-time{color:var(--muted);white-space:nowrap;font-size:10px}
   .summary-row{display:flex;justify-content:space-between;font-size:12px;

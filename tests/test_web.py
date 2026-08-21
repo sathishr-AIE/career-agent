@@ -597,6 +597,13 @@ def test_pipeline_status_renders_the_counters(client):
 
 def test_pipeline_status_renders_the_activity_feed(client):
     conn = db.connect(web.DB_PATH)
+    # The feed is scoped to the current run (started_at or later) so a
+    # freshly started run never shows a previous run's lines -- see
+    # test_the_activity_feed_is_scoped_to_the_current_run below. That scoping
+    # needs a real started_at for this event to be in range.
+    worker.set_run_state(conn, "pipeline", status="running")
+    conn.execute("UPDATE run_state SET started_at = datetime('now', '-1 minute')"
+                 " WHERE kind = 'pipeline'")
     conn.execute("INSERT INTO event (job_id, type, payload)"
                  " VALUES (NULL, 'pipeline_progress', 'Discovery returned 40.')")
     conn.commit()
@@ -607,6 +614,114 @@ def test_pipeline_status_renders_the_activity_feed(client):
 def test_the_no_auto_apply_note_is_present(client):
     r = client.get("/pipeline/status")
     assert "No automatic applications" in r.text
+
+
+def test_progress_bar_interpolates_within_the_score_stage(client):
+    """Review fix: pct used to jump straight to the end of the score band
+    ((idx+1)*100//5 == 80) and sit there for the run's longest phase. It must
+    now move as `scored` climbs toward max_score_per_run (25, the fixture's
+    default setting), not just jump between five fixed positions."""
+    conn = db.connect(web.DB_PATH)
+    worker.set_run_state(conn, "pipeline", stage="score", scored=0)
+    start = client.get("/pipeline/status").text
+    start_pct = int(start.split('style="width:')[1].split('%')[0])
+
+    worker.set_run_state(conn, "pipeline", stage="score", scored=20)
+    later = client.get("/pipeline/status").text
+    later_pct = int(later.split('style="width:')[1].split('%')[0])
+
+    assert start_pct == 60   # band start: 3 whole stages done (3*20)
+    assert later_pct == 76   # 60 + (20 * 20 // 25)
+
+
+def test_the_activity_feed_is_scoped_to_the_current_run(client):
+    """Review fix: the feed query had no run scoping, so opening the monitor
+    on a freshly started run showed the *previous* run's twelve lines next to
+    all-zero counters. Also locks in newest-first DOM order, which .activity's
+    flex-direction:column-reverse (base.html) depends on to stay anchored to
+    the newest line without JS re-scrolling on every 3s poll."""
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO event (job_id, type, payload, occurred_at)"
+                 " VALUES (NULL, 'pipeline_progress', 'stale from last run',"
+                 " datetime('now', '-1 hour'))")
+    conn.commit()
+
+    worker.set_run_state(conn, "pipeline", status="running", stage="discover")
+    conn.execute("UPDATE run_state SET started_at = datetime('now', '-1 minute')"
+                 " WHERE kind = 'pipeline'")
+    conn.execute("INSERT INTO event (job_id, type, payload)"
+                 " VALUES (NULL, 'pipeline_progress', 'first message')")
+    conn.execute("INSERT INTO event (job_id, type, payload)"
+                 " VALUES (NULL, 'pipeline_progress', 'second message')")
+    conn.commit()
+
+    r = client.get("/pipeline/status")
+    assert "stale from last run" not in r.text
+    assert r.text.index("second message") < r.text.index("first message")
+
+
+def test_run_now_discards_the_response_instead_of_blanking_the_monitor(client):
+    """Review fix: the button used to hx-target="#pipeline-status"
+    hx-swap="outerHTML" the bare string "ok" over the div this task widened
+    from a two-element strip into the entire monitor -- nuking the
+    track/counters/feed/note for up to 3s on every click. hx-swap="none"
+    discards the response; the poller's own independent 3s tick picks up the
+    new state instead."""
+    button = client.get("/pipeline/status").text.split("Run Now")[0]
+    assert 'hx-swap="none"' in button
+    assert "outerHTML" not in button
+
+
+def test_the_run_now_button_is_reachable_in_a_rendered_page(client):
+    """The Critical review finding: `.live-overlay{display:none}` used to
+    hide everything inside #runOverlay unconditionally, including the
+    idle-state Run Now button -- the only element that can ever add `.open`.
+    Every path to opening the modal was unreachable.
+
+    No other test in this suite can catch that class of bug: TestClient only
+    ever inspects HTML text, never the CSS that decides what is actually
+    visible. This is the one check that renders the real page and looks at
+    computed visibility, via a headless, offline (all network blocked)
+    Playwright browser -- already a hard dependency of this project
+    (career_agent.apply.ats) -- against the exact HTML GET / returns, no
+    live server needed. Skips itself if a browser isn't installed rather
+    than failing the suite in an environment that lacks one."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        pytest.skip(f"playwright not importable: {exc}")
+
+    html = client.get("/").text
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"no browser available for playwright: {exc}")
+
+        try:
+            page = browser.new_page()
+            page.route("**/*", lambda route: route.abort())  # fully offline
+            page.set_content(html)
+
+            run_now = page.locator("#pipeline-status .btn.primary")
+            assert run_now.is_visible(), (
+                "Run Now must be visible in the closed (idle) state -- "
+                "it is the only path to opening the modal")
+            assert not page.locator(".live-head").is_visible(), (
+                "modal-only chrome must stay hidden while closed")
+            assert not page.locator("#monitor-body").is_visible()
+
+            run_now.click()
+
+            overlay_class = (
+                page.locator("#runOverlay").get_attribute("class") or "")
+            assert "open" in overlay_class.split(), "click must open the modal"
+            assert page.locator(".live-head").is_visible(), (
+                "modal chrome must appear once open")
+            assert page.locator("#monitor-body").is_visible()
+        finally:
+            browser.close()
 
 
 def test_startup_clears_a_pipeline_run_stranded_by_a_crash(client):

@@ -1,12 +1,17 @@
 {% set s = pipeline_state %}
 {% set stage_keys = stages | map(attribute=0) | list %}
 {% set idx = stage_keys.index(s["stage"]) if s["stage"] in stage_keys else -1 %}
-{% set pct = 0 if idx < 0 else ((idx + 1) * 100 // stages | length) %}
+{% set band = 100 // (stages | length) %}
+{# Score is the run's longest phase, so it alone gets a fine-grained position
+   within its band (scored/max_score) instead of jumping straight to the
+   band's end and sitting there -- every other stage keeps the coarse jump. #}
+{% set in_score = s["stage"] == "score" and max_score %}
+{% set pct = 0 if idx < 0 else ((idx * band + band * s["scored"] // max_score) if in_score else (idx + 1) * band) %}
+{% set pct = 100 if pct > 100 else pct %}
 
 <div id="pipeline-status">
   {% if s["status"] in ("idle", "error") %}
-    <button class="btn primary" hx-post="/pipeline/run-now"
-            hx-target="#pipeline-status" hx-swap="outerHTML"
+    <button class="btn primary" hx-post="/pipeline/run-now" hx-swap="none"
             onclick="openRunMonitor()">▶ Run Now</button>
   {% else %}
     <button class="btn" onclick="openRunMonitor()">◌ Running… (view)</button>
@@ -20,7 +25,7 @@
   <div id="monitor-body" data-status="{{ s['status'] }}"
        data-started="{{ s['started_at'] or '' }}">
     <div class="pipeline-track">
-      {% for key, label in stages %}
+      {% for _, label in stages %}
       <div class="stage {{ 'done' if loop.index0 < idx else ('active' if loop.index0 == idx else '') }}">
         <div class="stage-dot">{{ loop.index }}</div>
         <div class="stage-label">{{ label }}</div>

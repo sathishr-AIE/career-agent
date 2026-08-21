@@ -104,7 +104,14 @@ def dashboard(request: Request):
                  "recent_discoveries": overview.recent_discoveries(conn),
                  "recent_outcomes": overview.recent_outcomes(conn),
                  "shortlisted_count": kpi_data["shortlisted"],
-                 "pipeline_state": worker.get_run_state(conn, "pipeline")})
+                 # overview.html includes _pipeline_status.html directly for
+                 # first paint, before the poller's own hx-trigger="load"
+                 # fetch ever fires -- so that first paint needs the exact
+                 # same context the polling route gives it (stages, max_score,
+                 # the run-scoped feed), or it renders with an empty stage
+                 # track and a blank "scored / " counter until the poll
+                 # catches up.
+                 **_pipeline_status_context(conn)})
 
 
 @app.get("/applications", response_class=HTMLResponse)
@@ -405,6 +412,13 @@ async def pipeline_run_now():
     worker.set_run_state(conn, "pipeline", status="running", last_error=None,
                          stage=None, found=0, duplicates=0, passed=0,
                          scored=0, shortlisted=0)
+    # Same as run_start()'s equivalent line for the apply kind: set_run_state
+    # never touches started_at itself, and both the elapsed-time display and
+    # the activity feed's run-scoping query (_pipeline_status_context) rely
+    # on it being real, not NULL.
+    conn.execute("UPDATE run_state SET started_at = datetime('now')"
+                 " WHERE kind = 'pipeline'")
+    conn.commit()
     store.log(conn, None, "pipeline_started")
     task = asyncio.create_task(
         pipeline.run_background(_conn, DB_PATH, BRIEF_PATH))
@@ -413,21 +427,37 @@ async def pipeline_run_now():
     return HTMLResponse("ok")
 
 
-@app.get("/pipeline/status", response_class=HTMLResponse)
-def pipeline_status(request: Request):
-    conn = _conn()
+def _pipeline_status_context(conn) -> dict:
+    """Shared by the polling route and the Overview page's first paint (the
+    include in overview.html renders before the poller's own hx-trigger="load"
+    ever fires), so both always agree -- same reason applications() spreads
+    _run_status_context() into its own context."""
     state = worker.get_run_state(conn, "pipeline")
+    # Scoped to this run: without it, a freshly started run shows the
+    # *previous* run's dozen lines next to all-zero counters. started_at is
+    # NULL before any run has ever started, which correctly yields no rows
+    # (NULL comparisons are never true in SQLite) rather than everything.
     feed = conn.execute(
         "SELECT payload, occurred_at FROM event"
         " WHERE type = 'pipeline_progress'"
+        "   AND occurred_at >= (SELECT started_at FROM run_state"
+        "                        WHERE kind = 'pipeline')"
         " ORDER BY id DESC LIMIT 12").fetchall()
     settings = store.get_settings(conn)
+    # Newest first: .activity (base.html) is flex-direction:column-reverse,
+    # which flips this back to oldest-top/newest-bottom on screen while
+    # anchoring the scroll position on the newest line -- so it stays
+    # "scrolled to bottom" across every 3s poll swap with no JS re-scroll.
+    return {"pipeline_state": state, "feed": feed, "stages": STAGES,
+            "max_score": settings["max_score_per_run"]}
+
+
+@app.get("/pipeline/status", response_class=HTMLResponse)
+def pipeline_status(request: Request):
+    conn = _conn()
     return templates.TemplateResponse(
         request=request, name="_pipeline_status.html",
-        context={"pipeline_state": state,
-                 "feed": list(reversed(feed)),   # oldest first, newest last
-                 "stages": STAGES,
-                 "max_score": settings["max_score_per_run"]})
+        context=_pipeline_status_context(conn))
 
 
 @app.post("/queue/{job_id}/skip")
