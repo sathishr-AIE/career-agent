@@ -138,7 +138,7 @@ def applications(request: Request, show: str = "queue"):
                  "applied": applied,
                  "manual_types": outcomes.MANUAL_TYPES,
                  "outcome_labels": overview.CALLBACK_LABELS,
-                 "today": dt.date.today().isoformat(),
+                 "today": _utc_today().isoformat(),  # see _utc_today
                  # first paint of the polled fragment, so the page ships the
                  # real status (and the mode toggle) instead of "Loading…"
                  **_run_status_context(conn)})
@@ -224,6 +224,17 @@ def dismiss(job_id: int):
     return HTMLResponse('<span class="done">Dismissed</span>')
 
 
+def _utc_today() -> dt.date:
+    # SQLite's date('now') -- what the daily-cap guard (worker.guard) and
+    # every other date('now') comparison in this app use -- is UTC.
+    # dt.date.today() is the host's local calendar day, which disagrees with
+    # UTC for part of every day off-UTC (e.g. Chennai, UTC+5:30, roughly
+    # 00:00-05:30 IST). A date stamped with local "today" during that window
+    # never matches date('now') in the cap query, so the cap silently stops
+    # counting. Same fix as overview.sparkline_values -- keep them matching.
+    return dt.datetime.now(dt.timezone.utc).date()
+
+
 def _parse_date(raw: str, field: str, errors: dict) -> str | None:
     """Accept an ISO date, defaulting to today when blank. Parsed here, not
     declared as a typed Form parameter: a typed parameter makes FastAPI
@@ -231,7 +242,7 @@ def _parse_date(raw: str, field: str, errors: dict) -> str | None:
     the friendly error page entirely."""
     raw = (raw or "").strip()
     if not raw:
-        return dt.date.today().isoformat()
+        return _utc_today().isoformat()
     try:
         return dt.date.fromisoformat(raw).isoformat()
     except ValueError:

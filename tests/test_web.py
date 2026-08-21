@@ -1,3 +1,4 @@
+import datetime as dt
 import threading
 
 import pytest
@@ -838,6 +839,38 @@ def test_marking_applied_defaults_to_today(client):
     row = conn.execute(
         "SELECT submitted_at FROM application WHERE job_id = 1").fetchone()
     assert row["submitted_at"] == today
+
+
+def test_marking_applied_blank_date_anchors_to_utc_not_host_local_clock(
+        client, monkeypatch):
+    """_parse_date's blank-'when' default must agree with the SQL it feeds --
+    worker.guard's and this app's own date(submitted_at) = date('now'),
+    which is UTC -- not the host's local calendar day. Simulates the window
+    (e.g. ~00:00-05:30 IST in Chennai, UTC+5:30) where local has already
+    rolled to the next day but UTC has not, by making the two clocks
+    disagree on purpose -- deterministic regardless of what day it actually
+    is when the suite runs. If _parse_date read the local clock (the old
+    bug), submitted_at would land on 2026-01-02 and the assertion below
+    would fail even though this test never touches the real system clock."""
+    class _FixedLocalDate(dt.date):
+        @classmethod
+        def today(cls):
+            return dt.date(2026, 1, 2)  # local: already the next day
+
+    class _FixedUTCDatetime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 1, 1, 23, 0, tzinfo=tz)  # UTC: still the 1st
+
+    monkeypatch.setattr(web.dt, "date", _FixedLocalDate)
+    monkeypatch.setattr(web.dt, "datetime", _FixedUTCDatetime)
+
+    client.post("/applied/1", data={"when": ""})
+
+    conn = db.connect(web.DB_PATH)
+    row = conn.execute(
+        "SELECT submitted_at FROM application WHERE job_id = 1").fetchone()
+    assert row["submitted_at"] == "2026-01-01"  # UTC's day, not local's
 
 
 def test_marking_applied_twice_is_refused_readably(client):
