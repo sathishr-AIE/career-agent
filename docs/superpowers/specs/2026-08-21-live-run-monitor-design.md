@@ -36,13 +36,17 @@ computed inside `run.run_once` right now and thrown away:
 
 - Not changing what a run does. No new discovery sources, no scoring
   changes, no schema changes to `job`/`assessment`/`application`.
-- **Per-source progress bars are deferred.** The prototype fills a bar
-  per source as LinkedIn, Naukri, and ATS report in. Discovery is one
-  blocking `client.actor(...).call()` per query inside a plain `def`
-  (`sources/apify.py`), so nothing can report partial progress without
-  threading a callback down through `discovery.run_discovery` into each
-  source adapter. The panel is built, showing each source's final count
-  as it completes, but the within-source animation is not.
+- **The whole discovery-sources panel is deferred, not just its
+  animation.** The prototype fills a bar per source as LinkedIn, Naukri,
+  and ATS report in. Discovery is one blocking
+  `client.actor(...).call()` per query inside a plain `def`
+  (`sources/apify.py`), and `discovery.run_discovery` returns a single
+  flat list only once every source has finished — so *no* per-source
+  number, final or partial, is available without threading a callback
+  down through `run_discovery` into each source adapter. Since the
+  per-source counts and the bars that display them come from the same
+  missing plumbing, the panel goes out together with the animation. The
+  aggregate `found` counter covers the same ground for now.
 - Not adding pause/resume/cancel to the pipeline run. The spec's existing
   decision stands: it is one unattended sweep, and a stuck run is a bug
   to fix rather than a state to manage.
@@ -170,10 +174,9 @@ pill.
 - **Four counters** — Jobs Found, Passed Filter, AI Scored, Shortlisted.
 - **Live activity feed** — `pipeline_progress` events for the current
   run, newest last, scrolled to bottom.
-- **Discovery sources panel** — each source's count, filled in as it
-  completes (see Non-goals about within-source progress).
 - **Run summary** — shortlisted so far, elapsed time, duplicates removed,
-  current stage.
+  current stage. (The prototype's discovery-sources panel is not built —
+  see Non-goals.)
 - **The prototype's standing note is kept verbatim**: *"No automatic
   applications. This run discovers, filters, deduplicates, and scores
   jobs. Applying stays a deliberate human action from the Applications
