@@ -140,7 +140,8 @@ def test_a_manual_outcome_beats_a_derived_no_response(conn):
     outcomes.derive_no_response(conn, after_days=30)
     assert outcomes.effective_outcome(conn, app_id) == "no_response"
 
-    outcomes.record(conn, app_id, "screen", "2026-08-21")
+    today = conn.execute("SELECT date('now') d").fetchone()["d"]
+    outcomes.record(conn, app_id, "screen", today)
 
     assert outcomes.effective_outcome(conn, app_id) == "screen"
     assert conn.execute("SELECT COUNT(*) n FROM outcome").fetchone()["n"] == 2, \
@@ -154,6 +155,7 @@ def test_callback_data_can_now_exist(conn):
     from career_agent import store
     job_id = conn.execute(
         "SELECT id FROM job LIMIT 1").fetchone()["id"]
-    app_id = store.mark_applied(conn, job_id, "2026-08-20")
-    outcomes.record(conn, app_id, "screen", "2026-08-21")
+    today = conn.execute("SELECT date('now') d").fetchone()["d"]
+    app_id = store.mark_applied(conn, job_id, today)
+    outcomes.record(conn, app_id, "screen", today)
     assert outcomes.callback_rate(conn) == (1, 1)
