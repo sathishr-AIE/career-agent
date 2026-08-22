@@ -34,3 +34,13 @@ class Verdict(BaseModel):
     @property
     def weighted(self) -> float:
         return round(sum(getattr(self, k) * w for k, w in self.WEIGHTS.items()), 2)
+
+
+class Bullet(BaseModel):
+    text: str
+    fact_ids: list[int] = Field(min_length=1)
+
+
+class TailorResult(BaseModel):
+    summary: str
+    bullets: list[Bullet] = Field(min_length=1)
