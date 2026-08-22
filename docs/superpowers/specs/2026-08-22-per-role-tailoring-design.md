@@ -138,6 +138,30 @@ governing the gate's `credibility` dimension ("credit nothing not listed").
 every bullet traces to a specific row in `fact`, and that trace is stored and
 shown, not discarded after generation.
 
+**This audit trail is weaker than what `gate.score` gets**, and that gap is
+worth naming plainly: `gate.score` is checked against a golden set
+(`tests/golden/listings.json`) on every prompt change. `tailor()` gets no
+equivalent — `fact_ids` lets you notice drift after a resume already went
+out, not before. Two cheap, deterministic checks close part of that gap
+without building a golden set for tailoring in this slice:
+
+- **Every `fact_id` a bullet cites must exist in the current `fact` table.**
+  Checked right after parsing, same place `gate.parse_verdict`'s JSON
+  validation happens. A bullet citing a nonexistent fact id is treated the
+  same way invalid JSON is — one retry with an explicit correction appended
+  to the prompt, then a hard failure surfaced to the user rather than a
+  silently-shipped unverifiable claim.
+- **At least one bullet is required.** Ten facts is enough to clear
+  `gate.MIN_FACTS_HARD`, but the model may still judge few of them relevant
+  to a specific job, and an empty `bullets` list would otherwise render a
+  resume with the `<<PROJECT_BULLET>>` marker simply deleted and nothing put
+  in its place. Mirrors the input-side facts-sufficiency guard with an
+  equivalent output-side one: zero bullets is refused, not shipped.
+
+A full golden-set-style fidelity check for tailoring (e.g. a human-labeled
+set of job/fact-selection pairs, checked on prompt changes the way the gate's
+golden set works) is real future work, not built here — flagged in Deferred.
+
 ## Rendering
 
 Deterministic Python, not the LLM — `render_docx(template_path, tailor_result,
@@ -154,10 +178,21 @@ out_path)` in `tailor.py`, using `python-docx` (new dependency; nothing in
    inserted.
 4. Save to `out_path` (convention: `resume/generated/{version}.docx`).
 
-This is the one implementation risk worth naming: python-docx's
-clone-and-restyle approach is well-documented, but exact behavior against
-your specific template's paragraph styles is the part most likely to need a
-short iteration loop once tried for real.
+This is one implementation risk worth naming: python-docx's clone-and-restyle
+approach is well-documented, but exact behavior against your specific
+template's paragraph styles is the part most likely to need a short
+iteration loop once tried for real.
+
+**A second risk, about failure rather than fidelity**: the `resume` row is
+inserted only *after* step 4 saves successfully — never before, and never
+in the same statement as a render that might still throw. There is no
+"Retailor" action in v2 (by design), so a `resume` row pointing at a
+broken or missing file would hand that same broken version to every future
+request for the job with no recovery path — `resume_version_for` doesn't
+know a version's file is bad, it just returns the latest one. Ordering the
+insert strictly after a confirmed-written file means a failed render leaves
+no row at all, and the next Apply click naturally retries tailoring from
+scratch (the "does a row already exist" check correctly says no).
 
 ## Trigger and integration
 
@@ -168,6 +203,17 @@ keeps the pipeline's cost and duration exactly as v1 left them.
 
 If a `resume` row already exists for the job's `id`, its most recent version
 is reused rather than regenerating — no "Retailor" action in v2.
+
+**Concurrent Apply clicks on the same job** (a double-fire is not
+hypothetical here — this app has already shipped fixes for exactly this
+class of htmx double-submit race). A plain read-then-decide ("does a row
+exist? no? tailor.") lets two near-simultaneous requests both tailor,
+both render, and both try to insert — and since `resume.version` is
+`UNIQUE`, the loser fails on `sqlite3.IntegrityError` instead of gracefully
+reusing the winner's row. Handle it the same way `store.upsert_jobs`
+already handles the equivalent race on `job.fingerprint`: attempt the
+insert, catch `sqlite3.IntegrityError`, and re-read the now-existing row
+for that job instead of surfacing the error.
 
 **Shared lookup, not per-caller logic.** New `store.resume_version_for(conn,
 job_id) -> str`: returns the latest `resume.version` for that job if one
@@ -185,10 +231,34 @@ lookup happens in each caller, not inside `ats.submit`:
 call `verify_auth()` (the same guard `run_once` uses — fail loudly rather
 than silently falling back), then tailor-if-needed, render, insert the
 `resume` row, and pass the resulting version into
-`submit(..., resume_version=version)`. This is the single on-demand LLM call
-in the request path; it's awaited directly in the async route rather than
-handed to a background thread — one job, one call, unlike the multi-minute
-pipeline run that already needs `asyncio.to_thread`.
+`submit(..., resume_version=version)`.
+
+**This request is not cheap today, and this design does not make it
+cheap — it adds to an existing cost.** `_do_apply` already calls
+`ats_apply.submit(conn, job_id, dry_run=True)` unconditionally, and
+`dry_run=True` only skips the `SUBMISSION_IMPLEMENTED` guard (`ats.py`'s
+`submit`, the `if not dry_run and ...` check) — it still falls through to
+`filler = filler or _default_filler` and awaits a real, visible Chromium
+launch that navigates to the job URL. That happens on every Apply click in
+v1, today, independent of anything in this document. The tailoring LLM call
+is genuinely one call, awaited directly with no background thread — that
+part of the original reasoning holds — but it is stacked onto an
+already-slow handler, not the primary cost in it. Framing it as "the"
+expensive step would have been wrong; call it an added few seconds on top of
+a browser launch the handler already pays for.
+
+**Explicit ordering, because it matters for failure isolation**: tailor,
+render, and insert the `resume` row *before* calling `ats_apply.submit`.
+That means if the subsequent browser step hits a captcha or fails outright,
+the resume row and file already exist and are unaffected — resume
+generation succeeds or fails on its own terms, never rolled back by what the
+stub browser does afterward. (Moving tailoring off the request entirely,
+polling the way the live run monitor does for the multi-minute pipeline run,
+was considered and rejected: that idiom exists there because *minutes* of
+pipeline work would otherwise block a page render; a few extra seconds on a
+handler that already blocks on a browser launch synchronously does not meet
+that bar. Revisit if tailoring latency turns out worse than expected once
+built.)
 
 ## Dashboard
 
@@ -219,9 +289,30 @@ version to its `resume.path` and serves the file via FastAPI's
   row exists for a job, and returns the correct latest row when one does.
 - `tailor()` raises the same `gate.InsufficientFacts`-shaped guard when the
   facts store is too thin, at the same threshold the gate already enforces.
+- `tailor()` retries once and then fails clearly on a bullet citing a
+  `fact_id` absent from the current `fact` table, and refuses a zero-bullet
+  result.
+- **A route-level test of `_do_apply`'s actual new sequence**: tailor →
+  render → insert `resume` row → `submit(..., resume_version=...)`, with the
+  browser filler swapped for a test double the way `test_web.py`'s existing
+  apply tests already do. This project's own recurring bug class — the
+  UTC/local clock mismatch, the typed-`Form`-field 422 trap, htmx state
+  destroyed by a poll swap — is integration seams, not unit logic. This is
+  the newest seam (tailoring landing in front of an existing, already
+  side-effecting handler) and unit tests on `tailor.py` and `render_docx` in
+  isolation would not have caught the ordering issue this design doc itself
+  got wrong on the first pass.
+- A concurrent-Apply-clicks test asserting two near-simultaneous tailor
+  attempts on the same job converge on one `resume` row, not an
+  `IntegrityError`.
 
 ## Deferred
 
+- A golden-set-style fidelity check for tailoring, equivalent to
+  `gate.score`'s `tests/golden/listings.json` — human-labeled job/fact
+  selections checked on every prompt change. v2 ships with cheaper
+  point-checks instead (fact-id existence, non-empty bullets); this is the
+  next layer up if drift shows up in practice.
 - PDF rendering from the tailored DOCX.
 - In-app upload/edit of the master template.
 - A "Retailor" action to regenerate a job's resume on demand.
