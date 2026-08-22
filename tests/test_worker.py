@@ -1,16 +1,41 @@
 import asyncio
+import json
 
 import pytest
 
-from career_agent import db, store
+from career_agent import db, store, tailor
 from career_agent.web import worker
+from conftest import build_tailor_template
 
 
 @pytest.fixture
 def conn(tmp_path):
     c = db.connect(tmp_path / "t.db")
     db.init_schema(c)
+    for i in range(10):
+        c.execute("INSERT INTO fact (claim, evidence) VALUES (?, ?)",
+                  (f"claim {i}", f"evidence {i}"))
+    c.commit()
     return c
+
+
+@pytest.fixture(autouse=True)
+def stub_tailoring(monkeypatch, tmp_path):
+    """apply_tick now tailors before drafting. Default every test to a safe,
+    deterministic tailoring path -- no real LLM call, no
+    CLAUDE_CODE_OAUTH_TOKEN dependency -- so tests that only care about the
+    apply-queue state machine keep working unchanged."""
+    template = tmp_path / "master.docx"
+    build_tailor_template(template)
+    monkeypatch.setattr(tailor, "TEMPLATE_PATH", template)
+    monkeypatch.setattr(tailor, "OUTPUT_DIR", tmp_path / "generated")
+    monkeypatch.setattr(worker.run_module, "verify_auth", lambda: None)
+
+    async def _default_ask(prompt, model=None):
+        return json.dumps({"summary": "Tailored summary.",
+                           "bullets": [{"text": "Relevant bullet",
+                                       "fact_ids": [1]}]})
+    monkeypatch.setattr(worker.run_module, "_ask", _default_ask)
 
 
 @pytest.fixture
@@ -36,6 +61,53 @@ def _job(conn, fp, priority=None, score=80, verdict="submit"):
         (job_id, score, verdict))
     conn.commit()
     return job_id
+
+
+async def test_apply_tick_tailors_before_drafting_and_threads_the_version(
+        conn, brief_path, monkeypatch):
+    _job(conn, "fp1")
+    worker.set_run_state(conn, "apply", status="running", mode="manual")
+
+    captured = {}
+
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
+        captured["resume_version"] = resume_version
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
+
+    await worker.apply_tick(conn, brief_path)
+
+    assert captured["resume_version"] == "tailored-1-r1"
+    row = conn.execute("SELECT * FROM resume WHERE version = ?",
+                       (captured["resume_version"],)).fetchone()
+    assert row is not None
+
+
+async def test_apply_tick_reuses_an_already_tailored_resume(conn, brief_path,
+                                                             monkeypatch):
+    job_id = _job(conn, "fp1")
+    conn.execute("INSERT INTO resume (version, path, job_id)"
+                 " VALUES ('tailored-1-r1', 'x.docx', ?)", (job_id,))
+    conn.commit()
+    worker.set_run_state(conn, "apply", status="running", mode="manual")
+
+    async def must_not_tailor(prompt, model=None):
+        raise AssertionError("must not tailor again")
+
+    monkeypatch.setattr(worker.run_module, "_ask", must_not_tailor)
+
+    captured = {}
+
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
+        captured["resume_version"] = resume_version
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
+
+    await worker.apply_tick(conn, brief_path)
+
+    assert captured["resume_version"] == "tailored-1-r1"
 
 
 def test_get_run_state_returns_seeded_apply_row(conn):
@@ -236,7 +308,7 @@ async def test_tick_auto_mode_drafts_and_sends(conn, brief_path, monkeypatch):
 
     calls = []
 
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         calls.append(dry_run)
         status = "draft" if dry_run else "submitted"
         conn.execute("INSERT INTO application (job_id, resume_version,"
@@ -259,7 +331,7 @@ async def test_tick_auto_mode_skips_when_the_real_send_reports_not_ok(
     job_id = _job(conn, "captcha")
     worker.set_run_state(conn, "apply", status="running", mode="auto")
 
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         if dry_run:
             conn.execute("INSERT INTO application (job_id, resume_version,"
                          " status) VALUES (?, 'v1', 'draft')", (job_id,))
@@ -284,7 +356,7 @@ async def test_tick_manual_mode_stops_after_draft(conn, brief_path, monkeypatch)
 
     calls = []
 
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         calls.append(dry_run)
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', 'draft')", (job_id,))

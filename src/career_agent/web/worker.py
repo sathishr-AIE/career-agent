@@ -1,8 +1,10 @@
 import asyncio
+import functools
 import sqlite3
 from pathlib import Path
 
-from career_agent import store
+from career_agent import run as run_module
+from career_agent import store, tailor
 from career_agent.apply import ats as ats_apply
 from career_agent.config import load_brief
 
@@ -79,6 +81,21 @@ def guard(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
     return None
 
 
+async def tailor_for_apply(conn: sqlite3.Connection, job_id: int,
+                           brief_path: Path) -> str:
+    """Tailor and render this job's resume if one doesn't exist yet, else
+    reuse the most recent version. Shared by the dashboard's Apply button
+    (app.py's _do_apply) and this module's apply_tick -- both create a
+    draft the same way, so both need the same resume behind it."""
+    run_module.verify_auth()
+    row = conn.execute("SELECT * FROM job WHERE id = ?", (job_id,)).fetchone()
+    job = run_module._row_to_job(row)
+    brief = load_brief(brief_path)
+    settings = store.get_settings(conn)
+    ask = functools.partial(run_module._ask, model=settings["scoring_model"])
+    return await tailor.ensure_tailored(conn, job_id, job, brief, ask)
+
+
 async def apply_tick(conn: sqlite3.Connection, brief_path) -> None:
     """One step of the apply worker: pick a candidate, gate it, draft it,
     and in auto mode send it. Called by the control endpoints (for
@@ -111,7 +128,16 @@ async def apply_tick(conn: sqlite3.Connection, brief_path) -> None:
         return
 
     try:
-        result = await ats_apply.submit(conn, job_id, dry_run=True)
+        resume_version = await tailor_for_apply(conn, job_id, brief_path)
+    except Exception as exc:
+        set_run_state(conn, "apply", status="error", current_job_id=None,
+                      last_error=str(exc))
+        store.log(conn, job_id, "run_error", str(exc))
+        return
+
+    try:
+        result = await ats_apply.submit(conn, job_id, dry_run=True,
+                                        resume_version=resume_version)
     except Exception as exc:
         set_run_state(conn, "apply", status="error", current_job_id=None,
                       last_error=str(exc))
@@ -127,7 +153,9 @@ async def apply_tick(conn: sqlite3.Connection, brief_path) -> None:
         return  # stays 'running' with current_job_id set: awaiting review
 
     try:
-        result = await ats_apply.submit(conn, job_id, dry_run=False)
+        result = await ats_apply.submit(conn, job_id, dry_run=False,
+                                        resume_version=store.resume_version_for(
+                                            conn, job_id))
     except Exception as exc:
         set_run_state(conn, "apply", status="error", current_job_id=None,
                       last_error=str(exc))
