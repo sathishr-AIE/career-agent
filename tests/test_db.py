@@ -119,3 +119,26 @@ def test_setting_seeding_does_not_clobber_a_saved_choice(conn):
     row = conn.execute("SELECT * FROM setting").fetchone()
     assert row["scoring_model"] == "claude-haiku-4-5"
     assert row["max_score_per_run"] == 50
+
+
+def test_run_state_has_progress_columns(conn):
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_state)")}
+    assert {"stage", "found", "duplicates", "passed", "scored",
+            "shortlisted"} <= cols
+
+
+def test_progress_counters_default_to_zero(conn):
+    row = conn.execute(
+        "SELECT stage, found, duplicates, passed, scored, shortlisted"
+        " FROM run_state WHERE kind = 'pipeline'").fetchone()
+    assert row["stage"] is None
+    assert (row["found"], row["duplicates"], row["passed"],
+            row["scored"], row["shortlisted"]) == (0, 0, 0, 0, 0)
+
+
+def test_progress_columns_are_added_idempotently(conn):
+    db.init_schema(conn)
+    db.init_schema(conn)
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(run_state)")]
+    assert cols.count("stage") == 1
+    assert cols.count("found") == 1

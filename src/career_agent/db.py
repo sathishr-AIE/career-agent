@@ -144,6 +144,13 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.execute("INSERT OR IGNORE INTO run_state (kind) VALUES ('pipeline')")
     conn.execute("INSERT OR IGNORE INTO setting (id) VALUES (1)")
     _add_column_if_missing(conn, "job", "priority", "INTEGER")
+    # Pipeline run progress. run_state already carries columns meaningful
+    # to one kind only (mode and current_job_id are apply-only), so these
+    # follow that precedent and keep the status endpoint a single-row read.
+    _add_column_if_missing(conn, "run_state", "stage", "TEXT")
+    for counter in ("found", "duplicates", "passed", "scored", "shortlisted"):
+        _add_column_if_missing(conn, "run_state", counter,
+                               "INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 

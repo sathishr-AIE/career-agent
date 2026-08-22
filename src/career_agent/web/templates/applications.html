@@ -62,6 +62,45 @@
   {% endif %}
 </div>
 
+{# Mark applied / record outcome, shared by the All Applications tab and the
+   Skipped tab. A skip the user overrode gets a draft like any other job, and
+   without these controls there it could never reach the callback
+   denominator. {% call %} supplies the tab's own extra button for a job with
+   no application row yet. #}
+{% macro action_cell(j) %}
+  {% set tracked = applied.get(j["id"]) %}
+  {% if tracked %}
+    <div class="outcome-cell">
+      <span class="{{ 'done' if tracked['outcome'] else 'rationale' }}">
+        {{ outcome_labels.get(tracked["outcome"], "Awaiting response") }}
+      </span>
+      <form hx-post="/outcome/{{ tracked['application_id'] }}"
+            hx-swap="outerHTML" class="outcome-form">
+        <select name="type">
+          {% for t in manual_types %}
+          <option value="{{ t }}">{{ outcome_labels[t] }}</option>
+          {% endfor %}
+        </select>
+        <input type="date" name="occurred_at" value="{{ today }}">
+        <input type="text" name="notes" placeholder="notes (optional)">
+        <button class="btn" type="submit">Record</button>
+      </form>
+    </div>
+  {% elif j["terminal_status"] == "held_unknown" %}
+    <span class="denied">Held — confirm manually, then clear it</span>
+  {% elif j["terminal_status"] == "failed_permanent" %}
+    <span class="denied">Failed permanently — see the event log</span>
+  {% else %}
+    <form hx-post="/applied/{{ j['id'] }}" hx-swap="outerHTML"
+          class="outcome-form">
+      <input type="date" name="when" value="{{ today }}">
+      <button class="btn" type="submit"
+              title="You applied on the site yourself. This records it so callbacks can be tracked.">Mark applied</button>
+    </form>
+    {{ caller() }}
+  {% endif %}
+{% endmacro %}
+
 <div id="tab-all" class="tab-panel">
   <table>
     <tr><th>Score</th><th>Role</th><th>Source</th><th>Verdict</th><th></th></tr>
@@ -75,23 +114,9 @@
       <td>{{ j["source"] }}</td>
       <td class="{{ j['verdict'] }}">{{ j["verdict"] }}</td>
       <td>
-        {% if j["terminal_status"] in ("in_flight", "submitted") %}
-          <span class="done">Applied</span>
-        {% elif j["terminal_status"] == "held_unknown" %}
-          <span class="denied">Held — confirm manually, then clear it</span>
-        {% elif j["terminal_status"] == "failed_permanent" %}
-          <span class="denied">Failed permanently — see the event log</span>
-        {% elif j["has_draft"] %}
-          <button hx-post="/send/{{ j['id'] }}" hx-swap="outerHTML"
-                  title="Submission is not implemented yet (v3). This will tell you so rather than pretending.">Send</button>
-        {% elif j["verdict"] == "skip" %}
-          <button hx-post="/override/{{ j['id'] }}" hx-swap="outerHTML"
-                  title="Records an override of the gate's skip, and tracks it. Submission is manual.">Track anyway</button>
-        {% else %}
-          <button hx-post="/apply/{{ j['id'] }}" hx-swap="outerHTML"
-                  title="Opens the posting and tracks it. Submission is manual — see the roadmap.">Open &amp; track</button>
-          <button hx-post="/dismiss/{{ j['id'] }}" hx-swap="outerHTML">Dismiss</button>
-        {% endif %}
+        {% call action_cell(j) %}
+        <button hx-post="/dismiss/{{ j['id'] }}" hx-swap="outerHTML">Dismiss</button>
+        {% endcall %}
       </td>
     </tr>
     {% endfor %}
@@ -111,8 +136,12 @@
       <td><a href="{{ j['url'] }}">{{ j["title"] }}</a> at {{ j["company"] }}<br>
         <span class="rationale">{{ j["rationale"] }}</span></td>
       <td>{{ j["source"] }}</td>
-      <td><button hx-post="/override/{{ j['id'] }}" hx-swap="outerHTML"
-                  title="Records an override of the gate's skip, and tracks it. Submission is manual.">Track anyway</button></td>
+      <td>
+        {% call action_cell(j) %}
+        <button hx-post="/override/{{ j['id'] }}" hx-swap="outerHTML"
+                title="Records an override of the gate's skip, and tracks it. Submission is manual.">Track anyway</button>
+        {% endcall %}
+      </td>
     </tr>
     {% endfor %}
   </table>

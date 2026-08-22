@@ -1,4 +1,6 @@
 import asyncio
+import datetime as dt
+import sqlite3
 import subprocess
 from contextlib import asynccontextmanager
 from html import escape
@@ -9,7 +11,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
-from career_agent import db, store
+from career_agent import db, outcomes, store
 from career_agent.apply import ats as ats_apply
 from career_agent.config import (MODEL_LABELS, SCORING_MODELS, CareerBrief,
                                  load_brief, save_brief)
@@ -56,6 +58,11 @@ SELECT j.id, j.company, j.title, j.location, j.source, j.url,
  ORDER BY a.weighted_score DESC NULLS LAST, j.discovered_at DESC
 """
 
+# order matters: the template renders anything before the current stage as
+# done and the current one as active
+STAGES = (("discover", "Discover"), ("clean", "Clean"), ("filter", "Filter"),
+          ("score", "Score"), ("ready", "Ready"))
+
 
 def _conn():
     conn = db.connect(DB_PATH)
@@ -97,7 +104,14 @@ def dashboard(request: Request):
                  "recent_discoveries": overview.recent_discoveries(conn),
                  "recent_outcomes": overview.recent_outcomes(conn),
                  "shortlisted_count": kpi_data["shortlisted"],
-                 "pipeline_state": worker.get_run_state(conn, "pipeline")})
+                 # overview.html includes _pipeline_status.html directly for
+                 # first paint, before the poller's own hx-trigger="load"
+                 # fetch ever fires -- so that first paint needs the exact
+                 # same context the polling route gives it (stages, max_score,
+                 # the run-scoped feed), or it renders with an empty stage
+                 # track and a blank "scored / " counter until the poll
+                 # catches up.
+                 **_pipeline_status_context(conn)})
 
 
 @app.get("/applications", response_class=HTMLResponse)
@@ -113,6 +127,18 @@ def applications(request: Request, show: str = "queue"):
     today_submitted = conn.execute(
         "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
         " AND date(submitted_at) = date('now')").fetchone()["n"]
+
+    # application id + current effective outcome per job, for the outcome
+    # controls. One effective_outcome call per submitted row, matching what
+    # overview.recent_outcomes already does and bounded by the page size.
+    applied = {}
+    for r in conn.execute(
+            "SELECT id, job_id FROM application WHERE status = 'submitted'"):
+        applied[r["job_id"]] = {
+            "application_id": r["id"],
+            "outcome": outcomes.effective_outcome(conn, r["id"]),
+        }
+
     return templates.TemplateResponse(
         request=request, name="applications.html",
         context={"jobs": rows if show != "skipped" else all_rows,
@@ -121,6 +147,10 @@ def applications(request: Request, show: str = "queue"):
                  "active_nav": "applications", "brief": brief,
                  "daily_cap": brief.daily_cap,
                  "today_submitted": today_submitted,
+                 "applied": applied,
+                 "manual_types": outcomes.MANUAL_TYPES,
+                 "outcome_labels": overview.CALLBACK_LABELS,
+                 "today": _utc_today().isoformat(),  # see _utc_today
                  # first paint of the polled fragment, so the page ships the
                  # real status (and the mode toggle) instead of "Loading…"
                  **_run_status_context(conn)})
@@ -156,6 +186,15 @@ async def override(job_id: int):
     return await _do_apply(job_id, allow_skip=True, event="human_override")
 
 
+def _unpark(conn, job_id: int) -> None:
+    """Release a run parked on this job. Manual mode leaves the run 'running'
+    with current_job_id set to a drafted job awaiting review, and apply_tick
+    returns early on every iteration while it is set -- so a run left parked
+    on a job the user has already resolved never advances again."""
+    if worker.get_run_state(conn, "apply")["current_job_id"] == job_id:
+        worker.set_run_state(conn, "apply", current_job_id=None)
+
+
 @app.post("/send/{job_id}", response_class=HTMLResponse)
 async def send(job_id: int):
     conn = _conn()
@@ -177,11 +216,16 @@ async def send(job_id: int):
     except Exception as exc:
         return HTMLResponse(f'<span class="denied">{escape(str(exc))}</span>')
     if not result["ok"]:
+        # A categorical refusal -- submission is not implemented, which is
+        # every real send today -- can never succeed on a retry, so the only
+        # way forward is applying on the site: stop parking the run on it. A
+        # transient failure (a captcha hold, a filler that errored) stays
+        # parked, because that draft is still the thing to retry and the
+        # status card should keep pointing at it.
+        if result.get("unsupported"):
+            _unpark(conn, job_id)
         return HTMLResponse(f'<span class="denied">{escape(result["reason"])}</span>')
-    # the run was parked on this draft awaiting review; unpark it, or the
-    # worker loop returns early forever and the run never advances
-    if worker.get_run_state(conn, "apply")["current_job_id"] == job_id:
-        worker.set_run_state(conn, "apply", current_job_id=None)
+    _unpark(conn, job_id)
     return HTMLResponse('<span class="done">Sent</span>')
 
 
@@ -190,6 +234,84 @@ def dismiss(job_id: int):
     conn = _conn()
     store.log(conn, job_id, "human_dismissed")
     return HTMLResponse('<span class="done">Dismissed</span>')
+
+
+def _utc_today() -> dt.date:
+    # SQLite's date('now') -- what the daily-cap guard (worker.guard) and
+    # every other date('now') comparison in this app use -- is UTC.
+    # dt.date.today() is the host's local calendar day, which disagrees with
+    # UTC for part of every day off-UTC (e.g. Chennai, UTC+5:30, roughly
+    # 00:00-05:30 IST). A date stamped with local "today" during that window
+    # never matches date('now') in the cap query, so the cap silently stops
+    # counting. Same fix as overview.sparkline_values -- keep them matching.
+    return dt.datetime.now(dt.timezone.utc).date()
+
+
+def _parse_date(raw: str, field: str, errors: dict) -> str | None:
+    """Accept an ISO date, defaulting to today when blank. Parsed here, not
+    declared as a typed Form parameter: a typed parameter makes FastAPI
+    reject a bad value with a raw 422 before this handler runs, which skips
+    the friendly error page entirely."""
+    raw = (raw or "").strip()
+    if not raw:
+        return _utc_today().isoformat()
+    try:
+        return dt.date.fromisoformat(raw).isoformat()
+    except ValueError:
+        errors[field] = "must be a date like 2026-08-20"
+        return None
+
+
+@app.post("/applied/{job_id}", response_class=HTMLResponse)
+def mark_applied(job_id: int, when: str = Form("")):
+    conn = _conn()
+    errors: dict[str, str] = {}
+    day = _parse_date(when, "when", errors)
+    if errors:
+        return HTMLResponse(
+            f'<span class="denied">{escape(errors["when"])}</span>')
+
+    try:
+        store.mark_applied(conn, job_id, day)
+    except sqlite3.IntegrityError:
+        return HTMLResponse('<span class="denied">This job already has a'
+                            ' live application.</span>')
+    _unpark(conn, job_id)
+
+    # A manual application counts against daily_cap like any other (see
+    # worker.guard), and reaching it auto-pauses the apply run. Say so here,
+    # or the pause looks unrelated to the click that caused it.
+    cap = load_brief(BRIEF_PATH).daily_cap
+    today_submitted = conn.execute(
+        "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
+        " AND date(submitted_at) = date('now')").fetchone()["n"]
+    note = f" — daily cap of {cap} reached" if today_submitted >= cap else ""
+    return HTMLResponse(f'<span class="done">Marked applied{note}</span>')
+
+
+@app.post("/outcome/{application_id}", response_class=HTMLResponse)
+def record_outcome(application_id: int, type: str = Form(""),
+                   occurred_at: str = Form(""), notes: str = Form("")):
+    conn = _conn()
+    row = conn.execute("SELECT status FROM application WHERE id = ?",
+                       (application_id,)).fetchone()
+    if row is None or row["status"] != "submitted":
+        return HTMLResponse('<span class="denied">This application is not'
+                            ' submitted yet. Mark the job applied before'
+                            ' recording what came back.</span>')
+
+    errors: dict[str, str] = {}
+    day = _parse_date(occurred_at, "occurred_at", errors)
+    if errors:
+        return HTMLResponse(
+            f'<span class="denied">{escape(errors["occurred_at"])}</span>')
+
+    try:
+        outcomes.record(conn, application_id, type, day,
+                        notes=notes.strip() or None)
+    except ValueError as exc:
+        return HTMLResponse(f'<span class="denied">{escape(str(exc))}</span>')
+    return HTMLResponse('<span class="done">Recorded</span>')
 
 
 def _run_status_context(conn) -> dict:
@@ -225,6 +347,10 @@ def _run_status_context(conn) -> dict:
     }
     recent_events = conn.execute(
         "SELECT type, payload, occurred_at FROM event"
+        # the pipeline's own feed lives on the Overview page; an apply
+        # activity log that shows discovery progress is showing the wrong
+        # thing, and at ~10 rows a run it would show nothing else
+        " WHERE type NOT LIKE 'pipeline_%'"
         " ORDER BY id DESC LIMIT 10").fetchall()
     return {"run_state": state, "current_job": current_job, "stats": stats,
             "recent_events": recent_events}
@@ -283,7 +409,16 @@ async def pipeline_run_now():
     if state["status"] not in ("idle", "error"):
         return HTMLResponse(
             '<span class="denied">A pipeline run is already in progress.</span>')
-    worker.set_run_state(conn, "pipeline", status="running", last_error=None)
+    worker.set_run_state(conn, "pipeline", status="running", last_error=None,
+                         stage=None, found=0, duplicates=0, passed=0,
+                         scored=0, shortlisted=0)
+    # Same as run_start()'s equivalent line for the apply kind: set_run_state
+    # never touches started_at itself, and both the elapsed-time display and
+    # the activity feed's run-scoping query (_pipeline_status_context) rely
+    # on it being real, not NULL.
+    conn.execute("UPDATE run_state SET started_at = datetime('now')"
+                 " WHERE kind = 'pipeline'")
+    conn.commit()
     store.log(conn, None, "pipeline_started")
     task = asyncio.create_task(
         pipeline.run_background(_conn, DB_PATH, BRIEF_PATH))
@@ -292,12 +427,37 @@ async def pipeline_run_now():
     return HTMLResponse("ok")
 
 
+def _pipeline_status_context(conn) -> dict:
+    """Shared by the polling route and the Overview page's first paint (the
+    include in overview.html renders before the poller's own hx-trigger="load"
+    ever fires), so both always agree -- same reason applications() spreads
+    _run_status_context() into its own context."""
+    state = worker.get_run_state(conn, "pipeline")
+    # Scoped to this run: without it, a freshly started run shows the
+    # *previous* run's dozen lines next to all-zero counters. started_at is
+    # NULL before any run has ever started, which correctly yields no rows
+    # (NULL comparisons are never true in SQLite) rather than everything.
+    feed = conn.execute(
+        "SELECT payload, occurred_at FROM event"
+        " WHERE type = 'pipeline_progress'"
+        "   AND occurred_at >= (SELECT started_at FROM run_state"
+        "                        WHERE kind = 'pipeline')"
+        " ORDER BY id DESC LIMIT 12").fetchall()
+    settings = store.get_settings(conn)
+    # Newest first: .activity (base.html) is flex-direction:column-reverse,
+    # which flips this back to oldest-top/newest-bottom on screen while
+    # anchoring the scroll position on the newest line -- so it stays
+    # "scrolled to bottom" across every 3s poll swap with no JS re-scroll.
+    return {"pipeline_state": state, "feed": feed, "stages": STAGES,
+            "max_score": settings["max_score_per_run"]}
+
+
 @app.get("/pipeline/status", response_class=HTMLResponse)
 def pipeline_status(request: Request):
     conn = _conn()
     return templates.TemplateResponse(
         request=request, name="_pipeline_status.html",
-        context={"pipeline_state": worker.get_run_state(conn, "pipeline")})
+        context=_pipeline_status_context(conn))
 
 
 @app.post("/queue/{job_id}/skip")

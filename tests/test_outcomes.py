@@ -89,3 +89,73 @@ def test_callback_rate_counts_all_submitted_as_denominator(conn):
     conn.commit()
     outcomes.derive_no_response(conn, after_days=30)
     assert outcomes.callback_rate(conn) == (1, 2)
+
+
+def test_record_writes_a_manual_outcome(conn):
+    app_id = _app(conn, 3)
+    out_id = outcomes.record(conn, app_id, "screen", "2026-08-20")
+    row = conn.execute("SELECT * FROM outcome WHERE id = ?",
+                       (out_id,)).fetchone()
+    assert row["type"] == "screen"
+    assert row["derived"] == 0, "hand-entered, not inferred"
+    assert row["occurred_at"] == "2026-08-20"
+
+
+def test_record_stores_notes_when_given(conn):
+    app_id = _app(conn, 3)
+    out_id = outcomes.record(conn, app_id, "interview", "2026-08-20",
+                             notes="30 min with the hiring manager")
+    row = conn.execute("SELECT notes FROM outcome WHERE id = ?",
+                       (out_id,)).fetchone()
+    assert row["notes"] == "30 min with the hiring manager"
+
+
+def test_record_refuses_no_response(conn):
+    """Derived, never entered. The schema CHECK would accept it, so the
+    write path has to be the thing that refuses."""
+    app_id = _app(conn, 3)
+    with pytest.raises(ValueError, match="derived"):
+        outcomes.record(conn, app_id, "no_response", "2026-08-20")
+    assert conn.execute("SELECT COUNT(*) n FROM outcome").fetchone()["n"] == 0
+
+
+def test_record_refuses_an_unknown_type(conn):
+    app_id = _app(conn, 3)
+    with pytest.raises(ValueError):
+        outcomes.record(conn, app_id, "ghosted", "2026-08-20")
+
+
+def test_a_later_manual_outcome_supersedes_an_earlier_one(conn):
+    """Corrections work by recording again, not editing."""
+    app_id = _app(conn, 30)
+    outcomes.record(conn, app_id, "screen", "2026-08-10")
+    outcomes.record(conn, app_id, "rejected", "2026-08-20")
+    assert outcomes.effective_outcome(conn, app_id) == "rejected"
+
+
+def test_a_manual_outcome_beats_a_derived_no_response(conn):
+    """The spec's day-40 case: a reply arrives after we assumed silence.
+    The derived row is not deleted; it simply loses."""
+    app_id = _app(conn, 40)
+    outcomes.derive_no_response(conn, after_days=30)
+    assert outcomes.effective_outcome(conn, app_id) == "no_response"
+
+    today = conn.execute("SELECT date('now') d").fetchone()["d"]
+    outcomes.record(conn, app_id, "screen", today)
+
+    assert outcomes.effective_outcome(conn, app_id) == "screen"
+    assert conn.execute("SELECT COUNT(*) n FROM outcome").fetchone()["n"] == 2, \
+        "history intact"
+
+
+def test_callback_data_can_now_exist(conn):
+    """The whole point of this change. The v1 -> v2 gate requires callback
+    data, and today the denominator cannot leave zero because nothing
+    produces a submitted application. Fails against the old code."""
+    from career_agent import store
+    job_id = conn.execute(
+        "SELECT id FROM job LIMIT 1").fetchone()["id"]
+    today = conn.execute("SELECT date('now') d").fetchone()["d"]
+    app_id = store.mark_applied(conn, job_id, today)
+    outcomes.record(conn, app_id, "screen", today)
+    assert outcomes.callback_rate(conn) == (1, 1)

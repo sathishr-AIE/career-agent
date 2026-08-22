@@ -5,6 +5,34 @@ from career_agent import run as run_module
 from career_agent import store
 from career_agent.web import worker
 
+PROGRESS_FIELDS = ("stage", "found", "duplicates", "passed", "scored",
+                   "shortlisted")
+
+
+def _progress_writer(conn_factory):
+    """Build the callback run_once reports through.
+
+    The connection is opened lazily, on first call, because this callback
+    runs on the worker thread asyncio.to_thread gives run_once -- and a
+    sqlite3 connection created on the main thread cannot be used there
+    (check_same_thread). WAL is on, so these writes do not block the
+    dashboard's readers, which is the whole point.
+    """
+    held = {}
+
+    def progress(**kw):
+        conn = held.get("conn")
+        if conn is None:
+            conn = held["conn"] = conn_factory()
+
+        fields = {k: v for k, v in kw.items() if k in PROGRESS_FIELDS}
+        if fields:
+            worker.set_run_state(conn, "pipeline", **fields)
+        if kw.get("message"):
+            store.log(conn, None, "pipeline_progress", kw["message"])
+
+    return progress
+
 
 async def run_background(conn_factory, db_path, brief_path,
                          boards_path: str = "ats_boards.toml",
@@ -26,7 +54,9 @@ async def run_background(conn_factory, db_path, brief_path,
         # asyncio.to_thread gives it a fresh loop on a worker thread instead
         # -- and keeps run_once's own sqlite connection (opened inside it)
         # created and used on that one thread, as check_same_thread requires.
-        await asyncio.to_thread(asyncio.run, run_module.run_once(args))
+        await asyncio.to_thread(
+            asyncio.run,
+            run_module.run_once(args, progress=_progress_writer(conn_factory)))
     except Exception as exc:
         conn = conn_factory()
         worker.set_run_state(conn, "pipeline", status="error", last_error=str(exc))

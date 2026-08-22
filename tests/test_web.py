@@ -1,4 +1,7 @@
+import datetime as dt
 import threading
+import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -46,7 +49,7 @@ def running_pipeline(monkeypatch):
     never returns would hold the interpreter open at exit."""
     release = threading.Event()
 
-    async def blocks(args):
+    async def blocks(args, progress=None):
         release.wait(10)
 
     monkeypatch.setattr(pipeline.run_module, "run_once", blocks)
@@ -153,14 +156,17 @@ def test_send_after_apply_performs_a_real_submission(client, monkeypatch):
     assert "human_confirmed_send" in types
 
 
-def test_index_offers_send_once_a_draft_exists(client):
+def test_index_offers_mark_applied_when_a_draft_exists(client):
+    """The All Applications tab has no Send/Apply UI (Task 4 removed it): a
+    job with only a draft application row has no submitted row, so it is
+    untracked and gets the same Mark applied control as any other job."""
     conn = db.connect(web.DB_PATH)
     conn.execute("INSERT INTO application (job_id, resume_version, status)"
                  " VALUES (1, 'v1', 'draft')")
     conn.commit()
     r = client.get("/applications")
-    assert '/send/1' in r.text
-    assert '/apply/1' not in r.text
+    assert '/send/1' not in r.text
+    assert 'hx-post="/applied/1"' in r.text
     # and it leaves the Queue tab: a drafted job is in progress, not queued
     queue_html = r.text.split('id="tab-queue"')[1].split('id="tab-all"')[0]
     assert "AI Engineer" not in queue_html
@@ -171,8 +177,8 @@ def test_index_requeues_a_job_that_drafted_then_failed(client):
     job that drafted and then failed transiently carries both a 'draft' row
     and a later 'failed' row. has_draft must track the LATEST row (here,
     'failed'), not blanket row-membership -- else the job stays permanently
-    hidden from the Queue tab and stuck showing a stale Send button, even
-    though worker.next_candidate now treats it as retryable again."""
+    hidden from the Queue tab, even though worker.next_candidate now treats
+    it as retryable again."""
     conn = db.connect(web.DB_PATH)
     conn.execute("INSERT INTO application (job_id, resume_version, status)"
                  " VALUES (1, 'v1', 'draft')")
@@ -183,9 +189,9 @@ def test_index_requeues_a_job_that_drafted_then_failed(client):
     # back in the Queue tab, like any other retryable job
     queue_html = r.text.split('id="tab-queue"')[1].split('id="tab-all"')[0]
     assert "AI Engineer" in queue_html
-    # All Applications: Apply/Dismiss again, not a stale Send button
+    # All Applications: Mark applied/Dismiss again, not a stale Send button
     all_html = r.text.split('id="tab-all"')[1].split('id="tab-skipped"')[0]
-    assert '/apply/1' in all_html
+    assert 'hx-post="/applied/1"' in all_html
     assert '/send/1' not in all_html
 
 
@@ -575,6 +581,151 @@ def test_pipeline_status_shows_running_state(client, running_pipeline):
     assert "Running" in r.text
 
 
+def test_pipeline_status_renders_the_stage_track(client):
+    r = client.get("/pipeline/status")
+    for label in ("Discover", "Clean", "Filter", "Score", "Ready"):
+        assert label in r.text
+
+
+def test_pipeline_status_renders_the_counters(client):
+    conn = db.connect(web.DB_PATH)
+    worker.set_run_state(conn, "pipeline", stage="score", found=91,
+                         duplicates=7, passed=27, scored=14, shortlisted=6)
+    r = client.get("/pipeline/status")
+    assert "Jobs Found" in r.text and "91" in r.text
+    assert "Passed Filter" in r.text and "27" in r.text
+    assert "Shortlisted" in r.text and "6" in r.text
+
+
+def test_pipeline_status_renders_the_activity_feed(client):
+    conn = db.connect(web.DB_PATH)
+    # The feed is scoped to the current run (started_at or later) so a
+    # freshly started run never shows a previous run's lines -- see
+    # test_the_activity_feed_is_scoped_to_the_current_run below. That scoping
+    # needs a real started_at for this event to be in range.
+    worker.set_run_state(conn, "pipeline", status="running")
+    conn.execute("UPDATE run_state SET started_at = datetime('now', '-1 minute')"
+                 " WHERE kind = 'pipeline'")
+    conn.execute("INSERT INTO event (job_id, type, payload)"
+                 " VALUES (NULL, 'pipeline_progress', 'Discovery returned 40.')")
+    conn.commit()
+    r = client.get("/pipeline/status")
+    assert "Discovery returned 40." in r.text
+
+
+def test_the_no_auto_apply_note_is_present(client):
+    r = client.get("/pipeline/status")
+    assert "No automatic applications" in r.text
+
+
+def test_progress_bar_interpolates_within_the_score_stage(client):
+    """Review fix: pct used to jump straight to the end of the score band
+    ((idx+1)*100//5 == 80) and sit there for the run's longest phase. It must
+    now move as `scored` climbs toward max_score_per_run (25, the fixture's
+    default setting), not just jump between five fixed positions."""
+    conn = db.connect(web.DB_PATH)
+    worker.set_run_state(conn, "pipeline", stage="score", scored=0)
+    start = client.get("/pipeline/status").text
+    start_pct = int(start.split('style="width:')[1].split('%')[0])
+
+    worker.set_run_state(conn, "pipeline", stage="score", scored=20)
+    later = client.get("/pipeline/status").text
+    later_pct = int(later.split('style="width:')[1].split('%')[0])
+
+    assert start_pct == 60   # band start: 3 whole stages done (3*20)
+    assert later_pct == 76   # 60 + (20 * 20 // 25)
+
+
+def test_the_activity_feed_is_scoped_to_the_current_run(client):
+    """Review fix: the feed query had no run scoping, so opening the monitor
+    on a freshly started run showed the *previous* run's twelve lines next to
+    all-zero counters. Also locks in newest-first DOM order, which .activity's
+    flex-direction:column-reverse (base.html) depends on to stay anchored to
+    the newest line without JS re-scrolling on every 3s poll."""
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO event (job_id, type, payload, occurred_at)"
+                 " VALUES (NULL, 'pipeline_progress', 'stale from last run',"
+                 " datetime('now', '-1 hour'))")
+    conn.commit()
+
+    worker.set_run_state(conn, "pipeline", status="running", stage="discover")
+    conn.execute("UPDATE run_state SET started_at = datetime('now', '-1 minute')"
+                 " WHERE kind = 'pipeline'")
+    conn.execute("INSERT INTO event (job_id, type, payload)"
+                 " VALUES (NULL, 'pipeline_progress', 'first message')")
+    conn.execute("INSERT INTO event (job_id, type, payload)"
+                 " VALUES (NULL, 'pipeline_progress', 'second message')")
+    conn.commit()
+
+    r = client.get("/pipeline/status")
+    assert "stale from last run" not in r.text
+    assert r.text.index("second message") < r.text.index("first message")
+
+
+def test_run_now_discards_the_response_instead_of_blanking_the_monitor(client):
+    """Review fix: the button used to hx-target="#pipeline-status"
+    hx-swap="outerHTML" the bare string "ok" over the div this task widened
+    from a two-element strip into the entire monitor -- nuking the
+    track/counters/feed/note for up to 3s on every click. hx-swap="none"
+    discards the response; the poller's own independent 3s tick picks up the
+    new state instead."""
+    button = client.get("/pipeline/status").text.split("Run Now")[0]
+    assert 'hx-swap="none"' in button
+    assert "outerHTML" not in button
+
+
+def test_the_run_now_button_is_reachable_in_a_rendered_page(client):
+    """The Critical review finding: `.live-overlay{display:none}` used to
+    hide everything inside #runOverlay unconditionally, including the
+    idle-state Run Now button -- the only element that can ever add `.open`.
+    Every path to opening the modal was unreachable.
+
+    No other test in this suite can catch that class of bug: TestClient only
+    ever inspects HTML text, never the CSS that decides what is actually
+    visible. This is the one check that renders the real page and looks at
+    computed visibility, via a headless, offline (all network blocked)
+    Playwright browser -- already a hard dependency of this project
+    (career_agent.apply.ats) -- against the exact HTML GET / returns, no
+    live server needed. Skips itself if a browser isn't installed rather
+    than failing the suite in an environment that lacks one."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        pytest.skip(f"playwright not importable: {exc}")
+
+    html = client.get("/").text
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"no browser available for playwright: {exc}")
+
+        try:
+            page = browser.new_page()
+            page.route("**/*", lambda route: route.abort())  # fully offline
+            page.set_content(html)
+
+            run_now = page.locator("#pipeline-status .btn.primary")
+            assert run_now.is_visible(), (
+                "Run Now must be visible in the closed (idle) state -- "
+                "it is the only path to opening the modal")
+            assert not page.locator(".live-head").is_visible(), (
+                "modal-only chrome must stay hidden while closed")
+            assert not page.locator("#monitor-body").is_visible()
+
+            run_now.click()
+
+            overlay_class = (
+                page.locator("#runOverlay").get_attribute("class") or "")
+            assert "open" in overlay_class.split(), "click must open the modal"
+            assert page.locator(".live-head").is_visible(), (
+                "modal chrome must appear once open")
+            assert page.locator("#monitor-body").is_visible()
+        finally:
+            browser.close()
+
+
 def test_startup_clears_a_pipeline_run_stranded_by_a_crash(client):
     """A process that dies mid-run leaves run_state stuck at 'running', and
     there are no pause/resume/stop endpoints for the pipeline -- the Run Now
@@ -625,6 +776,236 @@ def test_overview_embeds_pipeline_status_polling(client):
     # exact regression happened once already, in the sibling plan's
     # /run/status poller)
     assert 'hx-swap="innerHTML"' in r.text
+
+
+def test_the_modal_shell_is_outside_the_poller(client):
+    """Open/closed is client state and the poller replaces its target every
+    3s. Inside the polled region, every swap would slam the modal shut or
+    reopen one the user closed -- the bug already fixed once for the
+    Auto/Manual toggle."""
+    r = client.get("/")
+    before = r.text.split('id="pipeline-status-poller"')[0]
+    assert 'id="runOverlay"' in before, "modal shell precedes the poller"
+
+
+def test_overview_page_render_shows_the_pipeline_stage_track(client):
+    """Review fix: overview.html includes _pipeline_status.html (which reads
+    a route-supplied `stages` -- the 5-item pipeline stage list) and, further
+    down the *same* template, had its own unrelated `{% set stages = [...] %}`
+    for the KPI funnel. The include only resolved to the route-supplied value
+    because the funnel's {% set %} sat below it in the template; reordering
+    them would have silently fed the funnel's (label, count) pairs into the
+    stage track instead. Every other stage-track test (e.g.
+    test_pipeline_status_renders_the_stage_track above) hits /pipeline/status
+    directly, whose fragment render never sees the parent template's
+    variables at all -- so none of them could ever have caught this. Only a
+    full render of / can."""
+    r = client.get("/")
+    for label in ("Discover", "Clean", "Filter", "Score", "Ready"):
+        assert f'<div class="stage-label">{label}</div>' in r.text
+
+
+def test_still_running_toast_clears_when_the_run_finishes_or_reopened(client):
+    """Review fix: closeRunMonitor() added #runToast's `open` class when the
+    modal was dismissed mid-run, but nothing ever removed it -- not when the
+    run finished, not when the modal was reopened. Live-reproduced: after the
+    poller reports data-status="idle", the toast kept saying "Career Agent is
+    still running..." forever, right next to an Idle pill and a Run Now
+    button that both correctly showed the run was over -- recreating, in the
+    toast, the exact "can't tell progress from a hang" problem this whole
+    plan exists to fix."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        pytest.skip(f"playwright not importable: {exc}")
+
+    conn = db.connect(web.DB_PATH)
+    worker.set_run_state(conn, "pipeline", status="running")
+    conn.execute("UPDATE run_state SET started_at = datetime('now')"
+                 " WHERE kind = 'pipeline'")
+    conn.commit()
+    html = client.get("/").text
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"no browser available for playwright: {exc}")
+
+        try:
+            page = browser.new_page()
+            page.route("**/*", lambda route: route.abort())  # fully offline
+            page.set_content(html)
+
+            def toast_open():
+                cls = page.locator("#runToast").get_attribute("class") or ""
+                return "open" in cls.split()
+
+            # Dismiss while a run is going -> the toast appears.
+            page.evaluate("closeRunMonitor()")
+            assert toast_open(), "dismissing mid-run must show the toast"
+
+            # The run finishes. In reality the poller's next swap would set
+            # this; set it directly to isolate the setInterval logic itself
+            # from the (already-covered-elsewhere) polling mechanics.
+            page.evaluate(
+                "document.getElementById('monitor-body').dataset.status = 'idle'")
+
+            # Nobody re-opens or re-dismisses the modal here -- only the
+            # once-a-second interval is running. It alone must notice and
+            # clear the toast, well within a couple of ticks.
+            page.wait_for_function(
+                "() => !document.getElementById('runToast')"
+                ".classList.contains('open')", timeout=2000)
+
+            # Re-arm: dismiss again while running.
+            page.evaluate(
+                "document.getElementById('monitor-body').dataset.status = 'running'")
+            page.evaluate("closeRunMonitor()")
+            assert toast_open()
+
+            # Reopening must clear it immediately, with no poll tick needed.
+            page.evaluate("openRunMonitor()")
+            assert not toast_open()
+        finally:
+            browser.close()
+
+
+def test_run_now_repolls_immediately_instead_of_waiting_three_seconds(client):
+    """Review fix: hx-post="/pipeline/run-now" keeps hx-swap="none" (kept
+    from the previous fix round -- see
+    test_run_now_discards_the_response_instead_of_blanking_the_monitor above
+    -- so the raw "ok" body never blanks the monitor), which meant nothing
+    refreshed #monitor-body until the poller's own next 3s tick. Live-
+    reproduced: clicking Run Now from an *error* state opened the modal
+    showing the *previous* run's stale error, stale stage, and stale
+    percentage, under a "Career Agent is running" title, for that whole
+    window.
+
+    The reviewer's first-suggested mechanism --
+    htmx.trigger('#pipeline-status-poller','load') -- turns out to be a
+    no-op here: in the actual shipped htmx 2.0.4 build (unpkg.com/htmx.org@
+    2.0.4, vendored below), hx-trigger's "load" keyword is handled by
+    addTriggerHandler() as a one-shot initializer gated on
+    `!nodeData.firstInitCompleted` that never calls addEventListener --
+    unlike e.g. "revealed" or "intersect", which do. So it fires once at
+    page load and, critically, registers no listener a later
+    htmx.trigger(el, 'load') could ever hit. The fix instead adds a plain
+    custom trigger name ("run-started") to the poller's hx-trigger list --
+    which *does* go through the normal addEventListener path -- and fires
+    that from the button's hx-on::after-request.
+
+    This runs the real, unmodified htmx build against a real DOM in headless
+    Chromium (mocking only the two HTTP endpoints, not htmx itself), so a
+    wrong event name -- like the original "load" suggestion -- actually
+    fails this test, the way a markup-only substring assertion could not."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        pytest.skip(f"playwright not importable: {exc}")
+
+    htmx_js = Path(__file__).parent / "vendor" / "htmx-2.0.4.min.js"
+    if not htmx_js.exists():
+        pytest.skip("vendored htmx build not available")
+
+    conn = db.connect(web.DB_PATH)
+    worker.set_run_state(conn, "pipeline", status="error",
+                         last_error="browser crashed", stage="filter")
+    conn.commit()
+    html = client.get("/").text
+    error_fragment = client.get("/pipeline/status").text
+    assert "browser crashed" in html  # sanity: the stale error really is there
+    assert "browser crashed" in error_fragment
+
+    worker.set_run_state(conn, "pipeline", status="running", last_error=None,
+                         stage=None, found=0, duplicates=0, passed=0,
+                         scored=0, shortlisted=0)
+    conn.execute("UPDATE run_state SET started_at = datetime('now')"
+                 " WHERE kind = 'pipeline'")
+    conn.commit()
+    running_fragment = client.get("/pipeline/status").text
+    assert "browser crashed" not in running_fragment
+    assert 'data-status="running"' in running_fragment
+
+    # #pipeline-status-poller's own hx-trigger="load, ..." fires a GET the
+    # instant the page loads -- before any click -- so a single canned
+    # /pipeline/status response can't tell the two apart. Answer that first,
+    # automatic poll with the stale error fragment (matching what the real
+    # page shows before anyone clicks anything) and only switch to the
+    # "running" fragment from the second request on, i.e. the one the click
+    # itself must cause.
+    status_requests = {"n": 0}
+
+    def handle_status(route):
+        status_requests["n"] += 1
+        body = error_fragment if status_requests["n"] == 1 else running_fragment
+        route.fulfill(status=200, content_type="text/html", body=body)
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"no browser available for playwright: {exc}")
+
+        try:
+            page = browser.new_page()
+            # Fully offline by default; specific mocks below take priority
+            # over this since routes run in reverse registration order.
+            page.route("**/*", lambda route: route.abort())
+            page.route(
+                "https://unpkg.com/htmx.org@2.0.4",
+                lambda route: route.fulfill(
+                    path=str(htmx_js), content_type="application/javascript"))
+            page.route(
+                "**/pipeline/run-now",
+                lambda route: route.fulfill(
+                    status=200, content_type="text/html", body="ok"))
+            page.route("**/pipeline/status", handle_status)
+            # A real (mocked) origin, not set_content()'s about:blank, so the
+            # button's relative hx-post/hx-get URLs resolve predictably to
+            # something the routes above actually match.
+            page.route(
+                "https://career-agent.test/",
+                lambda route: route.fulfill(
+                    status=200, content_type="text/html", body=html))
+            t_nav = time.monotonic()  # htmx's "every 3s" interval starts
+            # counting from roughly here (page/htmx init), not from the click
+            # below -- so the remaining-budget math has to anchor here too.
+            page.goto("https://career-agent.test/")
+            page.wait_for_function("() => window.htmx !== undefined")
+            # Sanity: the page's first paint (inline fragment) plus the
+            # automatic first poll (mocked above) both show the stale error
+            # -- so the button below really is starting from an error state,
+            # not already "running" before the click ever happens.
+            page.wait_for_function(
+                "() => { const b = document.getElementById('monitor-body');"
+                " return !!b && b.dataset.status === 'error'; }")
+
+            # Budget the post-click wait against the real 3s poll interval,
+            # not a guessed constant: click() itself carries a real (and, in
+            # this sandboxed environment, fairly large -- ~1.5s, measured
+            # directly, reproduces even on a bare unrelated button) input-
+            # simulation overhead of its own before it even dispatches, and a
+            # fixed timeout picked without accounting for that would either
+            # be too tight (flaking on a correct fix) or -- worse -- so loose
+            # it silently reaches the real 3s mark and starts passing for a
+            # BROKEN fix too, once the ambient interval bails it out. Staying
+            # a fixed margin under 3000ms regardless of how much click()
+            # itself ate keeps the assertion below meaningful either way.
+            # (dispatch_event() avoids that overhead but turns out not to
+            # reliably reach htmx's click listener the way a real click
+            # does -- confirmed empirically: it fell back to the ambient
+            # interval instead, ~3s later.)
+            page.click("#pipeline-status .btn.primary")
+            remaining_ms = max(300, 2700 - (time.monotonic() - t_nav) * 1000)
+
+            page.wait_for_function(
+                "() => { const b = document.getElementById('monitor-body');"
+                " return !!b && b.dataset.status === 'running'; }",
+                timeout=remaining_ms)
+            assert "browser crashed" not in page.content()
+        finally:
+            browser.close()
 
 
 BRIEF_TOML = """\
@@ -799,3 +1180,270 @@ def test_a_blank_max_score_per_run_is_an_error_too(client, brief_path):
     r = client.post("/settings", data=_form(max_score_per_run=""))
     assert "Nothing was saved" in r.text
     assert "max_score_per_run" in r.text
+
+
+def test_the_apply_activity_log_excludes_pipeline_events(client):
+    conn = db.connect(web.DB_PATH)
+    for i in range(12):
+        conn.execute("INSERT INTO event (job_id, type, payload)"
+                     " VALUES (NULL, 'pipeline_progress', ?)", (f"step {i}",))
+    conn.execute("INSERT INTO event (job_id, type) VALUES (1, 'human_applied')")
+    conn.commit()
+
+    r = client.get("/run/status")
+
+    assert "human_applied" in r.text, (
+        "a dozen pipeline rows must not push the apply events out of a "
+        "LIMIT 10 log")
+    assert "pipeline_progress" not in r.text
+
+
+def test_marking_applied_creates_the_denominator(client):
+    r = client.post("/applied/1", data={"when": "2026-08-20"})
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    row = conn.execute(
+        "SELECT status, submitted_at FROM application WHERE job_id = 1"
+    ).fetchone()
+    assert row["status"] == "submitted"
+    assert row["submitted_at"] == "2026-08-20"
+
+
+def test_marking_applied_defaults_to_today(client):
+    client.post("/applied/1", data={"when": ""})
+    conn = db.connect(web.DB_PATH)
+    today = conn.execute("SELECT date('now') d").fetchone()["d"]
+    row = conn.execute(
+        "SELECT submitted_at FROM application WHERE job_id = 1").fetchone()
+    assert row["submitted_at"] == today
+
+
+def test_marking_applied_blank_date_anchors_to_utc_not_host_local_clock(
+        client, monkeypatch):
+    """_parse_date's blank-'when' default must agree with the SQL it feeds --
+    worker.guard's and this app's own date(submitted_at) = date('now'),
+    which is UTC -- not the host's local calendar day. Simulates the window
+    (e.g. ~00:00-05:30 IST in Chennai, UTC+5:30) where local has already
+    rolled to the next day but UTC has not, by making the two clocks
+    disagree on purpose -- deterministic regardless of what day it actually
+    is when the suite runs. If _parse_date read the local clock (the old
+    bug), submitted_at would land on 2026-01-02 and the assertion below
+    would fail even though this test never touches the real system clock."""
+    class _FixedLocalDate(dt.date):
+        @classmethod
+        def today(cls):
+            return dt.date(2026, 1, 2)  # local: already the next day
+
+    class _FixedUTCDatetime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 1, 1, 23, 0, tzinfo=tz)  # UTC: still the 1st
+
+    monkeypatch.setattr(web.dt, "date", _FixedLocalDate)
+    monkeypatch.setattr(web.dt, "datetime", _FixedUTCDatetime)
+
+    client.post("/applied/1", data={"when": ""})
+
+    conn = db.connect(web.DB_PATH)
+    row = conn.execute(
+        "SELECT submitted_at FROM application WHERE job_id = 1").fetchone()
+    assert row["submitted_at"] == "2026-01-01"  # UTC's day, not local's
+
+
+def test_marking_applied_twice_is_refused_readably(client):
+    client.post("/applied/1", data={"when": "2026-08-20"})
+    r = client.post("/applied/1", data={"when": "2026-08-21"})
+    assert r.status_code == 200, "a readable message, not a 500"
+    assert "already" in r.text.lower()
+
+
+def test_a_malformed_date_is_an_error_not_a_422(client):
+    r = client.post("/applied/1", data={"when": "last tuesday"})
+    assert r.status_code == 200, "friendly error, not FastAPI's raw 422"
+    assert "date" in r.text.lower()
+    conn = db.connect(web.DB_PATH)
+    assert conn.execute(
+        "SELECT COUNT(*) n FROM application").fetchone()["n"] == 0
+
+
+def test_recording_an_outcome_persists_it(client):
+    client.post("/applied/1", data={"when": "2026-08-20"})
+    conn = db.connect(web.DB_PATH)
+    app_id = conn.execute("SELECT id FROM application").fetchone()["id"]
+
+    r = client.post(f"/outcome/{app_id}",
+                    data={"type": "screen", "occurred_at": "2026-08-21",
+                          "notes": "recruiter call"})
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    row = conn.execute("SELECT type, derived, notes FROM outcome").fetchone()
+    assert row["type"] == "screen"
+    assert row["derived"] == 0
+    assert row["notes"] == "recruiter call"
+
+
+def test_recording_no_response_by_hand_is_refused(client):
+    client.post("/applied/1", data={"when": "2026-08-20"})
+    conn = db.connect(web.DB_PATH)
+    app_id = conn.execute("SELECT id FROM application").fetchone()["id"]
+
+    r = client.post(f"/outcome/{app_id}",
+                    data={"type": "no_response", "occurred_at": "2026-08-21"})
+    assert r.status_code == 200
+    assert "derived" in r.text.lower()
+    conn = db.connect(web.DB_PATH)
+    assert conn.execute("SELECT COUNT(*) n FROM outcome").fetchone()["n"] == 0
+
+
+def test_an_outcome_on_an_unsubmitted_application_is_refused(client):
+    """The UI does not offer this, so it guards a forged request."""
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'base-v1', 'draft')")
+    conn.commit()
+    app_id = conn.execute("SELECT id FROM application").fetchone()["id"]
+
+    r = client.post(f"/outcome/{app_id}",
+                    data={"type": "screen", "occurred_at": "2026-08-21"})
+    assert r.status_code == 200
+    assert "submitted" in r.text.lower()
+    conn = db.connect(web.DB_PATH)
+    assert conn.execute("SELECT COUNT(*) n FROM outcome").fetchone()["n"] == 0
+
+
+def test_all_applications_offers_mark_applied_for_an_untracked_job(client):
+    r = client.get("/applications")
+    assert 'hx-post="/applied/1"' in r.text
+    assert "Mark applied" in r.text
+
+
+def test_all_applications_offers_outcome_controls_once_submitted(client):
+    client.post("/applied/1", data={"when": "2026-08-20"})
+    conn = db.connect(web.DB_PATH)
+    app_id = conn.execute("SELECT id FROM application").fetchone()["id"]
+
+    r = client.get("/applications")
+    assert f'hx-post="/outcome/{app_id}"' in r.text
+    assert "Awaiting response" in r.text, "no outcome recorded yet"
+
+
+def test_the_outcome_form_does_not_offer_no_response(client):
+    client.post("/applied/1", data={"when": "2026-08-20"})
+    r = client.get("/applications")
+    outcome_form = r.text.split('hx-post="/outcome/')[1]
+    assert 'value="screen"' in outcome_form
+    assert 'value="no_response"' not in outcome_form, (
+        "derived, never entered")
+
+
+def test_a_recorded_outcome_is_shown(client):
+    """"Interview" is on the page either way -- every MANUAL_TYPES label is an
+    <option> in the outcome form -- so this has to assert on the effective
+    outcome label the cell leads with, not on the page."""
+    client.post("/applied/1", data={"when": "2026-08-20"})
+    conn = db.connect(web.DB_PATH)
+    app_id = conn.execute("SELECT id FROM application").fetchone()["id"]
+    client.post(f"/outcome/{app_id}",
+                data={"type": "interview", "occurred_at": "2026-08-21"})
+
+    r = client.get("/applications")
+    label = r.text.split('class="outcome-cell"')[1].split("</span>")[0]
+    assert "Interview" in label
+    assert "Awaiting response" not in r.text, "an outcome exists now"
+
+
+
+def test_marking_applied_clears_the_run_state_so_the_worker_can_advance(
+        client, monkeypatch):
+    """Manual mode parks the run on a draft, and marking applied is now the
+    sanctioned way to resolve one. If it doesn't release current_job_id,
+    apply_tick returns early forever and the run is dead."""
+    async def fake_submit(conn, job_id, dry_run, filler=None):
+        conn.execute("INSERT INTO application (job_id, resume_version,"
+                     " status) VALUES (?, 'v1', 'draft')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    client.post("/run/start", data={"mode": "manual"})
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["current_job_id"] == 1
+
+    r = client.post("/applied/1", data={"when": "2026-08-20"})
+    assert r.status_code == 200
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["current_job_id"] is None
+
+
+def test_send_unparks_the_run_when_submission_is_not_implemented(client):
+    """The real refusal path, with no monkeypatched submit: production always
+    takes it (SUBMISSION_IMPLEMENTED is False), so unparking only on ok would
+    leave the run parked forever on a job Send can never resolve."""
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'base-v1', 'draft')")
+    conn.commit()
+    worker.set_run_state(conn, "apply", status="running", mode="manual",
+                         current_job_id=1)
+
+    r = client.post("/send/1")
+    assert r.status_code == 200
+    assert "not implemented" in r.text.lower()
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["current_job_id"] is None
+
+
+def test_send_stays_parked_on_a_transient_failure(client, monkeypatch):
+    """A captcha hold or an errored filler can succeed on a retry, so the run
+    keeps pointing at that draft -- only a categorical refusal unparks."""
+    async def refuses(conn, job_id, dry_run, filler=None):
+        return {"ok": False, "held": True,
+                "reason": "captcha encountered; held for review"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", refuses)
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'base-v1', 'draft')")
+    conn.commit()
+    worker.set_run_state(conn, "apply", status="running", mode="manual",
+                         current_job_id=1)
+
+    r = client.post("/send/1")
+    assert "captcha" in r.text.lower()
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["current_job_id"] == 1
+
+
+def test_the_skipped_tab_offers_outcome_controls_for_an_applied_job(client):
+    """Job 2 is the skip-verdict fixture. An override is the most valuable
+    label the system produces, so it has to be able to reach the callback
+    denominator from the tab it lives in."""
+    client.post("/applied/2", data={"when": "2026-08-20"})
+    conn = db.connect(web.DB_PATH)
+    app_id = conn.execute(
+        "SELECT id FROM application WHERE job_id = 2").fetchone()["id"]
+
+    skipped = client.get("/applications").text.split('id="tab-skipped"')[1]
+    assert f'hx-post="/outcome/{app_id}"' in skipped
+
+
+def test_the_skipped_tab_offers_mark_applied_and_keeps_track_anyway(client):
+    skipped = client.get("/applications").text.split('id="tab-skipped"')[1]
+    assert 'hx-post="/applied/2"' in skipped
+    assert "Track anyway" in skipped
+
+
+def test_marking_applied_says_when_it_hits_the_daily_cap(client, brief_path):
+    """A hand-marked row counts against daily_cap like any other and the run
+    auto-pauses at it, so the click that caused the pause has to say so."""
+    brief_path.write_text(BRIEF_TOML.replace("daily_cap = 5", "daily_cap = 1"),
+                          encoding="utf-8")
+    r = client.post("/applied/1", data={"when": ""})
+    assert "Marked applied" in r.text
+    assert "daily cap of 1 reached" in r.text
+
+
+def test_marking_applied_stays_quiet_below_the_daily_cap(client, brief_path):
+    r = client.post("/applied/1", data={"when": ""})
+    assert "Marked applied" in r.text
+    assert "daily cap" not in r.text

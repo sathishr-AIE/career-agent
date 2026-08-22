@@ -1,6 +1,7 @@
 import sqlite3
 
 from career_agent import normalize
+from career_agent.apply import ats
 from career_agent.config import SCORING_MODELS, CareerBrief
 from career_agent.models import Job, Verdict
 
@@ -97,3 +98,42 @@ def save_settings(conn, scoring_model: str, max_score_per_run: int) -> None:
         " updated_at = datetime('now') WHERE id = 1",
         (scoring_model, max_score_per_run))
     conn.commit()
+
+
+def mark_applied(conn, job_id: int, when: str) -> int:
+    """Record that a human applied to this job on the site themselves.
+
+    This is the callback-rate denominator. Nothing else produces it: the
+    agent does not submit (v3, and Naukri never), so without this the
+    denominator stays zero and no outcome can be attached to anything.
+
+    Promotes an existing draft when there is one so a single application
+    attempt stays a single row. Raises sqlite3.IntegrityError via the
+    one_live_application_per_job index if the job already has a live
+    application.
+    """
+    draft = conn.execute(
+        "SELECT id FROM application WHERE job_id = ? AND status = 'draft'"
+        " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+
+    if draft is None:
+        # answers stays NULL: for a manual application we do not know what
+        # was sent, and saying so is better than copying a placeholder.
+        cur = conn.execute(
+            "INSERT INTO application (job_id, resume_version, status,"
+            " submitted_at) VALUES (?, ?, 'submitted', ?)",
+            (job_id, ats.RESUME_VERSION, when))
+        app_id = cur.lastrowid
+    else:
+        app_id = draft["id"]
+        # answers is nulled rather than kept: the draft's answers are
+        # precisely what was NOT sent, so carrying the stub filler's
+        # placeholder forward would make the row read as a record of what the
+        # human submitted -- which a future real Send is meant to rely on.
+        conn.execute(
+            "UPDATE application SET status = 'submitted', submitted_at = ?,"
+            " answers = NULL WHERE id = ?", (when, app_id))
+
+    conn.commit()
+    log(conn, job_id, "human_marked_applied", when)
+    return app_id

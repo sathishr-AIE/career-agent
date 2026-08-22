@@ -60,7 +60,9 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
     # injected filler means a caller supplied a real one (or a test double),
     # so it is allowed through; only the _default_filler path is blocked.
     if not dry_run and filler is None and not SUBMISSION_IMPLEMENTED:
-        return {"ok": False, "reason":
+        # `unsupported` marks this refusal categorical, not transient: no
+        # retry can make it succeed, so callers can stop waiting on this job.
+        return {"ok": False, "unsupported": True, "reason":
                 "Submission is not implemented yet (planned for v3; Naukri "
                 "never). Apply on the site yourself, then record the outcome."}
 
