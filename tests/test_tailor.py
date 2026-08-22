@@ -1,11 +1,14 @@
 import json
+from pathlib import Path
 
+import docx
 import pytest
 
+from conftest import build_tailor_template
 from career_agent.config import CareerBrief
 from career_agent.gate import InsufficientFacts
-from career_agent.models import Job
-from career_agent.tailor import build_prompt, parse_tailor_result, tailor
+from career_agent.models import Bullet, Job, TailorResult
+from career_agent.tailor import build_prompt, parse_tailor_result, render_docx, tailor
 
 BRIEF = CareerBrief(target_titles=["AI Engineer"], search_locations=["Chennai"])
 JOB = Job(source="ats", external_id="1", company="Acme", title="AI Engineer",
@@ -84,3 +87,46 @@ async def test_raises_after_second_failure():
 
     with pytest.raises(ValueError):
         await tailor(JOB, BRIEF, FACTS, ask)
+
+
+def test_render_docx_replaces_markers_and_clones_bullets(tmp_path):
+    template = tmp_path / "template.docx"
+    build_tailor_template(template)
+
+    result = TailorResult(summary="Tailored summary.", bullets=[
+        Bullet(text="Bullet one", fact_ids=[1]),
+        Bullet(text="Bullet two", fact_ids=[2]),
+    ])
+    out = tmp_path / "out.docx"
+    render_docx(template, result, out)
+
+    doc = docx.Document(str(out))
+    texts = [p.text for p in doc.paragraphs]
+    assert "<<SUMMARY>>" not in texts
+    assert "<<PROJECT_BULLET>>" not in texts
+    assert "Tailored summary." in texts
+    assert "Bullet one" in texts
+    assert "Bullet two" in texts
+    # header/footer paragraphs outside the markers are untouched
+    assert "Sathish R -- AI Engineer" in texts
+    assert "Education" in texts
+
+
+def test_render_docx_raises_on_a_template_missing_a_marker(tmp_path):
+    template = tmp_path / "bad.docx"
+    doc = docx.Document()
+    doc.add_paragraph("<<SUMMARY>>")  # no <<PROJECT_BULLET>>
+    doc.save(str(template))
+
+    result = TailorResult(summary="S", bullets=[Bullet(text="B", fact_ids=[1])])
+    with pytest.raises(ValueError):
+        render_docx(template, result, tmp_path / "out.docx")
+
+
+def test_render_docx_creates_missing_output_directories(tmp_path):
+    template = tmp_path / "template.docx"
+    build_tailor_template(template)
+    result = TailorResult(summary="S", bullets=[Bullet(text="B", fact_ids=[1])])
+    out = tmp_path / "nested" / "dir" / "out.docx"
+    render_docx(template, result, out)
+    assert out.exists()

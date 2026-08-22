@@ -42,6 +42,7 @@ desktop.ini
 # --- Project-specific ---
 *.db
 screenshots/
+resume/
 
 # Isolation worktrees. Never tracked: a worktree nested in an
 # un-ignored path is also a path git resolves through the parent
