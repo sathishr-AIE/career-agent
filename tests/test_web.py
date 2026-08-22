@@ -100,7 +100,17 @@ def test_a_captcha_hold_does_not_lose_the_already_tailored_resume(client, monkey
     assert Path(row["path"]).exists()
 
 
-def test_two_near_simultaneous_apply_clicks_converge_on_one_resume(client, monkeypatch):
+def test_two_sequential_apply_clicks_reuse_the_same_resume(client, monkeypatch):
+    """Verifies ensure_tailored's idempotent-reuse path: a second Apply click
+    on the same job finds the first click's resume row via
+    latest_resume_version and returns early, rather than retailoring or
+    inserting a second row. This is two sequential clicks through the same
+    connection, not a concurrency race -- ensure_tailored's early-return
+    means the second call never reaches insert_resume's IntegrityError
+    fallback. That actual insert-time collision race is covered separately
+    by test_insert_resume_on_a_version_collision_returns_the_winner in
+    tests/test_store.py, which calls store.insert_resume directly twice with
+    the same version to force it."""
     async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         return {"ok": True, "job_id": job_id, "status": "draft"}
 
