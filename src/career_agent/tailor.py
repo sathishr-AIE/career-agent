@@ -10,6 +10,7 @@ from docx.text.paragraph import Paragraph
 from career_agent.config import CareerBrief
 from career_agent.gate import MIN_FACTS_HARD, InsufficientFacts
 from career_agent.models import Job, TailorResult
+from career_agent import store
 
 TAILOR_PROMPT_VERSION = "tailor-v1"
 
@@ -133,3 +134,28 @@ def render_docx(template_path: Path, result: TailorResult, out_path: Path) -> No
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(out_path))
+
+
+TEMPLATE_PATH = Path("resume/master.docx")
+OUTPUT_DIR = Path("resume/generated")
+
+
+async def ensure_tailored(conn, job_id: int, job: Job, brief: CareerBrief,
+                          ask: Callable[[str], Awaitable[str]]) -> str:
+    """Tailor and render this job's resume if one doesn't exist yet, else
+    reuse the most recent version -- there is no "Retailor" action. Reads
+    TEMPLATE_PATH/OUTPUT_DIR as module attributes (not function defaults)
+    so tests can monkeypatch them without needing to reload this module."""
+    existing = store.latest_resume_version(conn, job_id)
+    if existing:
+        return existing
+
+    result = await tailor(job, brief, store.fact_rows(conn), ask)
+
+    version = store.next_resume_version(conn, job_id)
+    out_path = OUTPUT_DIR / f"{version}.docx"
+    render_docx(TEMPLATE_PATH, result, out_path)
+
+    content = json.dumps({"summary": result.summary,
+                          "bullets": [b.model_dump() for b in result.bullets]})
+    return store.insert_resume(conn, job_id, version, str(out_path), content)

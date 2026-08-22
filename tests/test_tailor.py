@@ -1,14 +1,17 @@
 import json
+import sqlite3
 from pathlib import Path
 
 import docx
 import pytest
 
 from conftest import build_tailor_template
+from career_agent import db, store, tailor
 from career_agent.config import CareerBrief
 from career_agent.gate import InsufficientFacts
 from career_agent.models import Bullet, Job, TailorResult
-from career_agent.tailor import build_prompt, parse_tailor_result, render_docx, tailor
+from career_agent.tailor import build_prompt, parse_tailor_result, render_docx
+from career_agent.tailor import tailor as tailor_func
 
 BRIEF = CareerBrief(target_titles=["AI Engineer"], search_locations=["Chennai"])
 JOB = Job(source="ats", external_id="1", company="Acme", title="AI Engineer",
@@ -52,7 +55,7 @@ async def test_raises_below_ten_facts():
         raise AssertionError("must not call the model")
 
     with pytest.raises(InsufficientFacts):
-        await tailor(JOB, BRIEF, FACTS[:2], ask)
+        await tailor_func(JOB, BRIEF, FACTS[:2], ask)
 
 
 async def test_retries_once_on_bad_output():
@@ -62,7 +65,7 @@ async def test_retries_once_on_bad_output():
         calls.append(prompt)
         return "nonsense" if len(calls) == 1 else GOOD
 
-    r = await tailor(JOB, BRIEF, FACTS, ask)
+    r = await tailor_func(JOB, BRIEF, FACTS, ask)
     assert r.summary == "Tailored summary."
     assert len(calls) == 2
 
@@ -76,7 +79,7 @@ async def test_retries_once_on_an_unknown_fact_id():
         calls.append(prompt)
         return bad if len(calls) == 1 else GOOD
 
-    r = await tailor(JOB, BRIEF, FACTS, ask)
+    r = await tailor_func(JOB, BRIEF, FACTS, ask)
     assert r.summary == "Tailored summary."
     assert len(calls) == 2
 
@@ -86,7 +89,7 @@ async def test_raises_after_second_failure():
         return "still nonsense"
 
     with pytest.raises(ValueError):
-        await tailor(JOB, BRIEF, FACTS, ask)
+        await tailor_func(JOB, BRIEF, FACTS, ask)
 
 
 def test_render_docx_replaces_markers_and_clones_bullets(tmp_path):
@@ -130,3 +133,52 @@ def test_render_docx_creates_missing_output_directories(tmp_path):
     out = tmp_path / "nested" / "dir" / "out.docx"
     render_docx(template, result, out)
     assert out.exists()
+
+
+@pytest.fixture
+def conn(tmp_path):
+    c = db.connect(tmp_path / "t.db")
+    db.init_schema(c)
+    c.execute("INSERT INTO job (fingerprint, source, external_id, company,"
+              " company_normalized, title, title_normalized)"
+              " VALUES ('fp1', 'ats', '1', 'Acme', 'acme', 'AI Engineer',"
+              " 'aiengineer')")
+    for i in range(10):
+        c.execute("INSERT INTO fact (claim, evidence) VALUES (?, ?)",
+                  (f"claim {i}", f"evidence {i}"))
+    c.commit()
+    return c
+
+
+async def _ask(_prompt):
+    return json.dumps({"summary": "S", "bullets": [
+        {"text": "B1", "fact_ids": [1]}]})
+
+
+async def test_ensure_tailored_creates_a_resume_row_and_file(tmp_path, conn, monkeypatch):
+    template = tmp_path / "master.docx"
+    build_tailor_template(template)
+    monkeypatch.setattr(tailor, "TEMPLATE_PATH", template)
+    monkeypatch.setattr(tailor, "OUTPUT_DIR", tmp_path / "generated")
+
+    version = await tailor.ensure_tailored(conn, 1, JOB, BRIEF, _ask)
+
+    assert version == "tailored-1-r1"
+    row = conn.execute("SELECT * FROM resume WHERE version = ?",
+                       (version,)).fetchone()
+    assert row["job_id"] == 1
+    assert Path(row["path"]).exists()
+    content = json.loads(row["content"])
+    assert content["bullets"][0]["fact_ids"] == [1]
+
+
+async def test_ensure_tailored_reuses_an_existing_version(conn):
+    conn.execute("INSERT INTO resume (version, path, job_id)"
+                 " VALUES ('tailored-1-r1', 'x.docx', 1)")
+    conn.commit()
+
+    async def must_not_call(_prompt):
+        raise AssertionError("must not tailor again")
+
+    version = await tailor.ensure_tailored(conn, 1, JOB, BRIEF, must_not_call)
+    assert version == "tailored-1-r1"
