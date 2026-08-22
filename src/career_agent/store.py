@@ -112,7 +112,7 @@ def next_resume_version(conn, job_id: int) -> str:
 
 
 def insert_resume(conn, job_id: int, version: str, path: str,
-                  content: str) -> str:
+                  content: str) -> str | None:
     """Insert a new resume row. resume.version is UNIQUE, and two
     near-simultaneous Apply clicks on the same job can both compute the
     same next_resume_version() before either commits -- handled the same

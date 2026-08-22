@@ -6,13 +6,13 @@
   <div class="brief-head"><span>Primary (master) resume</span></div>
   {% if master.exists %}
   <div class="kv">
-    <div><span>File</span><b>{{ master.name }}</b></div>
+    <div><span>File</span><b>{{ master.path }}</b></div>
     <div><span>Last modified</span><b>{{ master.modified }}</b></div>
   </div>
   {% else %}
   <p class="rationale">
-    No master template found at {{ master.name }}. Add your resume there
-    (see the design doc for the &lt;&lt;SUMMARY&gt;&gt; /
+    No master template found at {{ master.path }}. Add your resume there
+    (see the README for the &lt;&lt;SUMMARY&gt;&gt; /
     &lt;&lt;PROJECT_BULLET&gt;&gt; marker convention) before tailoring can run.
   </p>
   {% endif %}
@@ -33,9 +33,13 @@
     <td>{{ v["version"] }}</td>
     <td>{{ v["created_at"] }}</td>
     <td>
+      {% if v["summary"] %}
+      <div class="rationale"><em>{{ v["summary"] }}</em></div>
+      {% endif %}
       {% for b in v["bullets"] %}
-      <div class="rationale">
-        {{ b["text"] }} <i>(fact {{ b["fact_ids"] | join(", ") }})</i>
+      <div class="rationale" title="{{ b['fact_claims'] | join('; ') }}">
+        {{ b["text"] }}
+        <i>(fact {{ b["fact_ids"] | join(", ") }}: {{ b["fact_claims"] | join("; ") }})</i>
       </div>
       {% endfor %}
     </td>

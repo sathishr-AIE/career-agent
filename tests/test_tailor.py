@@ -170,6 +170,22 @@ async def test_ensure_tailored_creates_a_resume_row_and_file(tmp_path, conn, mon
     assert Path(row["path"]).exists()
     content = json.loads(row["content"])
     assert content["bullets"][0]["fact_ids"] == [1]
+    assert content["prompt_version"] == tailor.TAILOR_PROMPT_VERSION
+
+
+async def test_ensure_tailored_fails_fast_when_no_master_template(
+        tmp_path, conn, monkeypatch):
+    """A missing template must be caught before the model is asked anything
+    -- otherwise every Apply click on a fresh install burns a real LLM call
+    and then dies on the docx render, with no row inserted to remember it."""
+    monkeypatch.setattr(tailor, "TEMPLATE_PATH", tmp_path / "no-such-master.docx")
+    monkeypatch.setattr(tailor, "OUTPUT_DIR", tmp_path / "generated")
+
+    async def must_not_call(_prompt):
+        raise AssertionError("must not call the model")
+
+    with pytest.raises(ValueError, match="No master template"):
+        await tailor.ensure_tailored(conn, 1, JOB, BRIEF, must_not_call)
 
 
 async def test_ensure_tailored_reuses_an_existing_version(conn):

@@ -93,6 +93,9 @@ Two commands, via the `career-agent` console script (`--help` for all flags):
 - **`career-agent serve`** — starts the dashboard at [http://localhost:8000](http://localhost:8000):
   - **`/`** — Overview: KPIs, the discovery→apply funnel, source performance, score distribution, recent discoveries/outcomes, and a **Run Now** button that triggers the same discover+score pipeline as `career-agent run`, in the background. Run Now opens a live monitor — current stage, live counts (found/passed/scored/shortlisted), and a streaming activity feed — that you can dismiss to keep working while the run continues.
   - **`/applications`** — the live application queue: Start/Pause/Resume/Stop a worker that walks scored jobs, applying automatically (**Auto** mode) or pausing for your review before each send (**Manual** mode, the default).
+  - **`/resumes`** — shows the master template's status and every tailored resume generated so far, with the verified fact each bullet was built from.
+
+Per-role tailoring (the first Apply click on a job) needs a master resume at `resume/master.docx`. It must contain two literal marker paragraphs: `<<SUMMARY>>` (a paragraph whose text gets replaced with the tailored summary) and `<<PROJECT_BULLET>>` (a bullet-styled paragraph cloned once per selected fact, then removed). Everything else in the template — header, contact info, education, layout — is left untouched.
 
 ### Roadmap
 

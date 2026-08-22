@@ -150,6 +150,11 @@ async def ensure_tailored(conn, job_id: int, job: Job, brief: CareerBrief,
     if existing:
         return existing
 
+    if not TEMPLATE_PATH.exists():
+        raise ValueError(
+            f"No master template at {TEMPLATE_PATH}. See the Resumes page "
+            "for the marker convention.")
+
     result = await tailor(job, brief, store.fact_rows(conn), ask)
 
     version = store.next_resume_version(conn, job_id)
@@ -157,5 +162,6 @@ async def ensure_tailored(conn, job_id: int, job: Job, brief: CareerBrief,
     render_docx(TEMPLATE_PATH, result, out_path)
 
     content = json.dumps({"summary": result.summary,
-                          "bullets": [b.model_dump() for b in result.bullets]})
+                          "bullets": [b.model_dump() for b in result.bullets],
+                          "prompt_version": TAILOR_PROMPT_VERSION})
     return store.insert_resume(conn, job_id, version, str(out_path), content)

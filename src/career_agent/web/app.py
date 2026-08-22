@@ -122,7 +122,7 @@ def download_resume(version: str):
     conn = _conn()
     row = conn.execute("SELECT path FROM resume WHERE version = ?",
                        (version,)).fetchone()
-    if row is None:
+    if row is None or not Path(row["path"]).exists():
         return HTMLResponse("Resume not found", status_code=404)
     return FileResponse(row["path"], filename=Path(row["path"]).name)
 
@@ -133,19 +133,30 @@ async def resumes_page(request: Request):
     brief = load_brief(BRIEF_PATH)
 
     master_path = tailor.TEMPLATE_PATH
-    master = {"exists": master_path.exists(), "name": master_path.name}
+    master = {"exists": master_path.exists(), "path": str(master_path)}
     if master["exists"]:
+        # Local time, to agree with r.created_at below -- SQLite's own
+        # datetime('now') is UTC, and this page must not show two clocks
+        # side by side (see overview.py's _utc_today for the general trap).
         master["modified"] = dt.datetime.fromtimestamp(
             master_path.stat().st_mtime).isoformat(timespec="seconds")
 
+    claims = {r["id"]: r["claim"]
+             for r in conn.execute("SELECT id, claim FROM fact")}
+
     versions = []
     for r in conn.execute(
-            "SELECT r.version, r.created_at, r.content, j.company, j.title"
+            "SELECT r.version, datetime(r.created_at, 'localtime') AS created_at,"
+            "       r.content, j.company, j.title"
             "  FROM resume r JOIN job j ON j.id = r.job_id"
-            " ORDER BY r.created_at DESC"):
+            " ORDER BY r.id DESC"):
         content = json.loads(r["content"]) if r["content"] else {}
+        bullets = content.get("bullets", [])
+        for b in bullets:
+            b["fact_claims"] = [claims.get(fid, "unknown fact")
+                               for fid in b.get("fact_ids", [])]
         versions.append({**dict(r), "summary": content.get("summary", ""),
-                         "bullets": content.get("bullets", [])})
+                         "bullets": bullets})
 
     return templates.TemplateResponse(
         request=request, name="resumes.html",

@@ -1552,6 +1552,19 @@ def test_resume_download_404s_on_an_unknown_version(client):
     assert r.status_code == 404
 
 
+def test_resume_download_404s_when_the_file_is_gone_from_disk(client, tmp_path):
+    """A resume row can outlive its file (moved, cleaned up, disk wiped) --
+    that must 404 cleanly, not blow up inside FileResponse."""
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO resume (version, path, job_id)"
+                 " VALUES ('tailored-1-r1', ?, 1)",
+                 (str(tmp_path / "missing.docx"),))
+    conn.commit()
+
+    r = client.get("/resume/tailored-1-r1")
+    assert r.status_code == 404
+
+
 def test_applications_page_links_to_a_tailored_resume(client, monkeypatch):
     async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         conn.execute(
@@ -1568,10 +1581,14 @@ def test_applications_page_links_to_a_tailored_resume(client, monkeypatch):
 
 
 def test_resumes_page_shows_no_master_when_none_exists(client, monkeypatch):
-    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", Path("/no/such/file.docx"))
+    missing = Path("/no/such/file.docx")
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", missing)
     r = client.get("/resumes")
     assert r.status_code == 200
     assert "No master template found" in r.text
+    # the full path, not just the basename -- a bare "file.docx" doesn't tell
+    # anyone where to put it
+    assert str(missing) in r.text
 
 
 def test_resumes_page_shows_the_master_when_present(client, monkeypatch, tmp_path):
@@ -1595,6 +1612,24 @@ def test_resumes_page_lists_generated_versions_with_provenance(client, monkeypat
     assert "tailored-1-r1" in r.text
     assert "Relevant bullet" in r.text  # the fixture's default tailored bullet
     assert "fact 1" in r.text.lower()   # provenance: which fact backs it
+    assert "claim 0" in r.text  # fact id 1's actual claim, resolved -- not a bare id
+    assert "Tailored summary." in r.text  # the generated summary is shown, not dropped
+
+
+def test_resumes_page_orders_versions_by_id_not_created_at(client, monkeypatch):
+    """Two resumes stamped with the same created_at must still list the more
+    recently inserted one first -- id is monotonic, created_at is not."""
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO resume (version, path, job_id, created_at)"
+                "VALUES ('tailored-1-r1', 'a.docx', 1, '2026-01-01 00:00:00')")
+    conn.execute("INSERT INTO resume (version, path, job_id, created_at)"
+                "VALUES ('tailored-1-r2', 'b.docx', 1, '2026-01-01 00:00:00')")
+    conn.commit()
+
+    r = client.get("/resumes")
+    first = r.text.index("tailored-1-r2")
+    second = r.text.index("tailored-1-r1")
+    assert first < second
 
 
 def test_resumes_nav_link_is_present(client):
