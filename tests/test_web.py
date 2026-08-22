@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import threading
 import time
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import build_tailor_template
 from career_agent import db, store
 from career_agent.config import load_brief
 from career_agent.web import app as web
@@ -36,9 +38,82 @@ def client(tmp_path, monkeypatch):
                  " weighted_score, verdict, rationale, model, prompt_version)"
                  " VALUES (2,'scored',80,50,80,80,80,72,'skip',"
                  " 'credibility below floor','m','gate-v1')")
+    for i in range(10):
+        conn.execute("INSERT INTO fact (claim, evidence) VALUES (?, ?)",
+                     (f"claim {i}", f"evidence {i}"))
     conn.commit()
     monkeypatch.setattr(web, "DB_PATH", path)
+
+    # Every /apply and /override route now tailors before drafting. Default
+    # every test to a safe, deterministic tailoring path -- no real LLM
+    # call, no CLAUDE_CODE_OAUTH_TOKEN dependency -- so tests that only care
+    # about the apply/send state machine get real tailoring for free.
+    template = tmp_path / "master.docx"
+    build_tailor_template(template)
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", template)
+    monkeypatch.setattr(web.tailor, "OUTPUT_DIR", tmp_path / "generated")
+    monkeypatch.setattr(web.worker.run_module, "verify_auth", lambda: None)
+
+    async def _default_ask(prompt, model=None):
+        return json.dumps({"summary": "Tailored summary.",
+                           "bullets": [{"text": "Relevant bullet",
+                                       "fact_ids": [1]}]})
+    monkeypatch.setattr(web.worker.run_module, "_ask", _default_ask)
+
     return TestClient(web.app)
+
+
+def test_apply_tailors_before_drafting_and_threads_the_version(client, monkeypatch):
+    captured = {}
+
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
+        captured["resume_version"] = resume_version
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+
+    r = client.post("/apply/1")
+    assert r.status_code == 200
+    assert captured["resume_version"] == "tailored-1-r1"
+
+    conn = db.connect(web.DB_PATH)
+    row = conn.execute("SELECT * FROM resume WHERE version = ?",
+                       (captured["resume_version"],)).fetchone()
+    assert row is not None
+    assert Path(row["path"]).exists()
+
+
+def test_a_captcha_hold_does_not_lose_the_already_tailored_resume(client, monkeypatch):
+    """Ordering matters: tailoring is committed before ats_apply.submit is
+    even called, so a captcha (or any submission failure) afterward must not
+    make the resume row or file disappear."""
+    async def held(*args, **kwargs):
+        return {"ok": False, "held": True, "reason": "captcha encountered"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", held)
+
+    client.post("/apply/1")
+
+    conn = db.connect(web.DB_PATH)
+    row = conn.execute("SELECT * FROM resume WHERE job_id = 1").fetchone()
+    assert row is not None
+    assert Path(row["path"]).exists()
+
+
+def test_two_near_simultaneous_apply_clicks_converge_on_one_resume(client, monkeypatch):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+
+    r1 = client.post("/apply/1")
+    r2 = client.post("/apply/1")
+    assert r1.status_code == 200 and r2.status_code == 200
+
+    conn = db.connect(web.DB_PATH)
+    count = conn.execute(
+        "SELECT COUNT(*) n FROM resume WHERE job_id = 1").fetchone()["n"]
+    assert count == 1, "the second click must reuse the first click's resume"
 
 
 @pytest.fixture
@@ -135,7 +210,7 @@ def test_send_without_a_draft_is_refused(client, monkeypatch):
 def test_send_after_apply_performs_a_real_submission(client, monkeypatch):
     calls = []
 
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         calls.append(dry_run)
         status = "draft" if dry_run else "submitted"
         conn.execute(
@@ -231,7 +306,7 @@ def test_index_hides_banner_when_a_schedule_is_installed(client, monkeypatch):
 
 
 def test_run_start_sets_status_running_and_ticks_once(client, monkeypatch):
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', 'draft')", (job_id,))
         conn.commit()
@@ -248,7 +323,7 @@ def test_run_start_sets_status_running_and_ticks_once(client, monkeypatch):
 
 
 def test_run_pause_sets_status_paused(client, monkeypatch):
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', 'draft')", (job_id,))
         conn.commit()
@@ -263,7 +338,7 @@ def test_run_pause_sets_status_paused(client, monkeypatch):
 
 
 def test_run_resume_sets_status_running(client, monkeypatch):
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', 'draft')", (job_id,))
         conn.commit()
@@ -279,7 +354,7 @@ def test_run_resume_sets_status_running(client, monkeypatch):
 
 
 def test_run_stop_clears_current_job(client, monkeypatch):
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', 'draft')", (job_id,))
         conn.commit()
@@ -296,7 +371,7 @@ def test_run_stop_clears_current_job(client, monkeypatch):
 
 
 def test_queue_skip_clears_current_job_and_logs(client, monkeypatch):
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', 'draft')", (job_id,))
         conn.commit()
@@ -326,7 +401,7 @@ def test_queue_skip_advances_to_a_higher_ranked_candidate(client, monkeypatch):
     worker.set_run_state(conn, "apply", status="running", mode="manual",
                          current_job_id=1)
 
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', 'draft')", (job_id,))
         conn.commit()
@@ -405,7 +480,7 @@ def test_queue_priority_refuses_a_job_that_is_not_a_candidate(client):
 def test_send_clears_the_run_state_so_the_worker_can_advance(client, monkeypatch):
     """Manual mode parks the run on a draft. If /send doesn't release
     current_job_id, apply_tick returns early forever and the run is dead."""
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         status = "draft" if dry_run else "submitted"
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', ?)", (job_id, status))
@@ -424,7 +499,7 @@ def test_send_clears_the_run_state_so_the_worker_can_advance(client, monkeypatch
 
 
 def test_run_start_clears_a_stale_last_error(client, monkeypatch):
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', 'draft')", (job_id,))
         conn.commit()
@@ -453,7 +528,7 @@ def test_applications_page_offers_a_mode_toggle(client):
 
 
 def test_mode_toggle_is_disabled_while_a_run_is_running(client, monkeypatch):
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', 'draft')", (job_id,))
         conn.commit()
@@ -467,7 +542,7 @@ def test_mode_toggle_is_disabled_while_a_run_is_running(client, monkeypatch):
 
 @pytest.mark.parametrize("mode", ["auto", "manual"])
 def test_run_start_records_the_mode_it_was_given(client, monkeypatch, mode):
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         status = "draft" if dry_run else "submitted"
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', ?)", (job_id, status))
@@ -488,7 +563,7 @@ def test_run_status_shows_idle_start_button(client):
 
 
 def test_run_status_shows_pause_button_and_current_job_when_running(client, monkeypatch):
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', 'draft')", (job_id,))
         conn.commit()
@@ -527,7 +602,7 @@ def test_failed_skipped_counts_gate_skips_until_they_are_overridden(client, monk
     assert stats["failed_skipped"] == 1
     assert stats["total_applied"] == stats["successful"] == 0
 
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', 'draft')", (job_id,))
         conn.commit()
@@ -540,7 +615,7 @@ def test_failed_skipped_counts_gate_skips_until_they_are_overridden(client, monk
 
 
 def test_run_status_shows_stats(client, monkeypatch):
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', 'submitted')", (job_id,))
         conn.commit()
@@ -1358,7 +1433,7 @@ def test_marking_applied_clears_the_run_state_so_the_worker_can_advance(
     """Manual mode parks the run on a draft, and marking applied is now the
     sanctioned way to resolve one. If it doesn't release current_job_id,
     apply_tick returns early forever and the run is dead."""
-    async def fake_submit(conn, job_id, dry_run, filler=None):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', 'draft')", (job_id,))
         conn.commit()
@@ -1396,7 +1471,7 @@ def test_send_unparks_the_run_when_submission_is_not_implemented(client):
 def test_send_stays_parked_on_a_transient_failure(client, monkeypatch):
     """A captcha hold or an errored filler can succeed on a retry, so the run
     keeps pointing at that draft -- only a categorical refusal unparks."""
-    async def refuses(conn, job_id, dry_run, filler=None):
+    async def refuses(conn, job_id, dry_run, filler=None, resume_version=None):
         return {"ok": False, "held": True,
                 "reason": "captcha encountered; held for review"}
 

@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
-from career_agent import db, outcomes, store
+from career_agent import db, outcomes, store, tailor
 from career_agent.apply import ats as ats_apply
 from career_agent.config import (MODEL_LABELS, SCORING_MODELS, CareerBrief,
                                  load_brief, save_brief)
@@ -166,7 +166,13 @@ async def _do_apply(job_id: int, allow_skip: bool, event: str | None):
         store.log(conn, job_id, event)
 
     try:
-        result = await ats_apply.submit(conn, job_id, dry_run=True)
+        resume_version = await worker.tailor_for_apply(conn, job_id, BRIEF_PATH)
+    except Exception as exc:
+        return HTMLResponse(f'<span class="denied">{escape(str(exc))}</span>')
+
+    try:
+        result = await ats_apply.submit(conn, job_id, dry_run=True,
+                                        resume_version=resume_version)
     except Exception as exc:
         return HTMLResponse(f'<span class="denied">{escape(str(exc))}</span>')
     if not result["ok"]:
@@ -212,7 +218,9 @@ async def send(job_id: int):
     store.log(conn, job_id, "human_confirmed_send")
 
     try:
-        result = await ats_apply.submit(conn, job_id, dry_run=False)
+        result = await ats_apply.submit(
+            conn, job_id, dry_run=False,
+            resume_version=store.resume_version_for(conn, job_id))
     except Exception as exc:
         return HTMLResponse(f'<span class="denied">{escape(str(exc))}</span>')
     if not result["ok"]:
