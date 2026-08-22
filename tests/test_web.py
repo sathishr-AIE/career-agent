@@ -1,5 +1,7 @@
 import datetime as dt
 import threading
+import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -784,6 +786,226 @@ def test_the_modal_shell_is_outside_the_poller(client):
     r = client.get("/")
     before = r.text.split('id="pipeline-status-poller"')[0]
     assert 'id="runOverlay"' in before, "modal shell precedes the poller"
+
+
+def test_overview_page_render_shows_the_pipeline_stage_track(client):
+    """Review fix: overview.html includes _pipeline_status.html (which reads
+    a route-supplied `stages` -- the 5-item pipeline stage list) and, further
+    down the *same* template, had its own unrelated `{% set stages = [...] %}`
+    for the KPI funnel. The include only resolved to the route-supplied value
+    because the funnel's {% set %} sat below it in the template; reordering
+    them would have silently fed the funnel's (label, count) pairs into the
+    stage track instead. Every other stage-track test (e.g.
+    test_pipeline_status_renders_the_stage_track above) hits /pipeline/status
+    directly, whose fragment render never sees the parent template's
+    variables at all -- so none of them could ever have caught this. Only a
+    full render of / can."""
+    r = client.get("/")
+    for label in ("Discover", "Clean", "Filter", "Score", "Ready"):
+        assert f'<div class="stage-label">{label}</div>' in r.text
+
+
+def test_still_running_toast_clears_when_the_run_finishes_or_reopened(client):
+    """Review fix: closeRunMonitor() added #runToast's `open` class when the
+    modal was dismissed mid-run, but nothing ever removed it -- not when the
+    run finished, not when the modal was reopened. Live-reproduced: after the
+    poller reports data-status="idle", the toast kept saying "Career Agent is
+    still running..." forever, right next to an Idle pill and a Run Now
+    button that both correctly showed the run was over -- recreating, in the
+    toast, the exact "can't tell progress from a hang" problem this whole
+    plan exists to fix."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        pytest.skip(f"playwright not importable: {exc}")
+
+    conn = db.connect(web.DB_PATH)
+    worker.set_run_state(conn, "pipeline", status="running")
+    conn.execute("UPDATE run_state SET started_at = datetime('now')"
+                 " WHERE kind = 'pipeline'")
+    conn.commit()
+    html = client.get("/").text
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"no browser available for playwright: {exc}")
+
+        try:
+            page = browser.new_page()
+            page.route("**/*", lambda route: route.abort())  # fully offline
+            page.set_content(html)
+
+            def toast_open():
+                cls = page.locator("#runToast").get_attribute("class") or ""
+                return "open" in cls.split()
+
+            # Dismiss while a run is going -> the toast appears.
+            page.evaluate("closeRunMonitor()")
+            assert toast_open(), "dismissing mid-run must show the toast"
+
+            # The run finishes. In reality the poller's next swap would set
+            # this; set it directly to isolate the setInterval logic itself
+            # from the (already-covered-elsewhere) polling mechanics.
+            page.evaluate(
+                "document.getElementById('monitor-body').dataset.status = 'idle'")
+
+            # Nobody re-opens or re-dismisses the modal here -- only the
+            # once-a-second interval is running. It alone must notice and
+            # clear the toast, well within a couple of ticks.
+            page.wait_for_function(
+                "() => !document.getElementById('runToast')"
+                ".classList.contains('open')", timeout=2000)
+
+            # Re-arm: dismiss again while running.
+            page.evaluate(
+                "document.getElementById('monitor-body').dataset.status = 'running'")
+            page.evaluate("closeRunMonitor()")
+            assert toast_open()
+
+            # Reopening must clear it immediately, with no poll tick needed.
+            page.evaluate("openRunMonitor()")
+            assert not toast_open()
+        finally:
+            browser.close()
+
+
+def test_run_now_repolls_immediately_instead_of_waiting_three_seconds(client):
+    """Review fix: hx-post="/pipeline/run-now" keeps hx-swap="none" (kept
+    from the previous fix round -- see
+    test_run_now_discards_the_response_instead_of_blanking_the_monitor above
+    -- so the raw "ok" body never blanks the monitor), which meant nothing
+    refreshed #monitor-body until the poller's own next 3s tick. Live-
+    reproduced: clicking Run Now from an *error* state opened the modal
+    showing the *previous* run's stale error, stale stage, and stale
+    percentage, under a "Career Agent is running" title, for that whole
+    window.
+
+    The reviewer's first-suggested mechanism --
+    htmx.trigger('#pipeline-status-poller','load') -- turns out to be a
+    no-op here: in the actual shipped htmx 2.0.4 build (unpkg.com/htmx.org@
+    2.0.4, vendored below), hx-trigger's "load" keyword is handled by
+    addTriggerHandler() as a one-shot initializer gated on
+    `!nodeData.firstInitCompleted` that never calls addEventListener --
+    unlike e.g. "revealed" or "intersect", which do. So it fires once at
+    page load and, critically, registers no listener a later
+    htmx.trigger(el, 'load') could ever hit. The fix instead adds a plain
+    custom trigger name ("run-started") to the poller's hx-trigger list --
+    which *does* go through the normal addEventListener path -- and fires
+    that from the button's hx-on::after-request.
+
+    This runs the real, unmodified htmx build against a real DOM in headless
+    Chromium (mocking only the two HTTP endpoints, not htmx itself), so a
+    wrong event name -- like the original "load" suggestion -- actually
+    fails this test, the way a markup-only substring assertion could not."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        pytest.skip(f"playwright not importable: {exc}")
+
+    htmx_js = Path(__file__).parent / "vendor" / "htmx-2.0.4.min.js"
+    if not htmx_js.exists():
+        pytest.skip("vendored htmx build not available")
+
+    conn = db.connect(web.DB_PATH)
+    worker.set_run_state(conn, "pipeline", status="error",
+                         last_error="browser crashed", stage="filter")
+    conn.commit()
+    html = client.get("/").text
+    error_fragment = client.get("/pipeline/status").text
+    assert "browser crashed" in html  # sanity: the stale error really is there
+    assert "browser crashed" in error_fragment
+
+    worker.set_run_state(conn, "pipeline", status="running", last_error=None,
+                         stage=None, found=0, duplicates=0, passed=0,
+                         scored=0, shortlisted=0)
+    conn.execute("UPDATE run_state SET started_at = datetime('now')"
+                 " WHERE kind = 'pipeline'")
+    conn.commit()
+    running_fragment = client.get("/pipeline/status").text
+    assert "browser crashed" not in running_fragment
+    assert 'data-status="running"' in running_fragment
+
+    # #pipeline-status-poller's own hx-trigger="load, ..." fires a GET the
+    # instant the page loads -- before any click -- so a single canned
+    # /pipeline/status response can't tell the two apart. Answer that first,
+    # automatic poll with the stale error fragment (matching what the real
+    # page shows before anyone clicks anything) and only switch to the
+    # "running" fragment from the second request on, i.e. the one the click
+    # itself must cause.
+    status_requests = {"n": 0}
+
+    def handle_status(route):
+        status_requests["n"] += 1
+        body = error_fragment if status_requests["n"] == 1 else running_fragment
+        route.fulfill(status=200, content_type="text/html", body=body)
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"no browser available for playwright: {exc}")
+
+        try:
+            page = browser.new_page()
+            # Fully offline by default; specific mocks below take priority
+            # over this since routes run in reverse registration order.
+            page.route("**/*", lambda route: route.abort())
+            page.route(
+                "https://unpkg.com/htmx.org@2.0.4",
+                lambda route: route.fulfill(
+                    path=str(htmx_js), content_type="application/javascript"))
+            page.route(
+                "**/pipeline/run-now",
+                lambda route: route.fulfill(
+                    status=200, content_type="text/html", body="ok"))
+            page.route("**/pipeline/status", handle_status)
+            # A real (mocked) origin, not set_content()'s about:blank, so the
+            # button's relative hx-post/hx-get URLs resolve predictably to
+            # something the routes above actually match.
+            page.route(
+                "https://career-agent.test/",
+                lambda route: route.fulfill(
+                    status=200, content_type="text/html", body=html))
+            t_nav = time.monotonic()  # htmx's "every 3s" interval starts
+            # counting from roughly here (page/htmx init), not from the click
+            # below -- so the remaining-budget math has to anchor here too.
+            page.goto("https://career-agent.test/")
+            page.wait_for_function("() => window.htmx !== undefined")
+            # Sanity: the page's first paint (inline fragment) plus the
+            # automatic first poll (mocked above) both show the stale error
+            # -- so the button below really is starting from an error state,
+            # not already "running" before the click ever happens.
+            page.wait_for_function(
+                "() => { const b = document.getElementById('monitor-body');"
+                " return !!b && b.dataset.status === 'error'; }")
+
+            # Budget the post-click wait against the real 3s poll interval,
+            # not a guessed constant: click() itself carries a real (and, in
+            # this sandboxed environment, fairly large -- ~1.5s, measured
+            # directly, reproduces even on a bare unrelated button) input-
+            # simulation overhead of its own before it even dispatches, and a
+            # fixed timeout picked without accounting for that would either
+            # be too tight (flaking on a correct fix) or -- worse -- so loose
+            # it silently reaches the real 3s mark and starts passing for a
+            # BROKEN fix too, once the ambient interval bails it out. Staying
+            # a fixed margin under 3000ms regardless of how much click()
+            # itself ate keeps the assertion below meaningful either way.
+            # (dispatch_event() avoids that overhead but turns out not to
+            # reliably reach htmx's click listener the way a real click
+            # does -- confirmed empirically: it fell back to the ambient
+            # interval instead, ~3s later.)
+            page.click("#pipeline-status .btn.primary")
+            remaining_ms = max(300, 2700 - (time.monotonic() - t_nav) * 1000)
+
+            page.wait_for_function(
+                "() => { const b = document.getElementById('monitor-body');"
+                " return !!b && b.dataset.status === 'running'; }",
+                timeout=remaining_ms)
+            assert "browser crashed" not in page.content()
+        finally:
+            browser.close()
 
 
 BRIEF_TOML = """\

@@ -19,8 +19,12 @@
            swap, or htmx drops it from the DOM and the poll never fires again
            — this bit the sibling plan's /run/status poller the same way
            before it was fixed. -->
+      <!-- "run-started" (not "load") is what Run Now re-fires below: in the
+           shipped htmx 2.0.4 build, hx-trigger's "load" keyword only ever
+           fires once at first init and never registers a real listener, so
+           htmx.trigger(el, 'load') silently does nothing after page load. -->
       <div id="pipeline-status-poller" hx-get="/pipeline/status"
-           hx-trigger="load, every 3s" hx-swap="innerHTML">
+           hx-trigger="load, every 3s, run-started" hx-swap="innerHTML">
         {% include "_pipeline_status.html" %}
       </div>
       <div class="live-footer">
@@ -32,7 +36,11 @@
 </div>
 
 <script>
-function openRunMonitor(){document.getElementById('runOverlay').classList.add('open')}
+function openRunMonitor(){
+  document.getElementById('runOverlay').classList.add('open');
+  // Reopening makes a "still running" toast redundant either way.
+  document.getElementById('runToast').classList.remove('open');
+}
 function closeRunMonitor(){
   document.getElementById('runOverlay').classList.remove('open');
   const body = document.getElementById('monitor-body');
@@ -44,6 +52,11 @@ function closeRunMonitor(){
 setInterval(function(){
   const body = document.getElementById('monitor-body');
   const el = document.getElementById('elapsedTime');
+  // Runs every tick (not just while the modal is open) so a toast left over
+  // from a dismissed run clears itself the moment the poller reports the
+  // run is no longer running, instead of sitting there indefinitely.
+  if (body && body.dataset.status !== 'running')
+    document.getElementById('runToast').classList.remove('open');
   if (!body || !el) return;
   if (body.dataset.status !== 'running' || !body.dataset.started) {
     el.textContent = ''; return;
@@ -93,15 +106,19 @@ setInterval(function(){
 
 <div class="card panel">
   <div class="panel-head"><h2>Pipeline Overview</h2></div>
-  {% set stages = [("Discovered", kpis.discovered), ("After Hard Filter", kpis.after_hard_filter),
+  {# Named funnel_stages, not stages: _pipeline_status.html (included above)
+     reads a route-supplied `stages` for the 5-item pipeline track, and a
+     same-named {% set %} here would shadow it for that include if this
+     block ever moved above it. #}
+  {% set funnel_stages = [("Discovered", kpis.discovered), ("After Hard Filter", kpis.after_hard_filter),
                     ("Shortlisted", kpis.shortlisted), ("Applied", kpis.applied),
                     ("Responses", kpis.responses)] %}
   {# Not all five stages are subsets of "discovered today" -- applied counts
      today's submissions of jobs shortlisted earlier, and responses is all-time
      -- so scaling against discovered alone can render a bar far past 100%. #}
-  {% set widest = stages | map(attribute=1) | max or 1 %}
+  {% set widest = funnel_stages | map(attribute=1) | max or 1 %}
   <div class="funnel">
-    {% for label, value in stages %}
+    {% for label, value in funnel_stages %}
     <div style="width: {{ (value / widest * 100) | round | int }}%; min-width: 8%;">
       {{ label }}: {{ value }}</div>
     {% endfor %}

@@ -11,7 +11,14 @@
 
 <div id="pipeline-status">
   {% if s["status"] in ("idle", "error") %}
+    {# hx-swap="none" (kept from the previous fix round) discards the raw "ok"
+       body instead of blanking the monitor with it, but that also means
+       nothing refreshes #monitor-body until the poller's own next 3s tick.
+       Firing "run-started" on the poller the instant the POST settles pulls
+       fresh state immediately instead of showing the previous run's stale
+       stage/error for that window. #}
     <button class="btn primary" hx-post="/pipeline/run-now" hx-swap="none"
+            hx-on::after-request="htmx.trigger('#pipeline-status-poller', 'run-started')"
             onclick="openRunMonitor()">▶ Run Now</button>
   {% else %}
     <button class="btn" onclick="openRunMonitor()">◌ Running… (view)</button>
