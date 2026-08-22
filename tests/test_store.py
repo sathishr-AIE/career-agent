@@ -106,6 +106,80 @@ def _seed_one(conn, company="Acme") -> int:
                         (company,)).fetchone()["id"]
 
 
+def _seed_facts(conn, n=10):
+    for i in range(n):
+        conn.execute("INSERT INTO fact (claim, evidence) VALUES (?, ?)",
+                     (f"claim {i}", f"evidence {i}"))
+    conn.commit()
+
+
+def test_fact_rows_returns_ids_paired_with_formatted_text(conn):
+    _seed_facts(conn, n=2)
+    rows = store.fact_rows(conn)
+    assert rows == [(1, "claim 0 (evidence: evidence 0)"),
+                    (2, "claim 1 (evidence: evidence 1)")]
+
+
+def test_latest_resume_version_is_none_with_no_rows(conn):
+    job_id = _seed_one(conn)
+    assert store.latest_resume_version(conn, job_id) is None
+
+
+def test_latest_resume_version_returns_the_newest_row(conn):
+    job_id = _seed_one(conn)
+    conn.execute("INSERT INTO resume (version, path, job_id)"
+                 " VALUES ('tailored-1-r1', 'a.docx', ?)", (job_id,))
+    conn.execute("INSERT INTO resume (version, path, job_id)"
+                 " VALUES ('tailored-1-r2', 'b.docx', ?)", (job_id,))
+    conn.commit()
+    assert store.latest_resume_version(conn, job_id) == "tailored-1-r2"
+
+
+def test_resume_version_for_falls_back_to_the_constant(conn):
+    job_id = _seed_one(conn)
+    assert store.resume_version_for(conn, job_id) == ats_apply.RESUME_VERSION
+
+
+def test_resume_version_for_prefers_a_tailored_row(conn):
+    job_id = _seed_one(conn)
+    conn.execute("INSERT INTO resume (version, path, job_id)"
+                 " VALUES ('tailored-1-r1', 'a.docx', ?)", (job_id,))
+    conn.commit()
+    assert store.resume_version_for(conn, job_id) == "tailored-1-r1"
+
+
+def test_next_resume_version_counts_existing_rows_for_that_job(conn):
+    job_id = _seed_one(conn)
+    assert store.next_resume_version(conn, job_id) == f"tailored-{job_id}-r1"
+    conn.execute("INSERT INTO resume (version, path, job_id)"
+                 " VALUES (?, 'a.docx', ?)",
+                 (f"tailored-{job_id}-r1", job_id))
+    conn.commit()
+    assert store.next_resume_version(conn, job_id) == f"tailored-{job_id}-r2"
+
+
+def test_insert_resume_stores_a_new_row(conn):
+    job_id = _seed_one(conn)
+    version = store.insert_resume(conn, job_id, "tailored-1-r1", "a.docx", "{}")
+    assert version == "tailored-1-r1"
+    row = conn.execute("SELECT * FROM resume WHERE version = ?",
+                       (version,)).fetchone()
+    assert row["job_id"] == job_id
+    assert row["path"] == "a.docx"
+
+
+def test_insert_resume_on_a_version_collision_returns_the_winner(conn):
+    job_id = _seed_one(conn)
+    store.insert_resume(conn, job_id, "tailored-1-r1", "a.docx", "{}")
+    # A second insert under the same version string (the concurrent-click
+    # race) must not raise -- it reports back the row that actually won.
+    version = store.insert_resume(conn, job_id, "tailored-1-r1", "b.docx", "{}")
+    assert version == "tailored-1-r1"
+    assert conn.execute(
+        "SELECT COUNT(*) n FROM resume WHERE version = ?",
+        ("tailored-1-r1",)).fetchone()["n"] == 1
+
+
 def test_mark_applied_promotes_an_existing_draft(conn):
     """The normal path: 'Open & track' left a draft, and the user then
     applied on the site. Promote that row rather than inserting a second,

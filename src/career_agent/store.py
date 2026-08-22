@@ -84,6 +84,51 @@ def facts(conn) -> list[str]:
     return [f"{r['claim']} (evidence: {r['evidence']})" for r in rows]
 
 
+def fact_rows(conn) -> list[tuple[int, str]]:
+    """Same text format as facts(), paired with each row's id so tailor.py
+    can ask the model to cite which facts a bullet draws from, and validate
+    that citation against real rows before anything is rendered."""
+    rows = conn.execute("SELECT id, claim, evidence FROM fact ORDER BY id").fetchall()
+    return [(r["id"], f"{r['claim']} (evidence: {r['evidence']})") for r in rows]
+
+
+def latest_resume_version(conn, job_id: int) -> str | None:
+    row = conn.execute(
+        "SELECT version FROM resume WHERE job_id = ? ORDER BY id DESC LIMIT 1",
+        (job_id,)).fetchone()
+    return row["version"] if row else None
+
+
+def resume_version_for(conn, job_id: int) -> str:
+    """What to record on an application for this job: the most recent
+    tailored version if one exists, else the untailored fallback constant."""
+    return latest_resume_version(conn, job_id) or ats.RESUME_VERSION
+
+
+def next_resume_version(conn, job_id: int) -> str:
+    n = conn.execute("SELECT COUNT(*) n FROM resume WHERE job_id = ?",
+                     (job_id,)).fetchone()["n"]
+    return f"tailored-{job_id}-r{n + 1}"
+
+
+def insert_resume(conn, job_id: int, version: str, path: str,
+                  content: str) -> str:
+    """Insert a new resume row. resume.version is UNIQUE, and two
+    near-simultaneous Apply clicks on the same job can both compute the
+    same next_resume_version() before either commits -- handled the same
+    way upsert_jobs handles the equivalent race on job.fingerprint: attempt
+    the insert, and on a collision report back whichever row actually won
+    rather than raising."""
+    try:
+        conn.execute(
+            "INSERT INTO resume (version, path, job_id, content)"
+            " VALUES (?, ?, ?, ?)", (version, path, job_id, content))
+        conn.commit()
+        return version
+    except sqlite3.IntegrityError:
+        return latest_resume_version(conn, job_id)
+
+
 def get_settings(conn) -> sqlite3.Row:
     return conn.execute("SELECT * FROM setting WHERE id = 1").fetchone()
 

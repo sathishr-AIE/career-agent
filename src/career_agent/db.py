@@ -151,6 +151,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
     for counter in ("found", "duplicates", "passed", "scored", "shortlisted"):
         _add_column_if_missing(conn, "run_state", counter,
                                "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "resume", "job_id", "INTEGER REFERENCES job(id)")
+    _add_column_if_missing(conn, "resume", "content", "TEXT")
     conn.commit()
 
 

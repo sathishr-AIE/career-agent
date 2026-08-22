@@ -102,6 +102,18 @@ def test_job_priority_defaults_to_null(conn):
     assert row["priority"] is None
 
 
+def test_resume_has_job_id_and_content_columns(conn):
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(resume)")}
+    assert {"job_id", "content"} <= cols
+
+
+def test_resume_columns_are_added_idempotently(conn):
+    db.init_schema(conn)
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(resume)")]
+    assert cols.count("job_id") == 1
+    assert cols.count("content") == 1
+
+
 def test_setting_row_is_seeded(conn):
     row = conn.execute("SELECT * FROM setting").fetchone()
     assert row["scoring_model"] == "claude-sonnet-5"
