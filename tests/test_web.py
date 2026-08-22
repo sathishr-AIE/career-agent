@@ -1565,3 +1565,38 @@ def test_applications_page_links_to_a_tailored_resume(client, monkeypatch):
 
     r = client.get("/applications")
     assert 'href="/resume/tailored-1-r1"' in r.text
+
+
+def test_resumes_page_shows_no_master_when_none_exists(client, monkeypatch):
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", Path("/no/such/file.docx"))
+    r = client.get("/resumes")
+    assert r.status_code == 200
+    assert "No master template found" in r.text
+
+
+def test_resumes_page_shows_the_master_when_present(client, monkeypatch, tmp_path):
+    template = tmp_path / "master.docx"
+    build_tailor_template(template)
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", template)
+    r = client.get("/resumes")
+    assert "master.docx" in r.text
+
+
+def test_resumes_page_lists_generated_versions_with_provenance(client, monkeypatch):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    client.post("/apply/1")
+
+    r = client.get("/resumes")
+    assert "AI Engineer" in r.text  # job title
+    assert "Acme" in r.text          # job company
+    assert "tailored-1-r1" in r.text
+    assert "Relevant bullet" in r.text  # the fixture's default tailored bullet
+    assert "fact 1" in r.text.lower()   # provenance: which fact backs it
+
+
+def test_resumes_nav_link_is_present(client):
+    r = client.get("/applications")
+    assert 'href="/resumes"' in r.text
