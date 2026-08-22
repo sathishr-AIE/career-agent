@@ -68,6 +68,9 @@
    denominator. {% call %} supplies the tab's own extra button for a job with
    no application row yet. #}
 {% macro action_cell(j) %}
+  {% if j["resume_version"] and j["resume_version"].startswith("tailored-") %}
+  <div><a href="/resume/{{ j['resume_version'] }}" target="_blank">Download resume</a></div>
+  {% endif %}
   {% set tracked = applied.get(j["id"]) %}
   {% if tracked %}
     <div class="outcome-cell">

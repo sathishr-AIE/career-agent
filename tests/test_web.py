@@ -1532,3 +1532,36 @@ def test_marking_applied_stays_quiet_below_the_daily_cap(client, brief_path):
     r = client.post("/applied/1", data={"when": ""})
     assert "Marked applied" in r.text
     assert "daily cap" not in r.text
+
+
+def test_resume_download_serves_the_file(client, tmp_path):
+    resume_file = tmp_path / "r.docx"
+    resume_file.write_bytes(b"fake docx bytes")
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO resume (version, path, job_id)"
+                 " VALUES ('tailored-1-r1', ?, 1)", (str(resume_file),))
+    conn.commit()
+
+    r = client.get("/resume/tailored-1-r1")
+    assert r.status_code == 200
+    assert r.content == b"fake docx bytes"
+
+
+def test_resume_download_404s_on_an_unknown_version(client):
+    r = client.get("/resume/does-not-exist")
+    assert r.status_code == 404
+
+
+def test_applications_page_links_to_a_tailored_resume(client, monkeypatch):
+    async def fake_submit(conn, job_id, dry_run, filler=None, resume_version=None):
+        conn.execute(
+            "INSERT INTO application (job_id, resume_version, status)"
+            " VALUES (?, ?, 'draft')", (job_id, resume_version))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    client.post("/apply/1")
+
+    r = client.get("/applications")
+    assert 'href="/resume/tailored-1-r1"' in r.text

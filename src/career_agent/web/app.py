@@ -7,7 +7,7 @@ from html import escape
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
@@ -52,7 +52,9 @@ SELECT j.id, j.company, j.title, j.location, j.source, j.url,
            AND ap.status IN ('in_flight','submitted','held_unknown','failed_permanent')
          ORDER BY ap.id DESC LIMIT 1) AS terminal_status,
        (SELECT ap.status FROM application ap WHERE ap.job_id = j.id
-         ORDER BY ap.id DESC LIMIT 1) IS 'draft' AS has_draft
+         ORDER BY ap.id DESC LIMIT 1) IS 'draft' AS has_draft,
+       (SELECT ap.resume_version FROM application ap WHERE ap.job_id = j.id
+         ORDER BY ap.id DESC LIMIT 1) AS resume_version
   FROM job j JOIN assessment a ON a.job_id = j.id
  WHERE j.merged_into_job_id IS NULL AND a.verdict IN ({placeholders})
  ORDER BY a.weighted_score DESC NULLS LAST, j.discovered_at DESC
@@ -112,6 +114,16 @@ def dashboard(request: Request):
                  # track and a blank "scored / " counter until the poll
                  # catches up.
                  **_pipeline_status_context(conn)})
+
+
+@app.get("/resume/{version}")
+def download_resume(version: str):
+    conn = _conn()
+    row = conn.execute("SELECT path FROM resume WHERE version = ?",
+                       (version,)).fetchone()
+    if row is None:
+        return HTMLResponse("Resume not found", status_code=404)
+    return FileResponse(row["path"], filename=Path(row["path"]).name)
 
 
 @app.get("/applications", response_class=HTMLResponse)
