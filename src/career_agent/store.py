@@ -167,7 +167,7 @@ def mark_applied(conn, job_id: int, when: str) -> int:
         cur = conn.execute(
             "INSERT INTO application (job_id, resume_version, status,"
             " submitted_at) VALUES (?, ?, 'submitted', ?)",
-            (job_id, ats.RESUME_VERSION, when))
+            (job_id, resume_version_for(conn, job_id), when))
         app_id = cur.lastrowid
     else:
         app_id = draft["id"]

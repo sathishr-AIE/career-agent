@@ -114,3 +114,26 @@ def test_stale_in_flight_becomes_held_unknown(conn):
     assert ats_apply.sweep_stale_in_flight(conn, minutes=15) == 1
     row = conn.execute("SELECT status FROM application").fetchone()
     assert row["status"] == "held_unknown"
+
+
+async def test_dry_run_stores_the_given_resume_version(conn):
+    out = await ats_apply.submit(conn, 1, dry_run=True, filler=_ok,
+                                 resume_version="tailored-1-r1")
+    assert out["ok"] is True
+    row = conn.execute("SELECT resume_version FROM application").fetchone()
+    assert row["resume_version"] == "tailored-1-r1"
+
+
+async def test_dry_run_falls_back_to_the_default_version(conn):
+    out = await ats_apply.submit(conn, 1, dry_run=True, filler=_ok)
+    assert out["ok"] is True
+    row = conn.execute("SELECT resume_version FROM application").fetchone()
+    assert row["resume_version"] == ats_apply.RESUME_VERSION
+
+
+async def test_real_submission_stores_the_given_resume_version(conn):
+    out = await ats_apply.submit(conn, 1, dry_run=False, filler=_ok,
+                                 resume_version="tailored-1-r1")
+    assert out["ok"] is True
+    row = conn.execute("SELECT resume_version FROM application").fetchone()
+    assert row["resume_version"] == "tailored-1-r1"

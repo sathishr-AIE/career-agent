@@ -234,3 +234,16 @@ def test_mark_applied_refuses_a_job_that_already_has_one(conn):
     store.mark_applied(conn, job_id, "2026-08-20")
     with pytest.raises(sqlite3.IntegrityError):
         store.mark_applied(conn, job_id, "2026-08-21")
+
+
+def test_mark_applied_uses_the_tailored_resume_when_one_exists(conn):
+    job_id = _seed_one(conn)
+    conn.execute("INSERT INTO resume (version, path, job_id)"
+                 " VALUES ('tailored-1-r1', 'x.docx', ?)", (job_id,))
+    conn.commit()
+
+    store.mark_applied(conn, job_id, "2026-08-22")
+
+    row = conn.execute("SELECT resume_version FROM application"
+                       " WHERE job_id = ?", (job_id,)).fetchone()
+    assert row["resume_version"] == "tailored-1-r1"

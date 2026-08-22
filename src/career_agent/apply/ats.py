@@ -55,7 +55,8 @@ def sweep_stale_in_flight(conn: sqlite3.Connection, minutes: int = 15) -> int:
 
 
 async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
-                 filler: Callable[[str], Awaitable[dict]] | None = None) -> dict:
+                 filler: Callable[[str], Awaitable[dict]] | None = None,
+                 resume_version: str | None = None) -> dict:
     # Refuse a real send on the stub filler, before anything is written. An
     # injected filler means a caller supplied a real one (or a test double),
     # so it is allowed through; only the _default_filler path is blocked.
@@ -78,19 +79,20 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
         return {"ok": False, "reason": f"job {job_id} not found"}
 
     filler = filler or _default_filler
+    resume_version = resume_version or RESUME_VERSION
 
     if dry_run:
         answers = await filler(row["url"])
         conn.execute(
             "INSERT INTO application (job_id, resume_version, answers, status)"
             " VALUES (?, ?, ?, 'draft')",
-            (job_id, RESUME_VERSION, json.dumps(answers)))
+            (job_id, resume_version, json.dumps(answers)))
         conn.commit()
         return {"ok": True, "job_id": job_id, "status": "draft"}
 
     cur = conn.execute(
         "INSERT INTO application (job_id, resume_version, status, started_at)"
-        " VALUES (?, ?, 'in_flight', datetime('now'))", (job_id, RESUME_VERSION))
+        " VALUES (?, ?, 'in_flight', datetime('now'))", (job_id, resume_version))
     app_id = cur.lastrowid
     conn.commit()
 
