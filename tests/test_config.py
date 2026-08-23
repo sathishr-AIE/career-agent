@@ -5,8 +5,9 @@ from pathlib import Path
 import pydantic
 import pytest
 
-from career_agent.config import (CareerBrief, load_boards, load_brief,
-                                 save_brief)
+from career_agent.config import (CandidateProfile, CareerBrief, load_boards,
+                                 load_brief, load_candidate_profile,
+                                 save_brief, save_candidate_profile)
 
 BRIEF = """
 target_titles = ["AI Engineer", "ML Engineer"]
@@ -182,3 +183,50 @@ def test_save_brief_leaves_no_temp_file_when_the_write_fails(tmp_path,
 
     assert list(tmp_path.iterdir()) == [p], "left a stray temp file behind"
     assert p.read_text(encoding="utf-8") == BRIEF
+
+
+CANDIDATE = """
+candidate_name = "Jane Doe"
+candidate_email = "jane@example.com"
+candidate_phone = "+91-90000-00000"
+"""
+
+
+def test_load_candidate_profile(tmp_path):
+    p = tmp_path / "candidate_profile.toml"
+    p.write_text(CANDIDATE, encoding="utf-8")
+    profile = load_candidate_profile(p)
+    assert profile.candidate_name == "Jane Doe"
+    assert profile.candidate_email == "jane@example.com"
+    assert profile.linkedin_url is None
+
+
+def test_load_candidate_profile_missing_file_raises_clearly(tmp_path):
+    p = tmp_path / "candidate_profile.toml"
+    with pytest.raises(FileNotFoundError, match="candidate_profile.toml.example"):
+        load_candidate_profile(p)
+
+
+def test_candidate_profile_rejects_blank_name(tmp_path):
+    p = tmp_path / "candidate_profile.toml"
+    p.write_text('candidate_name = ""\ncandidate_email = "a@b.com"\n'
+                 'candidate_phone = "123"\n', encoding="utf-8")
+    with pytest.raises(pydantic.ValidationError):
+        load_candidate_profile(p)
+
+
+def test_save_candidate_profile_round_trips(tmp_path):
+    p = tmp_path / "candidate_profile.toml"
+    save_candidate_profile(p, CandidateProfile(
+        candidate_name="Jane Doe", candidate_email="jane@example.com",
+        candidate_phone="+91-90000-00000", linkedin_url="https://linkedin.com/in/jane"))
+    reloaded = load_candidate_profile(p)
+    assert reloaded.candidate_name == "Jane Doe"
+    assert reloaded.linkedin_url == "https://linkedin.com/in/jane"
+
+
+def test_save_candidate_profile_creates_a_file_that_does_not_exist(tmp_path):
+    p = tmp_path / "new.toml"
+    save_candidate_profile(p, CandidateProfile(
+        candidate_name="X", candidate_email="x@y.com", candidate_phone="1"))
+    assert load_candidate_profile(p).candidate_name == "X"

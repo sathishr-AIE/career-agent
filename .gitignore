@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+candidate_profile.toml
+!candidate_profile.toml.example
 *.local.*
 secrets/
 data/

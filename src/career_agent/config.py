@@ -44,6 +44,16 @@ class Board(BaseModel):
     tier: int = 2
 
 
+class CandidateProfile(BaseModel):
+    """PII, deliberately kept out of CareerBrief/career_brief.toml, which is
+    version-controlled. See candidate_profile.toml.example."""
+    candidate_name: str = Field(min_length=1)
+    candidate_email: str = Field(min_length=1)
+    candidate_phone: str = Field(min_length=1)
+    linkedin_url: str | None = None
+    portfolio_url: str | None = None
+
+
 def load_brief(path: Path) -> CareerBrief:
     with open(path, "rb") as f:
         return CareerBrief(**tomllib.load(f))
@@ -54,35 +64,32 @@ def load_boards(path: Path) -> list[Board]:
         return [Board(**b) for b in tomllib.load(f).get("board", [])]
 
 
-def save_brief(path: Path, brief: CareerBrief) -> None:
-    """Write the brief back preserving comments, key order, and formatting.
-    The file is version controlled and its comments explain non-obvious
-    consequences ("adding a city multiplies daily Actor runs"), so a
-    round-trip write is the only acceptable kind."""
+def _save_toml(path: Path, values: dict) -> None:
+    """Write-then-rename TOML save, shared by save_brief and
+    save_candidate_profile. Preserves comments, key order, and formatting on
+    an existing file. Write-then-rename, not write_text: write_text
+    truncates in place, and readers (the worker's guard(), every dashboard
+    route) call the matching load_* function on every tick and every
+    request. A reader landing in that truncate window gets half a TOML and
+    raises. os.replace is atomic on Windows and POSIX; same directory keeps
+    it a rename."""
     if path.exists():
         doc = tomlkit.parse(path.read_text(encoding="utf-8"))
     else:
         doc = tomlkit.document()
 
-    for field, value in brief.model_dump().items():
+    for field, value in values.items():
         if value is None:
-            # TOML has no null; absent is how "unset" is spelled, and
-            # load_brief will fall back to the pydantic default.
+            # TOML has no null; absent is how "unset" is spelled, and the
+            # matching load_* will fall back to the pydantic default.
             if field in doc:
                 doc.pop(field)
         elif field not in doc or doc[field] != value:
             # Assigning unconditionally would replace the item wholesale,
             # discarding its original formatting (e.g. a manually wrapped
-            # multi-line array) even when the value didn't change. Only
-            # touch keys whose value actually changed, so an untouched
-            # field's diff stays silent.
+            # multi-line array) even when the value didn't change.
             doc[field] = value
 
-    # Write-then-rename, not write_text: write_text truncates in place, and
-    # the worker's guard() plus the dashboard routes call load_brief on every
-    # tick and every request. A reader landing in that truncate window gets
-    # half a TOML and raises, failing a run or 500ing a page. os.replace is
-    # atomic on Windows and POSIX; same directory keeps it a rename.
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         tmp.write_text(tomlkit.dumps(doc), encoding="utf-8")
@@ -90,3 +97,24 @@ def save_brief(path: Path, brief: CareerBrief) -> None:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def save_brief(path: Path, brief: CareerBrief) -> None:
+    """The file is version controlled and its comments explain non-obvious
+    consequences ("adding a city multiplies daily Actor runs"), so a
+    round-trip write is the only acceptable kind."""
+    _save_toml(path, brief.model_dump())
+
+
+def load_candidate_profile(path: Path) -> CandidateProfile:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found. Copy candidate_profile.toml.example to "
+            f"{path.name} and fill in your details -- required before any "
+            "real Greenhouse submission can run.")
+    with open(path, "rb") as f:
+        return CandidateProfile(**tomllib.load(f))
+
+
+def save_candidate_profile(path: Path, profile: CandidateProfile) -> None:
+    _save_toml(path, profile.model_dump())

@@ -1,0 +1,10 @@
+# Copy this file to candidate_profile.toml and fill in your real details.
+# candidate_profile.toml is gitignored -- unlike career_brief.toml, this
+# file holds PII (name, email, phone), not search preferences, so it never
+# gets committed.
+
+candidate_name = "Jane Doe"
+candidate_email = "jane@example.com"
+candidate_phone = "+91-90000-00000"
+linkedin_url = ""
+portfolio_url = ""
