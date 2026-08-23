@@ -247,3 +247,28 @@ def test_mark_applied_uses_the_tailored_resume_when_one_exists(conn):
     row = conn.execute("SELECT resume_version FROM application"
                        " WHERE job_id = ?", (job_id,)).fetchone()
     assert row["resume_version"] == "tailored-1-r1"
+
+
+def test_qa_normalize_collapses_punctuation_and_case(conn):
+    assert store.qa_normalize("Notice period?") == store.qa_normalize("notice period")
+
+
+def test_qa_lookup_returns_none_for_an_unseen_question(conn):
+    assert store.qa_lookup(conn, "Notice period?") is None
+
+
+def test_qa_upsert_then_lookup_round_trips(conn):
+    store.qa_upsert(conn, "Notice period?", "30 days", is_volatile=True)
+    row = store.qa_lookup(conn, "notice period")
+    assert row["answer"] == "30 days"
+    assert row["is_volatile"] == 1
+    assert row["last_confirmed_at"] is not None
+
+
+def test_qa_upsert_on_an_existing_question_overwrites_and_reconfirms(conn):
+    store.qa_upsert(conn, "Notice period?", "30 days", is_volatile=True)
+    first = store.qa_lookup(conn, "notice period")["last_confirmed_at"]
+    store.qa_upsert(conn, "Notice period?", "60 days", is_volatile=True)
+    row = store.qa_lookup(conn, "notice period")
+    assert row["answer"] == "60 days"
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 1

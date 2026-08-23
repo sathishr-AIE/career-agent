@@ -1,3 +1,4 @@
+import re
 import sqlite3
 
 from career_agent import normalize
@@ -127,6 +128,33 @@ def insert_resume(conn, job_id: int, version: str, path: str,
         return version
     except sqlite3.IntegrityError:
         return latest_resume_version(conn, job_id)
+
+
+def qa_normalize(question: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace -- just enough
+    that "Notice period?" and "notice period" collide on the same row."""
+    text = re.sub(r"[^\w\s]", "", question.lower())
+    return " ".join(text.split())
+
+
+def qa_lookup(conn, question: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM qa_bank WHERE question_normalized = ?",
+        (qa_normalize(question),)).fetchone()
+
+
+def qa_upsert(conn, question: str, answer: str, is_volatile: bool) -> None:
+    """Confirming an existing answer is itself a reconfirmation, so
+    last_confirmed_at is set unconditionally on every call, not only on
+    first insert."""
+    conn.execute(
+        "INSERT INTO qa_bank (question_normalized, answer, is_volatile,"
+        " last_confirmed_at) VALUES (?, ?, ?, datetime('now'))"
+        " ON CONFLICT(question_normalized) DO UPDATE SET"
+        "   answer = excluded.answer, is_volatile = excluded.is_volatile,"
+        "   last_confirmed_at = excluded.last_confirmed_at",
+        (qa_normalize(question), answer, int(is_volatile)))
+    conn.commit()
 
 
 def get_settings(conn) -> sqlite3.Row:
