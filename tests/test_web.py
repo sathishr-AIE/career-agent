@@ -1338,6 +1338,30 @@ def test_settings_page_rejects_a_blank_candidate_name(client, tmp_path):
     assert not target.exists()
 
 
+def test_settings_saves_the_brief_even_when_candidate_present_is_blank(
+        client, brief_path, tmp_path):
+    """Reproduces the real page's shape: settings.html renders the
+    candidate_present hidden field unconditionally (unlike brief_present,
+    which is inside its own {% if brief %} block), so a fresh install with
+    no candidate_profile.toml still posts candidate_present=1 with every
+    candidate field blank. Before the fix, that tried to build a
+    CandidateProfile from all-blank fields, raised ValidationError, and --
+    since everything validates before anything saves -- blocked the brief
+    and agent settings from saving too, even though the user never touched
+    the candidate fields."""
+    missing = tmp_path / "no_candidate_profile.toml"
+    web.CANDIDATE_PROFILE_PATH = missing
+    r = client.post("/settings", data=_form(
+        candidate_present="1", candidate_name="", candidate_email="",
+        candidate_phone="", linkedin_url="", portfolio_url=""))
+    assert r.status_code == 200
+    assert "Settings saved" in r.text
+    assert "Nothing was saved" not in r.text
+    assert not missing.exists()
+    conn = db.connect(web.DB_PATH)
+    assert store.get_settings(conn)["scoring_model"] == "claude-sonnet-5"
+
+
 def test_the_apply_activity_log_excludes_pipeline_events(client):
     conn = db.connect(web.DB_PATH)
     for i in range(12):
@@ -1751,3 +1775,88 @@ def test_run_status_shows_the_answer_needed_card(client):
     r = client.get("/run/status")
     assert "Answer needed" in r.text
     assert "Notice period?" in r.text
+
+
+def test_answering_clears_the_needs_answer_card_before_a_new_draft_lands(client):
+    """Regression guard for the stale-card race: the worker re-picks the job
+    and sets current_job_id again while it re-tailors/re-drafts (an await
+    that can take seconds), so between the answer being saved and the new
+    draft landing there is a window with current_job_id set, no draft yet,
+    and the OLD needs_answer event still on record. Without the
+    needs_answer_resolved marker, that old event is still the latest
+    matching row and the card reappears as if unanswered -- risking the
+    human re-submitting the answer and orphaning the draft the worker is
+    about to insert (see the final-review ledger)."""
+    conn = db.connect(web.DB_PATH)
+    job_id = conn.execute(
+        "INSERT INTO job (fingerprint, source, external_id, company,"
+        " company_normalized, title, title_normalized)"
+        " VALUES ('fp9','ats','9','Acme','acme','AI Engineer','aiengineer')"
+    ).lastrowid
+    worker.set_run_state(conn, "apply", status="running", mode="manual",
+                         current_job_id=job_id)
+    store.log(conn, job_id, "needs_answer", "Notice period?")
+    conn.commit()
+
+    r = client.post(f"/answer/{job_id}", data={
+        "question": "Notice period?", "answer": "30 days"})
+    assert r.status_code == 200
+
+    # The worker re-picks the same job and re-parks it before its draft
+    # lands -- no draft row exists yet, but current_job_id is set again.
+    worker.set_run_state(conn, "apply", current_job_id=job_id)
+
+    r = client.get("/run/status")
+    assert "Answer needed" not in r.text
+    # The activity log below the status card legitimately keeps showing the
+    # old needs_answer event as history -- only the live "Answer needed"
+    # card (and its re-submit form) must be gone, so this checks for the
+    # form's distinguishing input rather than the question text, which the
+    # log line also contains.
+    assert 'name="question"' not in r.text
+
+
+def test_run_status_shows_the_drafted_answers(client):
+    """The README's whole pre-flip verification procedure -- draft against a
+    real posting, check what the filler produced, before ever flipping
+    SUBMISSION_IMPLEMENTED -- needs the drafted answers visible somewhere.
+    Nothing else in the dashboard shows application.answers."""
+    conn = db.connect(web.DB_PATH)
+    job_id = conn.execute(
+        "INSERT INTO job (fingerprint, source, external_id, company,"
+        " company_normalized, title, title_normalized)"
+        " VALUES ('fp9','ats','9','Acme','acme','AI Engineer','aiengineer')"
+    ).lastrowid
+    conn.execute("INSERT INTO application (job_id, resume_version, answers,"
+                 " status) VALUES (?, 'base-v1', ?, 'draft')",
+                 (job_id, json.dumps({"#first_name": "Jane"})))
+    worker.set_run_state(conn, "apply", status="running", mode="manual",
+                         current_job_id=job_id)
+    conn.commit()
+
+    r = client.get("/run/status")
+    assert "#first_name" in r.text
+    assert "Jane" in r.text
+
+
+def test_do_apply_needs_answer_parks_the_run_so_the_card_shows(client, monkeypatch):
+    """_do_apply (the Apply/Override button) tells the user to 'see the
+    status card below' on a needs_answer result, but never set
+    current_job_id itself -- so the card it points at wasn't rendered
+    unless the run happened to already be parked on that exact job."""
+    async def needs_answer(conn, job_id, dry_run, brief=None, profile=None,
+                           resume_version=None):
+        return {"ok": False, "needs_answer": "Notice period?",
+                "reason": "needs an answer: Notice period?"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", needs_answer)
+    r = client.post("/apply/1")
+    assert r.status_code == 200
+    assert "Answer needed" in r.text
+
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["current_job_id"] == 1
+
+    status = client.get("/run/status")
+    assert "Answer needed" in status.text
+    assert "Notice period?" in status.text

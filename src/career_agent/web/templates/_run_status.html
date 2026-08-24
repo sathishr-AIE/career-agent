@@ -46,6 +46,9 @@
               hx-target="#run-status" hx-swap="outerHTML">Send</button>
       <button class="btn" hx-post="/queue/{{ current_job['job_id'] }}/skip"
               hx-target="#run-status" hx-swap="outerHTML">Skip</button>
+      {% if draft_answers %}
+      <pre class="draft-answers">{{ draft_answers | tojson(indent=2) }}</pre>
+      {% endif %}
     {% else %}
       <span class="rationale">Applying…</span>
     {% endif %}

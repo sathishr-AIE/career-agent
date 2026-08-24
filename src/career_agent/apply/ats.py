@@ -41,7 +41,13 @@ class NeedsAnswer(Exception):
 class FormField(BaseModel):
     """One custom question read off a live Greenhouse form. Standard
     fields (name/email/phone/resume/links) never appear here -- they're
-    answered directly from CandidateProfile before resolve_answers runs."""
+    answered directly from CandidateProfile before resolve_answers runs.
+    locator is a group selector (e.g. "[name='...']") for a radio/checkbox
+    question, or an id selector for anything else -- see
+    _read_custom_questions and _fill_field, which dispatch on the live
+    element rather than on any kind recorded here, since draft time and
+    send time are two separate page loads and answers are stored as a
+    flat locator->value dict with no room for extra metadata."""
     label: str
     locator: str
 
@@ -51,12 +57,14 @@ QA_VOLATILE_WINDOW_DAYS = 30
 
 def _confirmed_within_days(last_confirmed_at: str, days: int) -> bool:
     """last_confirmed_at is a SQLite datetime('now') string: naive, UTC.
-    Comparing against dt.datetime.utcnow() (also naive UTC) keeps both
-    sides in the same clock -- this project has hit local-vs-UTC datetime
-    mismatches as a recurring bug before, so this stays naive-UTC on
-    purpose rather than using a timezone-aware "now"."""
-    confirmed = dt.datetime.strptime(last_confirmed_at, "%Y-%m-%d %H:%M:%S")
-    return (dt.datetime.utcnow() - confirmed) <= dt.timedelta(days=days)
+    Comparing against a naive-UTC "now" keeps both sides in the same clock --
+    this project has hit local-vs-UTC datetime mismatches as a recurring bug
+    before, so this stays naive-UTC on purpose rather than using a
+    timezone-aware "now" (dt.datetime.now(dt.UTC).replace(tzinfo=None) is
+    just dt.datetime.utcnow() without the deprecation warning)."""
+    confirmed = dt.datetime.fromisoformat(last_confirmed_at)
+    now = dt.datetime.now(dt.UTC).replace(tzinfo=None)
+    return (now - confirmed) <= dt.timedelta(days=days)
 
 
 def resolve_answers(questions: list[FormField], conn) -> dict[str, str]:
@@ -93,7 +101,13 @@ def _split_name(candidate_name: str) -> tuple[str, str]:
 # Verify these against a real live Greenhouse posting before flipping
 # SUBMISSION_IMPLEMENTED -- they were not confirmed against a rendered
 # page from this environment, and Greenhouse has iterated its embed
-# markup before. This dict is the one place to fix them if they're wrong.
+# markup before. This dict is the most likely thing to need fixing, but
+# it is not the ONLY unverified assumption in this file: the custom
+# question container selector in _read_custom_questions
+# (".field:has(label)"), the submit-button selector in
+# _default_fill_and_submit ("button[type=submit], input[type=submit]"),
+# and the #resume file-upload call are equally unverified against a live
+# posting and live outside this dict.
 GREENHOUSE_STANDARD_FIELD_SELECTORS = {
     "first_name": "#first_name",
     "last_name": "#last_name",
@@ -114,7 +128,16 @@ async def _check_for_captcha(page, url: str) -> None:
 async def _read_custom_questions(page) -> list[FormField]:
     """Scan the form for label+input pairs beyond Greenhouse's standard
     fields. Not unit tested -- see the plan's "Deviations from the spec"
-    note; verify against a real posting before trusting this."""
+    note; verify against a real posting before trusting this.
+
+    A radio/checkbox question is a group of same-`name` inputs, not one
+    element with one id -- an id-selector locator would only ever let
+    _fill_field see (and .check()) the first option, never the one whose
+    value actually matches the stored answer. So a radio/checkbox group's
+    FormField.locator is a `[name='...']` group selector instead of an id
+    selector; _fill_field narrows it to the right option at fill time.
+    <select> and text-like inputs/textareas keep the id selector, which
+    already names exactly one element."""
     standard = set(GREENHOUSE_STANDARD_FIELD_SELECTORS.values())
     fields = []
     for container in await page.locator(".field:has(label)").all():
@@ -126,7 +149,16 @@ async def _read_custom_questions(page) -> list[FormField]:
             continue  # a standard field, already answered from the profile
         label_el = container.locator("label").first
         label = (await label_el.inner_text()).strip()
-        fields.append(FormField(label=label, locator=f"#{field_id}"))
+        input_type = (await input_el.get_attribute("type") or "").lower()
+        if input_type in ("radio", "checkbox"):
+            name = await input_el.get_attribute("name")
+            if not name:
+                continue  # can't build a group selector; leave unanswered
+                          # rather than mis-fill only the first option
+            locator = f"[name='{name}']"
+        else:
+            locator = f"#{field_id}"
+        fields.append(FormField(label=label, locator=locator))
     return fields
 
 
@@ -154,22 +186,51 @@ async def _default_compute_answers(url: str, job, brief, profile,
 
             first_name, last_name = _split_name(profile.candidate_name)
             sel = GREENHOUSE_STANDARD_FIELD_SELECTORS
-            answers = {
+            answers = {}
+            # Every standard field gets the same existence guard -- a
+            # posting missing one of them (e.g. no phone field) must not
+            # produce a stored answer whose selector matches nothing, which
+            # would time out at real-send time rather than at draft time.
+            candidates = {
                 sel["first_name"]: first_name,
                 sel["last_name"]: last_name,
                 sel["email"]: profile.candidate_email,
                 sel["phone"]: profile.candidate_phone,
+                sel["linkedin_url"]: profile.linkedin_url,
+                sel["portfolio_url"]: profile.portfolio_url,
             }
-            if profile.linkedin_url and await page.locator(sel["linkedin_url"]).count():
-                answers[sel["linkedin_url"]] = profile.linkedin_url
-            if profile.portfolio_url and await page.locator(sel["portfolio_url"]).count():
-                answers[sel["portfolio_url"]] = profile.portfolio_url
+            for selector, value in candidates.items():
+                if value and await page.locator(selector).count():
+                    answers[selector] = value
 
             questions = await _read_custom_questions(page)
             answers.update(resolve_answers(questions, conn))
             return answers
         finally:
             await browser.close()
+
+
+async def _fill_field(page, locator: str, value) -> None:
+    """Dispatch by the live element's actual kind, not by anything recorded
+    at draft time (draft time and send time are two separate page loads).
+    Playwright's .fill() only works on a text-like <input>/<textarea>; it
+    raises on <select> and only ever touches the first element of a
+    radio/checkbox group, never the one matching the stored answer -- so
+    calling it unconditionally on every answer (the old behavior) would
+    error or silently mis-fill as soon as a form has one of those."""
+    field = page.locator(locator).first
+    tag = await field.evaluate("el => el.tagName.toLowerCase()")
+    if tag == "select":
+        await field.select_option(str(value))
+        return
+    input_type = (await field.get_attribute("type") or "").lower()
+    if input_type in ("radio", "checkbox"):
+        # locator is a `[name='...']` group selector here (see
+        # _read_custom_questions); narrow it to the option whose value
+        # matches the stored answer before checking it.
+        await page.locator(f"{locator}[value={json.dumps(str(value))}]").check()
+        return
+    await field.fill(str(value))
 
 
 async def _default_fill_and_submit(url: str, answers: dict, resume_path) -> None:
@@ -186,7 +247,7 @@ async def _default_fill_and_submit(url: str, answers: dict, resume_path) -> None
             await _check_for_captcha(page, url)
 
             for locator, value in answers.items():
-                await page.locator(locator).fill(str(value))
+                await _fill_field(page, locator, value)
             await page.locator(
                 GREENHOUSE_STANDARD_FIELD_SELECTORS["resume"]
             ).set_input_files(str(resume_path))
@@ -282,7 +343,8 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
             return {"ok": False, "held": True,
                     "reason": "captcha encountered; held for review"}
         except NeedsAnswer as exc:
-            return {"ok": False, "needs_answer": exc.question}
+            return {"ok": False, "needs_answer": exc.question,
+                    "reason": f"needs an answer: {exc.question}"}
         conn.execute(
             "INSERT INTO application (job_id, resume_version, answers, status)"
             " VALUES (?, ?, ?, 'draft')",
@@ -301,6 +363,14 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
         " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
     send_fn = fill_and_submit or _default_fill_and_submit
     if draft is not None and draft["answers"] is not None:
+        # Reused verbatim, with no re-check of qa_bank's 30-day volatility
+        # window (resolve_answers's QA_VOLATILE_WINDOW_DAYS) even if the
+        # draft is older than that window and a volatile answer it used has
+        # since gone stale. This is a real tension, not an oversight:
+        # revalidating volatility here would contradict the whole point of
+        # reuse -- "what a human reviewed (or what auto mode drafted a
+        # moment ago) is exactly what gets sent" -- by silently sending
+        # different answers than what was shown for review. Reuse wins.
         answers = json.loads(draft["answers"])
     elif compute_answers is not None:
         # No draft on record, but the caller supplied its own
@@ -314,7 +384,8 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
             return {"ok": False, "held": True,
                     "reason": "captcha encountered; held for review"}
         except NeedsAnswer as exc:
-            return {"ok": False, "needs_answer": exc.question}
+            return {"ok": False, "needs_answer": exc.question,
+                    "reason": f"needs an answer: {exc.question}"}
     else:
         # No draft and no caller override: apply_tick's normal flow always
         # drafts before it sends, so this is only reached by a caller that

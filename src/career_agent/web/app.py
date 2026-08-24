@@ -254,6 +254,13 @@ async def _do_apply(job_id: int, allow_skip: bool, event: str | None):
         return HTMLResponse(f'<span class="denied">{escape(str(exc))}</span>')
     if result.get("needs_answer"):
         store.log(conn, job_id, "needs_answer", result["needs_answer"])
+        # _run_status_context only renders the "Answer needed" card when
+        # current_job_id names this job -- apply_tick sets that as part of
+        # its own needs_answer handling, but _do_apply (the Apply/Override
+        # button) never did, so the message below pointed at a card that
+        # usually wasn't there unless the run happened to already be parked
+        # on this exact job.
+        worker.set_run_state(conn, "apply", current_job_id=job_id)
         return HTMLResponse(
             f'<span class="denied">Answer needed: '
             f'{escape(result["needs_answer"])} — see the status card below.</span>')
@@ -289,6 +296,11 @@ def answer_question(job_id: int, question: str = Form(...),
                     is_volatile: str | None = Form(None)):
     conn = _conn()
     store.qa_upsert(conn, question, answer.strip(), is_volatile=bool(is_volatile))
+    # Distinguishable from the needs_answer event that parked the job, so
+    # _run_status_context can tell "still needs an answer" apart from
+    # "already answered, draft not back yet" -- see its comment for the
+    # race this closes.
+    store.log(conn, job_id, "needs_answer_resolved")
     _unpark(conn, job_id)
     return HTMLResponse('<span class="done">Answer saved</span>')
 
@@ -420,17 +432,33 @@ def _run_status_context(conn) -> dict:
     state = worker.get_run_state(conn, "apply")
     current_job = None
     needs_answer_question = None
+    draft_answers = None
     if state["current_job_id"]:
         current_job = conn.execute(
             "SELECT j.id AS job_id, j.company, j.title FROM job j"
             " WHERE j.id = ?", (state["current_job_id"],)).fetchone()
-        has_draft = conn.execute(
-            "SELECT 1 FROM application WHERE job_id = ? AND status = 'draft'",
-            (state["current_job_id"],)).fetchone()
-        if not has_draft:
+        draft = conn.execute(
+            "SELECT answers FROM application WHERE job_id = ? AND status = 'draft'"
+            " ORDER BY id DESC LIMIT 1", (state["current_job_id"],)).fetchone()
+        if draft is not None:
+            if draft["answers"] is not None:
+                draft_answers = json.loads(draft["answers"])
+        else:
+            # Only show the card if the most recent needs_answer event for
+            # this job is newer than the most recent needs_answer_resolved
+            # event for it (or nothing has resolved it yet). Without this,
+            # answering re-parks a stale "Answer needed" card during the
+            # window between the worker re-picking the job (setting
+            # current_job_id again) and its draft actually landing: the old
+            # needs_answer event is still the latest matching row, so the
+            # already-answered question appears to still be open. See the
+            # final-review ledger for the full race and its consequences.
             row = conn.execute(
                 "SELECT payload FROM event WHERE job_id = ? AND type = 'needs_answer'"
-                " ORDER BY id DESC LIMIT 1", (state["current_job_id"],)).fetchone()
+                " AND id > COALESCE((SELECT MAX(id) FROM event"
+                "                     WHERE job_id = ? AND type = 'needs_answer_resolved'), 0)"
+                " ORDER BY id DESC LIMIT 1",
+                (state["current_job_id"], state["current_job_id"])).fetchone()
             needs_answer_question = row["payload"] if row else None
     submitted = conn.execute(
         "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
@@ -465,7 +493,8 @@ def _run_status_context(conn) -> dict:
         " ORDER BY id DESC LIMIT 10").fetchall()
     return {"run_state": state, "current_job": current_job, "stats": stats,
             "recent_events": recent_events,
-            "needs_answer_question": needs_answer_question}
+            "needs_answer_question": needs_answer_question,
+            "draft_answers": draft_answers}
 
 
 @app.get("/run/status", response_class=HTMLResponse)
@@ -803,8 +832,21 @@ def settings_save(request: Request,
             remote_ok, salary_floor_inr, daily_cap_n, gate_threshold_n,
             staleness_days_n, errors)
 
+    # settings.html renders the candidate_present hidden field
+    # unconditionally (unlike brief_present, which only appears inside its
+    # own {% if brief %} block) -- so on any install missing
+    # candidate_profile.toml (every fresh install; it's gitignored), the
+    # Candidate Profile panel shows blank fields but candidate_present still
+    # posts truthy. Building a CandidateProfile from all-blank fields would
+    # raise ValidationError (min_length=1) and, since everything is
+    # validated before anything is written, that would block saving the
+    # Career Brief and Agent Settings sections too -- even though the user
+    # never touched the candidate fields. Only attempt the build when the
+    # user actually put something in at least one candidate field.
     candidate = None
-    if candidate_present:
+    if candidate_present and any((candidate_name, candidate_email,
+                                  candidate_phone, linkedin_url,
+                                  portfolio_url)):
         try:
             candidate = CandidateProfile(
                 candidate_name=candidate_name, candidate_email=candidate_email,
