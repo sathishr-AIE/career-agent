@@ -2,9 +2,12 @@ import datetime as dt
 import json
 import logging
 import sqlite3
-from typing import Awaitable, Callable
+from pathlib import Path
 
 from pydantic import BaseModel
+
+from career_agent.config import CandidateProfile, CareerBrief
+from career_agent.models import Job
 
 log = logging.getLogger(__name__)
 
@@ -12,15 +15,12 @@ RESUME_VERSION = "base-v1"
 MAX_ATTEMPTS = 3
 BLOCKING = ("in_flight", "submitted", "held_unknown", "failed_permanent")
 
-# Auto-submission is v3, gated on tailoring plus outcome evidence, and Naukri
-# submission is not planned at all -- see the Deferred section of
-# docs/superpowers/specs/2026-08-18-career-agent-v1-design.md. Until a real
-# filler exists, _default_filler opens the page and returns a hardcoded dict
-# without touching the form, so a real send would mark the row 'submitted'
-# having sent nothing. That false row is not merely cosmetic: it lands in the
-# callback-rate denominator, and derive_no_response would later stamp it
-# 'no_response'. Callback data is exactly the evidence the v1 -> v2 gate turns
-# on, so poisoning it costs more than the missing feature does.
+# Real Greenhouse automation exists (see _default_compute_answers /
+# _default_fill_and_submit below), but a real send stays refused until
+# this is flipped by hand -- see the "Rollout" section of
+# docs/superpowers/specs/2026-08-23-auto-submission-design.md. Flipping it
+# has no effect on non-Greenhouse jobs, which submit() refuses
+# unconditionally regardless of this flag.
 SUBMISSION_IMPLEMENTED = False
 
 
@@ -228,17 +228,36 @@ def sweep_stale_in_flight(conn: sqlite3.Connection, minutes: int = 15) -> int:
 
 
 async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
-                 filler: Callable[[str], Awaitable[dict]] | None = None,
+                 brief: CareerBrief | None = None,
+                 profile: CandidateProfile | None = None,
+                 compute_answers=None, fill_and_submit=None,
                  resume_version: str | None = None) -> dict:
-    # Refuse a real send on the stub filler, before anything is written. An
-    # injected filler means a caller supplied a real one (or a test double),
-    # so it is allowed through; only the _default_filler path is blocked.
-    if not dry_run and filler is None and not SUBMISSION_IMPLEMENTED:
-        # `unsupported` marks this refusal categorical, not transient: no
-        # retry can make it succeed, so callers can stop waiting on this job.
-        return {"ok": False, "unsupported": True, "reason":
-                "Submission is not implemented yet (planned for v3; Naukri "
-                "never). Apply on the site yourself, then record the outcome."}
+    row = conn.execute("SELECT * FROM job WHERE id = ?", (job_id,)).fetchone()
+    if row is None:
+        return {"ok": False, "reason": f"job {job_id} not found"}
+    is_greenhouse = row["source"] == "ats"
+    job = Job(source=row["source"], external_id=row["external_id"],
+              company=row["company"], title=row["title"],
+              location=row["location"], is_remote=bool(row["is_remote"]),
+              comp_min=row["comp_min"], comp_max=row["comp_max"],
+              posted_at=row["posted_at"], url=row["url"],
+              description=row["description"])
+
+    # Refuse a real send with no injected override, before anything is
+    # written. Greenhouse jobs are refused only while SUBMISSION_IMPLEMENTED
+    # is False (the manual, later "trust it" decision -- see the spec's
+    # Rollout section). Every other source is refused unconditionally: no
+    # filler exists for "some other website" and none is built in this round.
+    if not dry_run and fill_and_submit is None:
+        if not is_greenhouse:
+            return {"ok": False, "unsupported": True, "reason":
+                    "Submission automation only exists for Greenhouse jobs"
+                    " today. Apply on the site yourself, then record the"
+                    " outcome."}
+        if not SUBMISSION_IMPLEMENTED:
+            return {"ok": False, "unsupported": True, "reason":
+                    "The Greenhouse filler is built but not enabled yet."
+                    " Apply on the site yourself, then record the outcome."}
 
     live = conn.execute(
         f"SELECT status FROM application WHERE job_id = ? AND status IN "
@@ -247,21 +266,70 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
         return {"ok": False,
                 "reason": f"job {job_id} already has a {live['status']} attempt"}
 
-    row = conn.execute("SELECT url FROM job WHERE id = ?", (job_id,)).fetchone()
-    if row is None:
-        return {"ok": False, "reason": f"job {job_id} not found"}
-
-    filler = filler or _default_filler
     resume_version = resume_version or RESUME_VERSION
 
+    def _default_compute_fn():
+        return _default_compute_answers if is_greenhouse else _generic_stub_compute_answers
+
     if dry_run:
-        answers = await filler(row["url"])
+        compute_fn = compute_answers or _default_compute_fn()
+        try:
+            answers = await compute_fn(row["url"], job, brief, profile, conn)
+        except CaptchaEncountered as exc:
+            conn.execute("INSERT INTO event (job_id, type, payload)"
+                         " VALUES (?, 'captcha_held', ?)", (job_id, str(exc)))
+            conn.commit()
+            return {"ok": False, "held": True,
+                    "reason": "captcha encountered; held for review"}
+        except NeedsAnswer as exc:
+            return {"ok": False, "needs_answer": exc.question}
         conn.execute(
             "INSERT INTO application (job_id, resume_version, answers, status)"
             " VALUES (?, ?, ?, 'draft')",
             (job_id, resume_version, json.dumps(answers)))
         conn.commit()
         return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    # Real send: reuse the draft's own answers rather than recomputing --
+    # what a human reviewed (or what auto mode drafted a moment earlier) is
+    # exactly what must be sent. Only falls back to computing fresh when
+    # submit() is called directly with no draft on record (not reachable
+    # through apply_tick's normal path, but submit() stays safe to call
+    # this way).
+    draft = conn.execute(
+        "SELECT answers FROM application WHERE job_id = ? AND status = 'draft'"
+        " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+    send_fn = fill_and_submit or _default_fill_and_submit
+    if draft is not None and draft["answers"] is not None:
+        answers = json.loads(draft["answers"])
+    elif compute_answers is not None:
+        # No draft on record, but the caller supplied its own
+        # compute_answers -- honor it rather than silently sending nothing.
+        try:
+            answers = await compute_answers(row["url"], job, brief, profile, conn)
+        except CaptchaEncountered as exc:
+            conn.execute("INSERT INTO event (job_id, type, payload)"
+                         " VALUES (?, 'captcha_held', ?)", (job_id, str(exc)))
+            conn.commit()
+            return {"ok": False, "held": True,
+                    "reason": "captcha encountered; held for review"}
+        except NeedsAnswer as exc:
+            return {"ok": False, "needs_answer": exc.question}
+    else:
+        # No draft and no caller override: apply_tick's normal flow always
+        # drafts before it sends, so this is only reached by a caller that
+        # invokes submit(dry_run=False) directly. Silently launching the
+        # real Greenhouse/generic filler here -- a live browser, needing a
+        # profile the caller never supplied -- would be a surprising side
+        # effect of a missing draft, not a safety net, so this sends with
+        # no extra answers rather than guessing which default to run.
+        answers = {}
+
+    resume_row = conn.execute("SELECT path FROM resume WHERE version = ?",
+                              (resume_version,)).fetchone()
+    if resume_row is None:
+        return {"ok": False,
+                "reason": f"no résumé on record for version {resume_version!r}"}
 
     cur = conn.execute(
         "INSERT INTO application (job_id, resume_version, status, started_at)"
@@ -270,12 +338,7 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
     conn.commit()
 
     try:
-        # ponytail: re-runs the filler independently instead of reusing the
-        # draft's stored answers; harmless while _default_filler always
-        # returns the same static dict regardless of dry_run, but once the
-        # filler is real this needs to read the draft's `answers` column so
-        # Send commits exactly what the human reviewed, not a fresh fill.
-        answers = await filler(row["url"])
+        await send_fn(row["url"], answers, Path(resume_row["path"]))
     except CaptchaEncountered as exc:
         conn.execute("DELETE FROM application WHERE id = ?", (app_id,))
         conn.execute("INSERT INTO event (job_id, type, payload)"
