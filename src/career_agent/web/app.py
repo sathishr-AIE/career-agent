@@ -198,6 +198,11 @@ def applications(request: Request, show: str = "queue"):
             "outcome": outcomes.effective_outcome(conn, r["id"]),
         }
 
+    tailored_sent = conn.execute(
+        "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
+        " AND resume_version LIKE 'tailored-%'").fetchone()["n"]
+    outcomes_recorded = conn.execute("SELECT COUNT(*) n FROM outcome").fetchone()["n"]
+
     return templates.TemplateResponse(
         request=request, name="applications.html",
         context={"jobs": rows if show != "skipped" else all_rows,
@@ -210,6 +215,9 @@ def applications(request: Request, show: str = "queue"):
                  "manual_types": outcomes.MANUAL_TYPES,
                  "outcome_labels": overview.CALLBACK_LABELS,
                  "today": _utc_today().isoformat(),  # see _utc_today
+                 "submission_implemented": ats_apply.SUBMISSION_IMPLEMENTED,
+                 "tailored_sent": tailored_sent,
+                 "outcomes_recorded": outcomes_recorded,
                  # first paint of the polled fragment, so the page ships the
                  # real status (and the mode toggle) instead of "Loading…"
                  **_run_status_context(conn)})

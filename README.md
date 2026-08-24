@@ -97,6 +97,31 @@ Two commands, via the `career-agent` console script (`--help` for all flags):
 
 Per-role tailoring (the first Apply click on a job) needs a master resume at `resume/master.docx`. It must contain two literal marker paragraphs: `<<SUMMARY>>` (a paragraph whose text gets replaced with the tailored summary) and `<<PROJECT_BULLET>>` (a bullet-styled paragraph cloned once per selected fact, then removed). Everything else in the template — header, contact info, education, layout — is left untouched.
 
+## Real Greenhouse submission (v3)
+
+`career_agent/apply/ats.py` includes a real Greenhouse form-filler, but
+`SUBMISSION_IMPLEMENTED` ships `False` — nothing sends for real until you
+flip that constant by hand, after you've verified it against real postings.
+
+Setup:
+
+1. Copy `candidate_profile.toml.example` to `candidate_profile.toml` and
+   fill in your real name, email, and phone (this file is gitignored).
+2. Use manual mode's draft step (Apply, not Send) against a few real
+   Greenhouse postings first. Drafting is safe with the flag off — it runs
+   the real filler and shows you exactly what it would send, with zero
+   real applications going out.
+3. Check `career_agent/apply/ats.py`'s `GREENHOUSE_STANDARD_FIELD_SELECTORS`
+   dict against what you actually see in those drafts. These selectors were
+   not verified against a live Greenhouse posting during development —
+   Greenhouse has changed its embed markup before, and this is the one
+   place to fix it if the field ids are wrong.
+4. Only once you trust the drafts, flip `SUBMISSION_IMPLEMENTED = True`.
+
+Questions the filler can't answer (no `qa_bank` entry, or a stale volatile
+one) show up as "Answer needed" on the Applications page's status card —
+answer once, and it's remembered for every future application via `qa_bank`.
+
 ### Roadmap
 
 This is the roadmap as built, from

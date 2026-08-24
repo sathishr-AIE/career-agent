@@ -14,6 +14,14 @@
                 {% if run_state["mode"] == "auto" %}checked{% endif %}> Auto</label>
 </span>
 
+{% if submission_implemented %}
+<p class="rationale">
+  {{ tailored_sent }} tailored applications sent so far, {{ outcomes_recorded }}
+  outcomes recorded — the original plan for this feature said to wait for real
+  evidence tailored applications convert before trusting this.
+</p>
+{% endif %}
+
 <!-- innerHTML, not outerHTML: the polling element must survive its own swap,
      or htmx drops it from the DOM and the poll never fires again. -->
 <div id="run-status-poller" hx-get="/run/status" hx-trigger="load, every 2s"

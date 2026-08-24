@@ -623,6 +623,18 @@ def test_applications_page_shows_career_brief_panel(client):
     assert "Career Brief" in r.text
 
 
+def test_applications_page_shows_no_rollout_note_while_flag_is_off(client):
+    r = client.get("/applications")
+    assert "outcomes recorded" not in r.text
+
+
+def test_applications_page_shows_the_rollout_note_once_the_flag_is_on(
+        client, monkeypatch):
+    monkeypatch.setattr(web.ats_apply, "SUBMISSION_IMPLEMENTED", True)
+    r = client.get("/applications")
+    assert "outcomes recorded" in r.text
+
+
 def test_failed_skipped_counts_gate_skips_until_they_are_overridden(client, monkeypatch):
     """Job 2 is a skip nobody acted on -- 'Failed/Skipped' should say so
     instead of reporting 0 until an application actually fails."""
