@@ -1,7 +1,10 @@
+import datetime as dt
 import json
 import logging
 import sqlite3
 from typing import Awaitable, Callable
+
+from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +27,58 @@ SUBMISSION_IMPLEMENTED = False
 class CaptchaEncountered(Exception):
     """The site showed a captcha, so it has already classified this session as
     suspicious. Backing off is cheaper than pushing through."""
+
+
+class NeedsAnswer(Exception):
+    """A form question has no candidate-profile field and no usable
+    qa_bank entry. Raised by resolve_answers; callers must park the job
+    rather than retry immediately -- see worker.apply_tick's handling."""
+    def __init__(self, question: str):
+        super().__init__(question)
+        self.question = question
+
+
+class FormField(BaseModel):
+    """One custom question read off a live Greenhouse form. Standard
+    fields (name/email/phone/resume/links) never appear here -- they're
+    answered directly from CandidateProfile before resolve_answers runs."""
+    label: str
+    locator: str
+
+
+QA_VOLATILE_WINDOW_DAYS = 30
+
+
+def _confirmed_within_days(last_confirmed_at: str, days: int) -> bool:
+    """last_confirmed_at is a SQLite datetime('now') string: naive, UTC.
+    Comparing against dt.datetime.utcnow() (also naive UTC) keeps both
+    sides in the same clock -- this project has hit local-vs-UTC datetime
+    mismatches as a recurring bug before, so this stays naive-UTC on
+    purpose rather than using a timezone-aware "now"."""
+    confirmed = dt.datetime.strptime(last_confirmed_at, "%Y-%m-%d %H:%M:%S")
+    return (dt.datetime.utcnow() - confirmed) <= dt.timedelta(days=days)
+
+
+def resolve_answers(questions: list[FormField], conn) -> dict[str, str]:
+    """Pure decision logic, no Playwright: for each custom question, use a
+    qa_bank hit if it exists and (when volatile) was confirmed inside the
+    reconfirmation window; otherwise raise NeedsAnswer. This project does
+    not attempt to answer a question from the facts store automatically
+    (see the plan's "Deviations from the spec" note) -- every custom
+    question goes through qa_bank only."""
+    from career_agent import store  # local: store.py imports this module
+                                     # (for RESUME_VERSION), so a top-level
+                                     # import here would be circular.
+    answers = {}
+    for q in questions:
+        row = store.qa_lookup(conn, q.label)
+        if row is None:
+            raise NeedsAnswer(q.label)
+        if row["is_volatile"] and not _confirmed_within_days(
+                row["last_confirmed_at"], QA_VOLATILE_WINDOW_DAYS):
+            raise NeedsAnswer(q.label)
+        answers[q.locator] = row["answer"]
+    return answers
 
 
 async def _default_filler(url: str) -> dict:

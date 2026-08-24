@@ -1,6 +1,8 @@
+import datetime as dt
+
 import pytest
 
-from career_agent import db
+from career_agent import db, store
 from career_agent.apply import ats as ats_apply
 
 
@@ -137,3 +139,44 @@ async def test_real_submission_stores_the_given_resume_version(conn):
     assert out["ok"] is True
     row = conn.execute("SELECT resume_version FROM application").fetchone()
     assert row["resume_version"] == "tailored-1-r1"
+
+
+def test_resolve_answers_uses_a_qa_bank_hit(conn):
+    store.qa_upsert(conn, "Why this company?", "Great mission fit", is_volatile=False)
+    questions = [ats_apply.FormField(label="Why this company?", locator="#q1")]
+    answers = ats_apply.resolve_answers(questions, conn)
+    assert answers == {"#q1": "Great mission fit"}
+
+
+def test_resolve_answers_raises_needs_answer_with_no_qa_bank_entry(conn):
+    questions = [ats_apply.FormField(label="Notice period?", locator="#q1")]
+    with pytest.raises(ats_apply.NeedsAnswer) as exc:
+        ats_apply.resolve_answers(questions, conn)
+    assert exc.value.question == "Notice period?"
+
+
+def test_resolve_answers_uses_a_fresh_volatile_answer(conn):
+    store.qa_upsert(conn, "Current CTC?", "12 LPA", is_volatile=True)
+    questions = [ats_apply.FormField(label="Current CTC?", locator="#q1")]
+    answers = ats_apply.resolve_answers(questions, conn)
+    assert answers == {"#q1": "12 LPA"}
+
+
+def test_resolve_answers_treats_a_stale_volatile_answer_as_missing(conn):
+    store.qa_upsert(conn, "Current CTC?", "12 LPA", is_volatile=True)
+    conn.execute("UPDATE qa_bank SET last_confirmed_at = datetime('now', '-31 days')"
+                 " WHERE question_normalized = ?", (store.qa_normalize("Current CTC?"),))
+    conn.commit()
+    questions = [ats_apply.FormField(label="Current CTC?", locator="#q1")]
+    with pytest.raises(ats_apply.NeedsAnswer):
+        ats_apply.resolve_answers(questions, conn)
+
+
+def test_resolve_answers_accepts_a_volatile_answer_confirmed_29_days_ago(conn):
+    store.qa_upsert(conn, "Current CTC?", "12 LPA", is_volatile=True)
+    conn.execute("UPDATE qa_bank SET last_confirmed_at = datetime('now', '-29 days')"
+                 " WHERE question_normalized = ?", (store.qa_normalize("Current CTC?"),))
+    conn.commit()
+    questions = [ats_apply.FormField(label="Current CTC?", locator="#q1")]
+    answers = ats_apply.resolve_answers(questions, conn)
+    assert answers == {"#q1": "12 LPA"}
