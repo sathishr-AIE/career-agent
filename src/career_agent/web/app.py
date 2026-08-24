@@ -14,12 +14,15 @@ from pydantic import ValidationError
 
 from career_agent import db, outcomes, store, tailor
 from career_agent.apply import ats as ats_apply
-from career_agent.config import (MODEL_LABELS, SCORING_MODELS, CareerBrief,
-                                 load_brief, save_brief)
+from career_agent.config import (MODEL_LABELS, SCORING_MODELS,
+                                 CandidateProfile, CareerBrief, load_brief,
+                                 load_candidate_profile, save_brief,
+                                 save_candidate_profile)
 from career_agent.web import overview, pipeline, worker
 
 DB_PATH = Path("data/career.db")
 BRIEF_PATH = Path("career_brief.toml")
+CANDIDATE_PROFILE_PATH = Path("candidate_profile.toml")
 
 
 # asyncio only holds a weak reference to a running task, so a fire-and-forget
@@ -37,7 +40,8 @@ async def lifespan(app: FastAPI):
     if worker.get_run_state(conn, "pipeline")["status"] == "running":
         worker.set_run_state(conn, "pipeline", status="error",
                              last_error="Interrupted by a server restart.")
-    task = asyncio.create_task(worker.apply_worker_loop(_conn, BRIEF_PATH))
+    task = asyncio.create_task(
+        worker.apply_worker_loop(_conn, BRIEF_PATH, CANDIDATE_PROFILE_PATH))
     yield
     task.cancel()
 
@@ -211,6 +215,13 @@ def applications(request: Request, show: str = "queue"):
                  **_run_status_context(conn)})
 
 
+def _load_candidate_profile_or_none(path: Path) -> CandidateProfile | None:
+    try:
+        return load_candidate_profile(path)
+    except FileNotFoundError:
+        return None
+
+
 async def _do_apply(job_id: int, allow_skip: bool, event: str | None):
     conn = _conn()
     denial = worker.guard(conn, job_id, allow_skip=allow_skip, brief_path=BRIEF_PATH)
@@ -225,11 +236,19 @@ async def _do_apply(job_id: int, allow_skip: bool, event: str | None):
     except Exception as exc:
         return HTMLResponse(f'<span class="denied">{escape(str(exc))}</span>')
 
+    brief = load_brief(BRIEF_PATH)
+    profile = _load_candidate_profile_or_none(CANDIDATE_PROFILE_PATH)
     try:
         result = await ats_apply.submit(conn, job_id, dry_run=True,
+                                        brief=brief, profile=profile,
                                         resume_version=resume_version)
     except Exception as exc:
         return HTMLResponse(f'<span class="denied">{escape(str(exc))}</span>')
+    if result.get("needs_answer"):
+        store.log(conn, job_id, "needs_answer", result["needs_answer"])
+        return HTMLResponse(
+            f'<span class="denied">Answer needed: '
+            f'{escape(result["needs_answer"])} — see the status card below.</span>')
     if not result["ok"]:
         return HTMLResponse(f'<span class="denied">{escape(result["reason"])}</span>')
     return HTMLResponse('<span class="done">Applied</span>')
@@ -256,6 +275,16 @@ def _unpark(conn, job_id: int) -> None:
         worker.set_run_state(conn, "apply", current_job_id=None)
 
 
+@app.post("/answer/{job_id}", response_class=HTMLResponse)
+def answer_question(job_id: int, question: str = Form(...),
+                    answer: str = Form(...),
+                    is_volatile: str | None = Form(None)):
+    conn = _conn()
+    store.qa_upsert(conn, question, answer.strip(), is_volatile=bool(is_volatile))
+    _unpark(conn, job_id)
+    return HTMLResponse('<span class="done">Answer saved</span>')
+
+
 @app.post("/send/{job_id}", response_class=HTMLResponse)
 async def send(job_id: int):
     conn = _conn()
@@ -272,9 +301,11 @@ async def send(job_id: int):
 
     store.log(conn, job_id, "human_confirmed_send")
 
+    brief = load_brief(BRIEF_PATH)
+    profile = _load_candidate_profile_or_none(CANDIDATE_PROFILE_PATH)
     try:
         result = await ats_apply.submit(
-            conn, job_id, dry_run=False,
+            conn, job_id, dry_run=False, brief=brief, profile=profile,
             resume_version=store.resume_version_for(conn, job_id))
     except Exception as exc:
         return HTMLResponse(f'<span class="denied">{escape(str(exc))}</span>')
@@ -380,10 +411,19 @@ def record_outcome(application_id: int, type: str = Form(""),
 def _run_status_context(conn) -> dict:
     state = worker.get_run_state(conn, "apply")
     current_job = None
+    needs_answer_question = None
     if state["current_job_id"]:
         current_job = conn.execute(
             "SELECT j.id AS job_id, j.company, j.title FROM job j"
             " WHERE j.id = ?", (state["current_job_id"],)).fetchone()
+        has_draft = conn.execute(
+            "SELECT 1 FROM application WHERE job_id = ? AND status = 'draft'",
+            (state["current_job_id"],)).fetchone()
+        if not has_draft:
+            row = conn.execute(
+                "SELECT payload FROM event WHERE job_id = ? AND type = 'needs_answer'"
+                " ORDER BY id DESC LIMIT 1", (state["current_job_id"],)).fetchone()
+            needs_answer_question = row["payload"] if row else None
     submitted = conn.execute(
         "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
     ).fetchone()["n"]
@@ -416,7 +456,8 @@ def _run_status_context(conn) -> dict:
         " WHERE type NOT LIKE 'pipeline_%'"
         " ORDER BY id DESC LIMIT 10").fetchall()
     return {"run_state": state, "current_job": current_job, "stats": stats,
-            "recent_events": recent_events}
+            "recent_events": recent_events,
+            "needs_answer_question": needs_answer_question}
 
 
 @app.get("/run/status", response_class=HTMLResponse)
@@ -436,7 +477,7 @@ async def run_start(mode: str = Form(...)):
                  " WHERE kind = 'apply'")
     conn.commit()
     store.log(conn, None, "run_started", mode)
-    await worker.apply_tick(conn, BRIEF_PATH)
+    await worker.apply_tick(conn, BRIEF_PATH, CANDIDATE_PROFILE_PATH)
     return HTMLResponse("ok")
 
 
@@ -453,7 +494,7 @@ async def run_resume():
     conn = _conn()
     worker.set_run_state(conn, "apply", status="running")
     store.log(conn, None, "run_resumed")
-    await worker.apply_tick(conn, BRIEF_PATH)
+    await worker.apply_tick(conn, BRIEF_PATH, CANDIDATE_PROFILE_PATH)
     return HTMLResponse("ok")
 
 
@@ -532,7 +573,7 @@ async def queue_skip(job_id: int):
         worker.set_run_state(conn, "apply", current_job_id=None)
         nxt = worker.next_candidate(conn)
         if nxt is not None and nxt["job_id"] != job_id:
-            await worker.apply_tick(conn, BRIEF_PATH)
+            await worker.apply_tick(conn, BRIEF_PATH, CANDIDATE_PROFILE_PATH)
     return HTMLResponse("ok")
 
 
