@@ -6,7 +6,7 @@ from pathlib import Path
 from career_agent import run as run_module
 from career_agent import store, tailor
 from career_agent.apply import ats as ats_apply
-from career_agent.config import load_brief
+from career_agent.config import load_brief, load_candidate_profile
 
 # The one definition of "is this job in the apply queue". Anything that
 # counts, picks, or reorders the queue joins job j + assessment a and uses
@@ -96,12 +96,13 @@ async def tailor_for_apply(conn: sqlite3.Connection, job_id: int,
     return await tailor.ensure_tailored(conn, job_id, job, brief, ask)
 
 
-async def apply_tick(conn: sqlite3.Connection, brief_path) -> None:
+async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path) -> None:
     """One step of the apply worker: pick a candidate, gate it, draft it,
     and in auto mode send it. Called by the control endpoints (for
     immediate feedback) and by the background loop (to keep going
     unattended). A no-op unless the apply run is 'running' and not
-    already blocked on a manual-mode draft awaiting review."""
+    already blocked on a manual-mode draft, or a needs-answer park,
+    awaiting review."""
     state = get_run_state(conn, "apply")
     if state["status"] != "running":
         return
@@ -135,13 +136,33 @@ async def apply_tick(conn: sqlite3.Connection, brief_path) -> None:
         store.log(conn, job_id, "run_error", str(exc))
         return
 
+    brief = load_brief(brief_path)
+    try:
+        profile = load_candidate_profile(profile_path)
+    except FileNotFoundError:
+        # Only a Greenhouse draft/send actually needs this -- see
+        # ats._default_compute_answers, which raises a clear error itself
+        # if it's reached with profile=None. Every other source drafts
+        # fine without it, same as before this file needed a profile.
+        profile = None
+
     try:
         result = await ats_apply.submit(conn, job_id, dry_run=True,
+                                        brief=brief, profile=profile,
                                         resume_version=resume_version)
     except Exception as exc:
         set_run_state(conn, "apply", status="error", current_job_id=None,
                       last_error=str(exc))
         store.log(conn, job_id, "run_error", str(exc))
+        return
+
+    if result.get("needs_answer"):
+        # Leave current_job_id set: apply_worker_loop's outer check
+        # (current_job_id is None) keeps this exact job from being
+        # re-picked on the next tick, so a question with no answer is a
+        # stop, not a spin. The dashboard's "Answer needed" card
+        # (app.py/_run_status.html) is what clears this park.
+        store.log(conn, job_id, "needs_answer", result["needs_answer"])
         return
 
     if not result["ok"]:
@@ -154,6 +175,7 @@ async def apply_tick(conn: sqlite3.Connection, brief_path) -> None:
 
     try:
         result = await ats_apply.submit(conn, job_id, dry_run=False,
+                                        brief=brief, profile=profile,
                                         resume_version=store.resume_version_for(
                                             conn, job_id))
     except Exception as exc:
@@ -167,7 +189,7 @@ async def apply_tick(conn: sqlite3.Connection, brief_path) -> None:
     set_run_state(conn, "apply", current_job_id=None)
 
 
-async def apply_worker_loop(conn_factory, brief_path) -> None:
+async def apply_worker_loop(conn_factory, brief_path, profile_path) -> None:
     """Keeps the apply run advancing without anyone polling — the piece
     that makes Start actually mean 'walk away'. conn_factory is a
     zero-arg callable (web/app.py's _conn) so each iteration gets a
@@ -177,7 +199,7 @@ async def apply_worker_loop(conn_factory, brief_path) -> None:
         state = get_run_state(conn, "apply")
         if state["status"] == "running" and state["current_job_id"] is None:
             try:
-                await apply_tick(conn, brief_path)
+                await apply_tick(conn, brief_path, profile_path)
             except Exception as exc:
                 set_run_state(conn, "apply", status="error", current_job_id=None,
                               last_error=str(exc))
