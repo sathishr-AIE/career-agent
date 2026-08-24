@@ -693,12 +693,23 @@ def _settings_context(conn, *, form=None, errors=None, saved=False) -> dict:
         # them would overwrite the file the user lost with a brief they
         # never chose. Disable that half of the form instead.
         brief_error = f"{BRIEF_PATH} could not be read: {exc}"
+
+    candidate = None
+    candidate_error = None
+    try:
+        candidate = load_candidate_profile(CANDIDATE_PROFILE_PATH)
+    except FileNotFoundError:
+        pass  # first run: show blank fields, not an error
+    except Exception as exc:
+        candidate_error = f"{CANDIDATE_PROFILE_PATH} could not be read: {exc}"
+
     settings = store.get_settings(conn)
     today_submitted = conn.execute(
         "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
         " AND date(submitted_at) = date('now')").fetchone()["n"]
     return {"active_nav": "settings", "brief": brief,
             "brief_error": brief_error,
+            "candidate": candidate, "candidate_error": candidate_error,
             "daily_cap": brief.daily_cap if brief else "-",
             "today_submitted": today_submitted,
             "settings": settings, "scoring_models": SCORING_MODELS,
@@ -729,7 +740,13 @@ def settings_save(request: Request,
                   staleness_days: str = Form(""),
                   scoring_model: str = Form(...),
                   max_score_per_run: str = Form(""),
-                  brief_present: str | None = Form(None)):
+                  brief_present: str | None = Form(None),
+                  candidate_present: str | None = Form(None),
+                  candidate_name: str = Form(""),
+                  candidate_email: str = Form(""),
+                  candidate_phone: str = Form(""),
+                  linkedin_url: str = Form(""),
+                  portfolio_url: str = Form("")):
     conn = _conn()
     form = {"target_titles": target_titles, "title_families": title_families,
             "search_locations": search_locations, "locations": locations,
@@ -739,7 +756,10 @@ def settings_save(request: Request,
             "salary_floor_inr": salary_floor_inr, "daily_cap": daily_cap,
             "gate_threshold": gate_threshold, "staleness_days": staleness_days,
             "scoring_model": scoring_model,
-            "max_score_per_run": max_score_per_run}
+            "max_score_per_run": max_score_per_run,
+            "candidate_name": candidate_name, "candidate_email": candidate_email,
+            "candidate_phone": candidate_phone, "linkedin_url": linkedin_url,
+            "portfolio_url": portfolio_url}
     errors: dict[str, str] = {}
 
     # Every numeric field arrives as text and is parsed here, not declared
@@ -775,6 +795,19 @@ def settings_save(request: Request,
             remote_ok, salary_floor_inr, daily_cap_n, gate_threshold_n,
             staleness_days_n, errors)
 
+    candidate = None
+    if candidate_present:
+        try:
+            candidate = CandidateProfile(
+                candidate_name=candidate_name, candidate_email=candidate_email,
+                candidate_phone=candidate_phone,
+                linkedin_url=linkedin_url or None,
+                portfolio_url=portfolio_url or None)
+        except ValidationError as exc:
+            for err in exc.errors():
+                field = err["loc"][0] if err["loc"] else "form"
+                errors[str(field)] = err["msg"]
+
     if scoring_model not in SCORING_MODELS:
         errors["scoring_model"] = f"unknown scoring model: {scoring_model}"
     if max_score_per_run_n is not None and max_score_per_run_n < 0:
@@ -787,6 +820,8 @@ def settings_save(request: Request,
 
     if brief is not None:
         save_brief(BRIEF_PATH, brief)
+    if candidate is not None:
+        save_candidate_profile(CANDIDATE_PROFILE_PATH, candidate)
     store.save_settings(conn, scoring_model, max_score_per_run_n)
     return templates.TemplateResponse(
         request=request, name="settings.html",

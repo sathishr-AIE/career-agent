@@ -24,6 +24,15 @@
 {% endif %}
 
 <form method="post" action="/settings">
+  {% macro textfield(name, label, value, hint="") %}
+  <div class="field">
+    <label for="{{ name }}">{{ label }}</label>
+    <input type="text" id="{{ name }}" name="{{ name }}" value="{{ value }}">
+    {% if hint %}<span class="hint">{{ hint }}</span>{% endif %}
+    {% if errors.get(name) %}<span class="err">{{ errors[name] }}</span>{% endif %}
+  </div>
+  {% endmacro %}
+
   {% if brief %}
   <div class="card panel">
     <div class="panel-head"><h2>Career Brief</h2>
@@ -32,15 +41,6 @@
          whose brief section was hidden looks identical to one where the user
          cleared every field, and the save would fail on an empty brief. -->
     <input type="hidden" name="brief_present" value="1">
-
-    {% macro textfield(name, label, value, hint="") %}
-    <div class="field">
-      <label for="{{ name }}">{{ label }}</label>
-      <input type="text" id="{{ name }}" name="{{ name }}" value="{{ value }}">
-      {% if hint %}<span class="hint">{{ hint }}</span>{% endif %}
-      {% if errors.get(name) %}<span class="err">{{ errors[name] }}</span>{% endif %}
-    </div>
-    {% endmacro %}
 
     {{ textfield("target_titles", "Target titles",
                  form.target_titles if form else brief.target_titles | join(", "),
@@ -102,6 +102,27 @@
     </div>
   </div>
   {% endif %}
+
+  <div class="card panel" style="margin-top:11px">
+    <div class="panel-head"><h2>Candidate Profile</h2>
+      <span class="run-meta">saves to candidate_profile.toml (gitignored, never committed)</span></div>
+    {% if candidate_error %}
+    <div class="denied">{{ candidate_error }}</div>
+    {% endif %}
+    <input type="hidden" name="candidate_present" value="1">
+
+    {{ textfield("candidate_name", "Full name",
+                 form.candidate_name if form else (candidate.candidate_name if candidate else ""),
+                 "Used to fill Greenhouse's name fields.") }}
+    {{ textfield("candidate_email", "Email",
+                 form.candidate_email if form else (candidate.candidate_email if candidate else "")) }}
+    {{ textfield("candidate_phone", "Phone",
+                 form.candidate_phone if form else (candidate.candidate_phone if candidate else "")) }}
+    {{ textfield("linkedin_url", "LinkedIn URL (optional)",
+                 form.linkedin_url if form else (candidate.linkedin_url if candidate else "")) }}
+    {{ textfield("portfolio_url", "Portfolio URL (optional)",
+                 form.portfolio_url if form else (candidate.portfolio_url if candidate else "")) }}
+  </div>
 
   <div class="card panel" style="margin-top:11px">
     <div class="panel-head"><h2>Agent Settings</h2>

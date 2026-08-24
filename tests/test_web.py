@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from conftest import build_tailor_template
 from career_agent import db, store
-from career_agent.config import load_brief
+from career_agent.config import load_brief, load_candidate_profile
 from career_agent.web import app as web
 from career_agent.web import pipeline
 from career_agent.web import worker
@@ -1286,6 +1286,44 @@ def test_a_blank_max_score_per_run_is_an_error_too(client, brief_path):
     r = client.post("/settings", data=_form(max_score_per_run=""))
     assert "Nothing was saved" in r.text
     assert "max_score_per_run" in r.text
+
+
+def test_settings_page_shows_blank_candidate_fields_on_first_run(client, tmp_path):
+    missing = tmp_path / "no_candidate_profile.toml"
+    web.CANDIDATE_PROFILE_PATH = missing
+    r = client.get("/settings")
+    assert r.status_code == 200
+    assert "Candidate Profile" in r.text
+    assert "could not be read" not in r.text  # first run is not an error
+
+
+def test_settings_page_saves_a_new_candidate_profile(client, tmp_path):
+    target = tmp_path / "fresh_candidate_profile.toml"
+    web.CANDIDATE_PROFILE_PATH = target
+    r = client.post("/settings", data={
+        "candidate_present": "1", "candidate_name": "Jane Doe",
+        "candidate_email": "jane@example.com", "candidate_phone": "+91-1",
+        "linkedin_url": "", "portfolio_url": "",
+        "scoring_model": "claude-sonnet-5", "max_score_per_run": "25",
+    })
+    assert r.status_code == 200
+    assert "Settings saved" in r.text
+    assert target.exists()
+    saved = load_candidate_profile(target)
+    assert saved.candidate_name == "Jane Doe"
+
+
+def test_settings_page_rejects_a_blank_candidate_name(client, tmp_path):
+    target = tmp_path / "fresh_candidate_profile.toml"
+    web.CANDIDATE_PROFILE_PATH = target
+    r = client.post("/settings", data={
+        "candidate_present": "1", "candidate_name": "",
+        "candidate_email": "jane@example.com", "candidate_phone": "+91-1",
+        "linkedin_url": "", "portfolio_url": "",
+        "scoring_model": "claude-sonnet-5", "max_score_per_run": "25",
+    })
+    assert "Nothing was saved" in r.text
+    assert not target.exists()
 
 
 def test_the_apply_activity_log_excludes_pipeline_events(client):
