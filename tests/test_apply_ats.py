@@ -172,6 +172,11 @@ def test_resolve_answers_treats_a_stale_volatile_answer_as_missing(conn):
         ats_apply.resolve_answers(questions, conn)
 
 
+def test_split_name_handles_a_single_and_a_multi_word_name():
+    assert ats_apply._split_name("Jane") == ("Jane", "")
+    assert ats_apply._split_name("Jane Van Doe") == ("Jane", "Van Doe")
+
+
 def test_resolve_answers_accepts_a_volatile_answer_confirmed_29_days_ago(conn):
     store.qa_upsert(conn, "Current CTC?", "12 LPA", is_volatile=True)
     conn.execute("UPDATE qa_bank SET last_confirmed_at = datetime('now', '-29 days')"

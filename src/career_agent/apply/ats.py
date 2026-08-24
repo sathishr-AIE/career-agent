@@ -81,21 +81,139 @@ def resolve_answers(questions: list[FormField], conn) -> dict[str, str]:
     return answers
 
 
-async def _default_filler(url: str) -> dict:
-    """Drive the real form. Imported lazily so tests never need a browser."""
+def _split_name(candidate_name: str) -> tuple[str, str]:
+    """Greenhouse always asks for first and last name separately.
+    Ponytail: a naive single-space split, wrong for a name with more than
+    one middle/last word grouping intent -- fine for the common case,
+    revisit if it matters."""
+    parts = candidate_name.strip().split(" ", 1)
+    return (parts[0], parts[1] if len(parts) > 1 else "")
+
+
+# Verify these against a real live Greenhouse posting before flipping
+# SUBMISSION_IMPLEMENTED -- they were not confirmed against a rendered
+# page from this environment, and Greenhouse has iterated its embed
+# markup before. This dict is the one place to fix them if they're wrong.
+GREENHOUSE_STANDARD_FIELD_SELECTORS = {
+    "first_name": "#first_name",
+    "last_name": "#last_name",
+    "email": "#email",
+    "phone": "#phone",
+    "resume": "#resume",
+    "linkedin_url": "#job_application_urls_linkedin",
+    "portfolio_url": "#job_application_urls_portfolio",
+}
+
+
+async def _check_for_captcha(page, url: str) -> None:
+    if await page.locator("iframe[src*='recaptcha'], .h-captcha").count():
+        await page.screenshot(path=f"screenshots/captcha-{abs(hash(url))}.png")
+        raise CaptchaEncountered(url)
+
+
+async def _read_custom_questions(page) -> list[FormField]:
+    """Scan the form for label+input pairs beyond Greenhouse's standard
+    fields. Not unit tested -- see the plan's "Deviations from the spec"
+    note; verify against a real posting before trusting this."""
+    standard = set(GREENHOUSE_STANDARD_FIELD_SELECTORS.values())
+    fields = []
+    for container in await page.locator(".field:has(label)").all():
+        input_el = container.locator("input, select, textarea").first
+        if await input_el.count() == 0:
+            continue
+        field_id = await input_el.get_attribute("id")
+        if not field_id or f"#{field_id}" in standard:
+            continue  # a standard field, already answered from the profile
+        label_el = container.locator("label").first
+        label = (await label_el.inner_text()).strip()
+        fields.append(FormField(label=label, locator=f"#{field_id}"))
+    return fields
+
+
+async def _default_compute_answers(url: str, job, brief, profile,
+                                   conn) -> dict:
+    """The real Greenhouse filler's read-only half: visit the form, decide
+    every answer, and return them WITHOUT clicking anything. Raises
+    NeedsAnswer (via resolve_answers) for a question nothing can answer,
+    and CaptchaEncountered if the page shows one. profile is required here
+    (only reached for job.source == 'ats' -- see submit()'s routing)."""
+    if profile is None:
+        raise RuntimeError(
+            "candidate_profile.toml not found -- see"
+            " candidate_profile.toml.example. Required before a Greenhouse"
+            " draft or send can run.")
+
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
         page = await browser.new_page()
-        await page.goto(url)
-        if await page.locator("iframe[src*='recaptcha'], .h-captcha").count():
-            await page.screenshot(path=f"screenshots/captcha-{abs(hash(url))}.png")
+        try:
+            await page.goto(url)
+            await _check_for_captcha(page, url)
+
+            first_name, last_name = _split_name(profile.candidate_name)
+            sel = GREENHOUSE_STANDARD_FIELD_SELECTORS
+            answers = {
+                sel["first_name"]: first_name,
+                sel["last_name"]: last_name,
+                sel["email"]: profile.candidate_email,
+                sel["phone"]: profile.candidate_phone,
+            }
+            if profile.linkedin_url and await page.locator(sel["linkedin_url"]).count():
+                answers[sel["linkedin_url"]] = profile.linkedin_url
+            if profile.portfolio_url and await page.locator(sel["portfolio_url"]).count():
+                answers[sel["portfolio_url"]] = profile.portfolio_url
+
+            questions = await _read_custom_questions(page)
+            answers.update(resolve_answers(questions, conn))
+            return answers
+        finally:
             await browser.close()
-            raise CaptchaEncountered(url)
-        answers = {"note": "filled from facts store and qa_bank"}
-        await browser.close()
-        return answers
+
+
+async def _default_fill_and_submit(url: str, answers: dict, resume_path) -> None:
+    """The real Greenhouse filler's write half: type in answers already
+    decided by _default_compute_answers, attach the résumé, and click
+    Submit. Makes no decisions of its own."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)
+        page = await browser.new_page()
+        try:
+            await page.goto(url)
+            await _check_for_captcha(page, url)
+
+            for locator, value in answers.items():
+                await page.locator(locator).fill(str(value))
+            await page.locator(
+                GREENHOUSE_STANDARD_FIELD_SELECTORS["resume"]
+            ).set_input_files(str(resume_path))
+            await page.locator("button[type=submit], input[type=submit]").first.click()
+        finally:
+            await browser.close()
+
+
+async def _generic_stub_compute_answers(url: str, job, brief, profile,
+                                        conn) -> dict:
+    """Non-Greenhouse jobs (job.source != 'ats'): there is no known form
+    structure to read, so this proves the page loads and hands back a
+    placeholder -- the same behavior every source got before this file's
+    v3 changes (this is _default_filler, renamed to match the other two
+    functions' signature and to name what it's actually for now that a
+    real filler exists alongside it)."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)
+        page = await browser.new_page()
+        try:
+            await page.goto(url)
+            await _check_for_captcha(page, url)
+            return {"note": "filled from facts store and qa_bank"}
+        finally:
+            await browser.close()
 
 
 def sweep_stale_in_flight(conn: sqlite3.Connection, minutes: int = 15) -> int:
