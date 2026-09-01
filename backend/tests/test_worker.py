@@ -96,28 +96,29 @@ async def test_apply_tick_passes_brief_and_profile_to_submit(
     assert captured["profile"].candidate_name == "Jane Doe"
 
 
-async def test_apply_tick_tolerates_a_missing_candidate_profile(
+async def test_apply_tick_errors_when_candidate_profile_is_missing(
         conn, brief_path, tmp_path, monkeypatch):
-    """candidate_profile.toml not existing yet must not break drafting for
-    a non-Greenhouse job, which never needs it."""
+    """The agent needs candidate_profile.toml for every source now (Task 6):
+    submit() raises RuntimeError on profile=None, and apply_tick has no
+    fallback left -- a missing profile is a run_state error, not a silent
+    None passed through."""
     _job(conn, "fp1")
     conn.execute("INSERT INTO resume (version, path) VALUES ('base-v1', 'r.docx')")
     conn.commit()
     worker.set_run_state(conn, "apply", status="running", mode="manual")
 
-    captured = {}
+    async def fail_if_called(*a, **kw):
+        raise AssertionError("submit should not be reached without a profile")
 
-    async def fake_submit(conn, job_id, dry_run, brief=None, profile=None,
-                          resume_version=None, **kw):
-        captured["profile"] = profile
-        return {"ok": True, "job_id": job_id, "status": "draft"}
-
-    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
+    monkeypatch.setattr(worker.ats_apply, "submit", fail_if_called)
 
     missing_profile_path = tmp_path / "no_such_candidate_profile.toml"
     await worker.apply_tick(conn, brief_path, missing_profile_path)
 
-    assert captured["profile"] is None
+    state = worker.get_run_state(conn, "apply")
+    assert state["status"] == "error"
+    assert "candidate_profile.toml" in state["last_error"]
+    assert state["current_job_id"] is None
 
 
 async def test_apply_tick_parks_on_needs_answer_instead_of_looping(
@@ -390,8 +391,13 @@ async def test_tick_with_empty_queue_goes_idle_and_logs_completion(
     assert "run_completed" in types
 
 
-async def test_tick_auto_mode_drafts_and_sends(conn, brief_path, profile_path,
-                                               monkeypatch):
+async def test_auto_mode_makes_exactly_one_submit_call(conn, brief_path,
+                                                        profile_path,
+                                                        monkeypatch):
+    """Auto mode used to draft (dry_run=True) then immediately send
+    (dry_run=False) -- two browser sessions seconds apart with no human in
+    between. The agent does both jobs in a single session now, so auto mode
+    makes exactly one call, straight to dry_run=False."""
     job_id = _job(conn, "auto-me")
     worker.set_run_state(conn, "apply", status="running", mode="auto")
 
@@ -399,16 +405,15 @@ async def test_tick_auto_mode_drafts_and_sends(conn, brief_path, profile_path,
 
     async def fake_submit(conn, job_id, dry_run, resume_version=None, **kw):
         calls.append(dry_run)
-        status = "draft" if dry_run else "submitted"
         conn.execute("INSERT INTO application (job_id, resume_version,"
-                     " status) VALUES (?, 'v1', ?)", (job_id, status))
+                     " status) VALUES (?, 'v1', 'submitted')", (job_id,))
         conn.commit()
-        return {"ok": True, "job_id": job_id, "status": status}
+        return {"ok": True, "job_id": job_id, "status": "submitted"}
 
     monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
     await worker.apply_tick(conn, brief_path, profile_path)
 
-    assert calls == [True, False]
+    assert calls == [False]
     assert worker.get_run_state(conn, "apply")["current_job_id"] is None
 
 
@@ -421,11 +426,6 @@ async def test_tick_auto_mode_skips_when_the_real_send_reports_not_ok(
     worker.set_run_state(conn, "apply", status="running", mode="auto")
 
     async def fake_submit(conn, job_id, dry_run, resume_version=None, **kw):
-        if dry_run:
-            conn.execute("INSERT INTO application (job_id, resume_version,"
-                         " status) VALUES (?, 'v1', 'draft')", (job_id,))
-            conn.commit()
-            return {"ok": True, "job_id": job_id, "status": "draft"}
         return {"ok": False, "reason": "captcha held the submission"}
 
     monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
@@ -437,6 +437,78 @@ async def test_tick_auto_mode_skips_when_the_real_send_reports_not_ok(
     skips = conn.execute(
         "SELECT payload FROM event WHERE type = 'job_skipped'").fetchall()
     assert [s["payload"] for s in skips] == ["captcha held the submission"]
+
+
+async def test_auto_mode_pauses_when_submit_reports_unsupported(
+        conn, brief_path, profile_path, monkeypatch):
+    """submit() refuses a real send outright (unsupported=True) while
+    SUBMISSION_IMPLEMENTED stays False, and writes NO application row when
+    it does -- so QUEUE_WHERE never excludes this job. Clearing
+    current_job_id the way an ordinary not-ok result does would let
+    apply_worker_loop re-pick this exact job on the very next tick and spin
+    forever. Pausing the run (like the daily-cap path) says so once."""
+    job_id = _job(conn, "unsupported")
+    worker.set_run_state(conn, "apply", status="running", mode="auto")
+
+    calls = []
+
+    async def fake_submit(conn, job_id, dry_run, resume_version=None, **kw):
+        calls.append(1)
+        return {"ok": False, "unsupported": True,
+                "reason": "real sends are not enabled yet"}
+
+    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
+    await worker.apply_tick(conn, brief_path, profile_path)
+
+    state = worker.get_run_state(conn, "apply")
+    assert state["status"] == "paused"
+    assert state["current_job_id"] is None
+    types = {e["type"] for e in conn.execute("SELECT type FROM event")}
+    assert "run_autopaused" in types
+    assert worker.next_candidate(conn)["job_id"] == job_id, (
+        "no application row was written, so the job is still queueable --"
+        " it's the paused run_state that must stop the loop, not the queue")
+
+    # A second tick while paused must not re-pick the job: apply_tick's own
+    # early-return guard (status != 'running') applies.
+    await worker.apply_tick(conn, brief_path, profile_path)
+    assert calls == [1], "a paused run must not re-pick or re-submit"
+
+
+async def test_needs_answer_from_auto_send_parks(conn, brief_path,
+                                                  profile_path, monkeypatch):
+    job_id = _job(conn, "needs-answer-auto")
+    worker.set_run_state(conn, "apply", status="running", mode="auto")
+
+    async def fake_submit(conn, job_id, dry_run, resume_version=None, **kw):
+        return {"ok": False, "needs_answer": "PMP cert?",
+                "reason": "needs an answer: PMP cert?"}
+
+    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
+    await worker.apply_tick(conn, brief_path, profile_path)
+
+    state = worker.get_run_state(conn, "apply")
+    assert state["current_job_id"] == job_id
+    types = {e["type"] for e in conn.execute("SELECT type FROM event")}
+    assert "needs_answer" in types
+
+
+async def test_manual_mode_still_drafts_and_parks_for_review(
+        conn, brief_path, profile_path, monkeypatch):
+    job_id = _job(conn, "manual-review")
+    worker.set_run_state(conn, "apply", status="running", mode="manual")
+
+    calls = []
+
+    async def fake_submit(conn, job_id, dry_run, resume_version=None, **kw):
+        calls.append(dry_run)
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
+    await worker.apply_tick(conn, brief_path, profile_path)
+
+    assert calls == [True]
+    assert worker.get_run_state(conn, "apply")["current_job_id"] is not None
 
 
 async def test_tick_manual_mode_stops_after_draft(conn, brief_path, profile_path,

@@ -138,18 +138,24 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path) -> None
 
     brief = load_brief(brief_path)
     try:
+        # load_candidate_profile raises FileNotFoundError if it's missing --
+        # the agent needs it for every source now (Task 6's submit() raises
+        # RuntimeError on profile=None), so there's no fallback left: a
+        # missing profile is a run_state error, caught below like any other
+        # submit()-time failure.
         profile = load_candidate_profile(profile_path)
-    except FileNotFoundError:
-        # Only a Greenhouse draft/send actually needs this -- see
-        # ats._default_compute_answers, which raises a clear error itself
-        # if it's reached with profile=None. Every other source drafts
-        # fine without it, same as before this file needed a profile.
-        profile = None
-
-    try:
-        result = await ats_apply.submit(conn, job_id, dry_run=True,
-                                        brief=brief, profile=profile,
-                                        resume_version=resume_version)
+        if state["mode"] == "manual":
+            result = await ats_apply.submit(conn, job_id, dry_run=True,
+                                            brief=brief, profile=profile,
+                                            resume_version=resume_version)
+        else:
+            # Auto mode used to draft then immediately send -- two browser
+            # sessions seconds apart with no human in between. The agent
+            # does both jobs in one session now, so this is the only submit
+            # call auto mode makes.
+            result = await ats_apply.submit(conn, job_id, dry_run=False,
+                                            brief=brief, profile=profile,
+                                            resume_version=resume_version)
     except Exception as exc:
         set_run_state(conn, "apply", status="error", current_job_id=None,
                       last_error=str(exc))
@@ -166,6 +172,17 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path) -> None
         return
 
     if not result["ok"]:
+        if result.get("unsupported"):
+            # Real sends are refused outright while SUBMISSION_IMPLEMENTED
+            # stays False, and that refusal writes no application row --
+            # QUEUE_WHERE only excludes a job once one exists, so clearing
+            # current_job_id here would let the very next tick re-pick this
+            # same job and spin forever. Pause once instead, same as the
+            # daily-cap path above: the run genuinely cannot proceed.
+            set_run_state(conn, "apply", status="paused", current_job_id=None,
+                          last_error=result.get("reason"))
+            store.log(conn, job_id, "run_autopaused", result.get("reason", ""))
+            return
         store.log(conn, job_id, "job_skipped", result.get("reason", ""))
         set_run_state(conn, "apply", current_job_id=None)
         return
@@ -173,20 +190,7 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path) -> None
     if state["mode"] == "manual":
         return  # stays 'running' with current_job_id set: awaiting review
 
-    try:
-        result = await ats_apply.submit(conn, job_id, dry_run=False,
-                                        brief=brief, profile=profile,
-                                        resume_version=store.resume_version_for(
-                                            conn, job_id))
-    except Exception as exc:
-        set_run_state(conn, "apply", status="error", current_job_id=None,
-                      last_error=str(exc))
-        store.log(conn, job_id, "run_error", str(exc))
-        return
-    if not result["ok"]:
-        # captcha hold / permanent failure: reported, not raised
-        store.log(conn, job_id, "job_skipped", result.get("reason", ""))
-    set_run_state(conn, "apply", current_job_id=None)
+    set_run_state(conn, "apply", current_job_id=None)  # auto: done
 
 
 async def apply_worker_loop(conn_factory, brief_path, profile_path) -> None:
