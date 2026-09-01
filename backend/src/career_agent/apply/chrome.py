@@ -6,6 +6,7 @@ import logging
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -129,12 +130,15 @@ def _kill_port(port: int) -> None:
 
 
 def launch_chrome(port: int = 9222, headless: bool = False) -> subprocess.Popen:
+    chrome_exe = get_chrome_path()  # fail fast if Chrome not found
     profile = ensure_profile()
     _kill_port(port)
     _patch_prefs(profile)
-    proc = subprocess.Popen(chrome_command(get_chrome_path(), profile, port,
-                                           headless),
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if platform.system() != "Windows":
+        kwargs["preexec_fn"] = os.setsid  # process group for tree kill
+    proc = subprocess.Popen(chrome_command(chrome_exe, profile, port, headless),
+                            **kwargs)
     time.sleep(3)  # let the debug port open
     return proc
 
@@ -142,8 +146,14 @@ def launch_chrome(port: int = 9222, headless: bool = False) -> subprocess.Popen:
 def cleanup(proc: subprocess.Popen | None) -> None:
     if proc is None or proc.poll() is not None:
         return
-    if platform.system() == "Windows":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                       capture_output=True, timeout=10)
-    else:
-        proc.kill()
+    try:
+        if platform.system() == "Windows":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=10)
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+    except Exception:
+        log.debug("cleanup failed", exc_info=True)
