@@ -98,13 +98,21 @@ def _never_do_section() -> str:
     )
 
 
-def _location_section(locations) -> str:
+def _location_section(locations, remote_ok) -> str:
+    remote_line = ("Remote work IS acceptable for this candidate." if remote_ok else
+                   "Remote work is NOT acceptable for this candidate -- a remote-only "
+                   "role is RESULT:FAILED:not_eligible_location.")
+    remote_rule = ("- Job is remote -> proceed." if remote_ok else
+                   "- Job is remote (no on-site/hybrid option in the acceptable "
+                   "locations above) -> stop immediately and output "
+                   "RESULT:FAILED:not_eligible_location.")
     return (
         "== LOCATION CHECK (run this first, before filling anything) ==\n"
         f"Acceptable locations for this candidate: {locations}\n"
+        f"{remote_line}\n"
         "Decision:\n"
         "- Job location matches one of the acceptable locations above -> proceed.\n"
-        "- Job is remote and remote is acceptable -> proceed.\n"
+        f"{remote_rule}\n"
         "- Job requires on-site presence in, or relocation to, a city not listed above, "
         "with no remote option -> stop immediately and output "
         "RESULT:FAILED:not_eligible_location.\n"
@@ -286,7 +294,7 @@ def build_prompt(job, profile, brief, qa_rows, resume_text, resume_path, *,
         f"== KNOWN ANSWERS (prefer these verbatim) ==\n{known_answers}",
         _hard_rules_section(),
         _never_do_section(),
-        _location_section(locations),
+        _location_section(locations, brief.remote_ok),
         _platform_rules_section(),
         _screening_section(),
         _steps_section(mode),

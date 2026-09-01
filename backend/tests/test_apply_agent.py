@@ -142,3 +142,28 @@ def test_prompt_contains_safety_and_platform_rules():
     for needle in ("Never lie", "sso_required", "easy_apply", "RESULT:CAPTCHA",
                    "RESULT:NEEDS_ANSWER"):
         assert needle in p
+
+
+def test_unconfirmed_volatile_row_is_marked_stale():
+    qa = [{"question_normalized": "sponsorship needed", "answer": "No",
+           "is_volatile": 1, "last_confirmed_at": None}]
+    p = build_prompt(_job(), _profile(), _brief(), qa, "r", "x.docx", mode="auto")
+    assert "sponsorship needed -> No  [stale" in p
+
+
+def test_unknown_mode_raises():
+    with pytest.raises(ValueError):
+        build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="bogus")
+
+
+def test_location_check_states_remote_ok_explicitly():
+    # locations deliberately has no literal "Remote" entry, so the only signal
+    # the agent has about remote eligibility is brief.remote_ok itself.
+    p_ok = build_prompt(_job(), _profile(), _brief(locations=["Chennai"], remote_ok=True),
+                        [], "r", "x.docx", mode="auto")
+    p_not_ok = build_prompt(_job(), _profile(),
+                            _brief(locations=["Chennai"], remote_ok=False),
+                            [], "r", "x.docx", mode="auto")
+    assert "Remote work IS acceptable" in p_ok
+    assert "Remote work is NOT acceptable" in p_not_ok
+    assert p_ok != p_not_ok
