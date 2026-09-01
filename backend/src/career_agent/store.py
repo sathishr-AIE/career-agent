@@ -157,6 +157,14 @@ def qa_upsert(conn, question: str, answer: str, is_volatile: bool) -> None:
     conn.commit()
 
 
+def qa_all(conn) -> list:
+    """Return every qa_bank row with all fields the prompt builder needs,
+    ordered deterministically by question."""
+    return conn.execute(
+        "SELECT question_normalized, answer, is_volatile, last_confirmed_at"
+        " FROM qa_bank ORDER BY question_normalized").fetchall()
+
+
 def get_settings(conn) -> sqlite3.Row:
     return conn.execute("SELECT * FROM setting WHERE id = 1").fetchone()
 

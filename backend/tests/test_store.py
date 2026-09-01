@@ -272,3 +272,23 @@ def test_qa_upsert_on_an_existing_question_overwrites_and_reconfirms(conn):
     row = store.qa_lookup(conn, "notice period")
     assert row["answer"] == "60 days"
     assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 1
+
+
+def test_application_has_taxonomy_columns(conn):
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(application)")}
+    assert {"failure_reason", "transcript_path"} <= cols
+
+
+def test_qa_all_returns_every_row(conn):
+    store.qa_upsert(conn, "Visa status?", "Citizen", is_volatile=True)
+    store.qa_upsert(conn, "Years of Python?", "6", is_volatile=False)
+    rows = store.qa_all(conn)
+    assert {r["question_normalized"] for r in rows} == \
+        {store.qa_normalize("Visa status?"),
+         store.qa_normalize("Years of Python?")}
+    # Verify all required fields are present
+    for row in rows:
+        assert "question_normalized" in row.keys()
+        assert "answer" in row.keys()
+        assert "is_volatile" in row.keys()
+        assert "last_confirmed_at" in row.keys()
