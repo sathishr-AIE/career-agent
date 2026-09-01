@@ -59,3 +59,9 @@ def test_parse_last_result_line_wins():
 
 def test_parse_trailing_markdown_junk_stripped():
     assert parse_result("RESULT:FAILED:stuck**`").reason == "stuck"
+
+
+def test_parse_answers_json_after_result_is_ignored():
+    out = "RESULT:DRAFT_READY\nANSWERS_JSON: {\"x\": 1}\n"
+    r = parse_result(out)
+    assert r.code == "failed" and r.reason == "bad_answers_json"

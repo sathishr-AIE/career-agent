@@ -30,20 +30,33 @@ def _clean(s: str) -> str:
 
 def parse_result(output: str) -> AgentResult:
     """Last RESULT: line wins -- the agent may hit a failure, recover, and
-    end on a different code."""
-    answers = None
+    end on a different code. ANSWERS_JSON must appear before RESULT:DRAFT_READY."""
+    lines = output.splitlines()
+
+    # Find the last RESULT: line and its index
     result_line = None
-    for line in output.splitlines():
+    result_line_idx = -1
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if line.startswith("RESULT:"):
+            result_line = line
+            result_line_idx = i
+
+    if result_line is None:
+        return AgentResult("failed", "no_result_line")
+
+    # Scan for ANSWERS_JSON that appears before the winning RESULT: line
+    answers = None
+    for i, line in enumerate(lines):
+        if i >= result_line_idx:
+            break
         line = line.strip()
         if line.startswith("ANSWERS_JSON:"):
             try:
                 answers = json.loads(line[len("ANSWERS_JSON:"):].strip())
             except json.JSONDecodeError:
-                answers = None
-        elif line.startswith("RESULT:"):
-            result_line = line
-    if result_line is None:
-        return AgentResult("failed", "no_result_line")
+                pass  # Skip malformed, keep previous value
+
     body = _clean(result_line[len("RESULT:"):])
     if body in _SIMPLE:
         return AgentResult(_SIMPLE[body])
