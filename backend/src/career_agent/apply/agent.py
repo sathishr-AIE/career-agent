@@ -3,6 +3,7 @@ session per job against a real Chrome over CDP, and parses the sentinel
 outcome. See docs/lld-apply-button-v2.md."""
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil as _shutil
@@ -11,6 +12,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 APPLY_MODEL = "sonnet"  # ponytail: constant; promote to the setting table
                         # when someone actually wants to change it
@@ -407,11 +410,17 @@ def _run_agent_blocking(prompt, job_id, cdp_port, timeout_s, model) -> AgentResu
     if not (_shutil.which("claude") and _shutil.which("npx")):
         raise RuntimeError("agentic apply needs the `claude` CLI and `npx` on"
                            " PATH -- see docs/lld-apply-button-v2.md")
-    WORK_DIR.mkdir(parents=True, exist_ok=True)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    mcp_path = WORK_DIR / ".mcp-apply.json"
+    # Popen below runs with cwd=session_dir, so every path handed to the
+    # child (the --mcp-config value especially) must be absolute -- a
+    # relative one resolves against the child's cwd, not ours, and the MCP
+    # server config silently fails to load.
+    work_dir = WORK_DIR.resolve()
+    log_dir = LOG_DIR.resolve()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    mcp_path = work_dir / ".mcp-apply.json"
     mcp_path.write_text(json.dumps(_mcp_config(cdp_port)), encoding="utf-8")
-    session_dir = WORK_DIR / "session"
+    session_dir = work_dir / "session"
     if session_dir.exists():
         _shutil.rmtree(session_dir, ignore_errors=True)
     session_dir.mkdir(parents=True)
@@ -443,14 +452,21 @@ def _run_agent_blocking(prompt, job_id, cdp_port, timeout_s, model) -> AgentResu
         proc.wait(timeout=timeout_s)
     except subprocess.TimeoutExpired:
         _kill_tree(proc.pid)
-        return AgentResult("failed", "timeout",
-                           duration_ms=int((time.time() - start) * 1000))
+        # consume_stream already ran to EOF before proc.wait, so the
+        # transcript and cost are fully collected even though the process
+        # itself timed out -- keep them, a timed-out run is exactly when
+        # someone wants to see what the agent was doing.
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        transcript = log_dir / f"apply_{ts}_job{job_id}.txt"
+        transcript.write_text(text, encoding="utf-8")
+        return AgentResult("failed", "timeout", transcript_path=str(transcript),
+                           cost_usd=cost, duration_ms=int((time.time() - start) * 1000))
     finally:
         if proc.poll() is None:
             _kill_tree(proc.pid)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    transcript = LOG_DIR / f"apply_{ts}_job{job_id}.txt"
+    transcript = log_dir / f"apply_{ts}_job{job_id}.txt"
     transcript.write_text(text, encoding="utf-8")
 
     result = parse_result(text)
@@ -463,8 +479,11 @@ def _run_agent_blocking(prompt, job_id, cdp_port, timeout_s, model) -> AgentResu
 def _kill_tree(pid: int) -> None:
     import platform as _platform
     if _platform.system() == "Windows":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                       capture_output=True, timeout=10)
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           capture_output=True, timeout=10)
+        except Exception:
+            log.debug("taskkill failed for pid %s", pid, exc_info=True)
     else:
         try:
             os.kill(pid, 9)

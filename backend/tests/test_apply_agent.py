@@ -190,3 +190,16 @@ def test_consume_stream_collects_text_and_cost():
 def test_consume_stream_tolerates_non_json_lines():
     text, cost = consume_stream(["not json at all", ""])
     assert "not json" in text and cost == 0.0
+
+
+def test_consume_stream_missing_total_cost_usd_is_zero():
+    line = _json.dumps({"type": "result", "result": "RESULT:APPLIED"})
+    _, cost = consume_stream([line])
+    assert cost == 0.0
+
+
+def test_consume_stream_null_total_cost_usd_is_zero():
+    line = _json.dumps({"type": "result", "total_cost_usd": None,
+                        "result": "RESULT:APPLIED"})
+    _, cost = consume_stream([line])
+    assert cost == 0.0
