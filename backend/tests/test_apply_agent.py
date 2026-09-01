@@ -1,7 +1,9 @@
 # backend/tests/test_apply_agent.py
+import json as _json
+
 import pytest
 
-from career_agent.apply.agent import AgentResult, build_prompt, parse_result
+from career_agent.apply.agent import AgentResult, build_prompt, consume_stream, parse_result
 from career_agent.config import CandidateProfile, CareerBrief
 from career_agent.models import Job
 
@@ -167,3 +169,24 @@ def test_location_check_states_remote_ok_explicitly():
     assert "Remote work IS acceptable" in p_ok
     assert "Remote work is NOT acceptable" in p_not_ok
     assert p_ok != p_not_ok
+
+
+# -- consume_stream -------------------------------------------------------
+
+def test_consume_stream_collects_text_and_cost():
+    lines = [
+        _json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "navigating"},
+            {"type": "tool_use", "name": "mcp__playwright__browser_click",
+             "input": {"ref": "e12"}}]}}),
+        _json.dumps({"type": "result", "total_cost_usd": 0.042,
+                     "result": "RESULT:APPLIED"}),
+    ]
+    text, cost = consume_stream(lines)
+    assert "navigating" in text and "RESULT:APPLIED" in text
+    assert cost == 0.042
+
+
+def test_consume_stream_tolerates_non_json_lines():
+    text, cost = consume_stream(["not json at all", ""])
+    assert "not json" in text and cost == 0.0

@@ -1,12 +1,22 @@
 """Agentic apply engine: builds the playbook prompt, runs one Claude Code
 session per job against a real Chrome over CDP, and parses the sentinel
 outcome. See docs/lld-apply-button-v2.md."""
+import asyncio
 import json
+import os
 import re
+import shutil as _shutil
+import subprocess
+import time
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 APPLY_MODEL = "sonnet"  # ponytail: constant; promote to the setting table
                         # when someone actually wants to change it
+
+WORK_DIR = Path("data/apply-work")
+LOG_DIR = Path("data/logs")
 
 
 @dataclass
@@ -353,3 +363,118 @@ def parse_result(output: str) -> AgentResult:
         rest = body[len("FAILED"):].lstrip(":").strip()
         return AgentResult("failed", rest or "unknown")
     return AgentResult("failed", f"unrecognized_result:{body[:50]}")
+
+
+# -- subprocess shell: spawn one `claude -p` session per job, over a real
+# Chrome via the Playwright MCP server on CDP. Not unit-tested past
+# consume_stream (pure) by house convention -- see CLAUDE.md testing
+# conventions and this task's brief. --------------------------------------
+
+def consume_stream(lines) -> tuple[str, float]:
+    """Fold claude's stream-json stdout into (text transcript, cost)."""
+    parts, cost = [], 0.0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            parts.append(line)
+            continue
+        if msg.get("type") == "assistant":
+            for block in msg.get("message", {}).get("content", []):
+                if block.get("type") == "text":
+                    parts.append(block["text"])
+                elif block.get("type") == "tool_use":
+                    name = block.get("name", "").replace("mcp__playwright__", "")
+                    parts.append(f"  >> {name}")
+        elif msg.get("type") == "result":
+            cost = msg.get("total_cost_usd", 0.0) or 0.0
+            parts.append(msg.get("result", "") or "")
+    return "\n".join(parts), cost
+
+
+def _mcp_config(cdp_port: int) -> dict:
+    return {"mcpServers": {"playwright": {
+        "command": "npx",
+        "args": ["@playwright/mcp@latest",
+                 f"--cdp-endpoint=http://localhost:{cdp_port}",
+                 "--viewport-size=1280x800"]}}}
+
+
+def _run_agent_blocking(prompt, job_id, cdp_port, timeout_s, model) -> AgentResult:
+    if not (_shutil.which("claude") and _shutil.which("npx")):
+        raise RuntimeError("agentic apply needs the `claude` CLI and `npx` on"
+                           " PATH -- see docs/lld-apply-button-v2.md")
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    mcp_path = WORK_DIR / ".mcp-apply.json"
+    mcp_path.write_text(json.dumps(_mcp_config(cdp_port)), encoding="utf-8")
+    session_dir = WORK_DIR / "session"
+    if session_dir.exists():
+        _shutil.rmtree(session_dir, ignore_errors=True)
+    session_dir.mkdir(parents=True)
+
+    env = os.environ.copy()
+    env.pop("CLAUDECODE", None)
+    env.pop("CLAUDE_CODE_ENTRYPOINT", None)
+
+    cmd = ["claude", "--model", model, "-p",
+           "--mcp-config", str(mcp_path),
+           "--permission-mode", "bypassPermissions",
+           "--no-session-persistence",
+           "--output-format", "stream-json", "--verbose", "-"]
+
+    start = time.time()
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True,
+                            encoding="utf-8", errors="replace", env=env,
+                            cwd=str(session_dir), shell=False)
+    try:
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+        # ponytail: soft timeout; move to a reader thread with a hard
+        # deadline if hangs show up in practice. consume_stream(proc.stdout)
+        # blocks until stdout closes, so timeout_s is enforced by proc.wait
+        # only after EOF -- a truly hung agent holds the thread until Chrome
+        # dies with it.
+        text, cost = consume_stream(proc.stdout)
+        proc.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc.pid)
+        return AgentResult("failed", "timeout",
+                           duration_ms=int((time.time() - start) * 1000))
+    finally:
+        if proc.poll() is None:
+            _kill_tree(proc.pid)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    transcript = LOG_DIR / f"apply_{ts}_job{job_id}.txt"
+    transcript.write_text(text, encoding="utf-8")
+
+    result = parse_result(text)
+    result.transcript_path = str(transcript)
+    result.cost_usd = cost
+    result.duration_ms = int((time.time() - start) * 1000)
+    return result
+
+
+def _kill_tree(pid: int) -> None:
+    import platform as _platform
+    if _platform.system() == "Windows":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       capture_output=True, timeout=10)
+    else:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+
+
+async def run_agent(prompt: str, *, job_id: int, cdp_port: int = 9222,
+                    timeout_s: int = 300, model: str = APPLY_MODEL) -> AgentResult:
+    """asyncio.to_thread wrapper: the same event-loop rule as
+    web/pipeline.py's run_once -- the dashboard must stay responsive."""
+    return await asyncio.to_thread(_run_agent_blocking, prompt, job_id,
+                                   cdp_port, timeout_s, model)
