@@ -59,6 +59,12 @@ def _event_types(conn):
     return [r["type"] for r in conn.execute("SELECT type FROM event")]
 
 
+# The four "the agent stopped reporting mid-run" reasons: unknown state on
+# the send path (held_unknown), plain retryable failures on the draft path.
+UNKNOWN_STATE = ("agent_error", "timeout", "no_result_line",
+                 "unrecognized_result:BLAH")
+
+
 # -- pure helpers ---------------------------------------------------------
 
 def test_classify_failure():
@@ -67,6 +73,14 @@ def test_classify_failure():
     assert ats_apply.classify_failure("stuck", 0) == "failed"
     assert ats_apply.classify_failure(
         "stuck", ats_apply.MAX_ATTEMPTS - 1) == "failed_permanent"
+
+
+def test_is_unknown_state():
+    for reason in UNKNOWN_STATE:
+        assert ats_apply.is_unknown_state(reason), reason
+    for reason in ("stuck", "page_error", "sso_required", "expired",
+                   "login_issue", ""):
+        assert not ats_apply.is_unknown_state(reason), reason
 
 
 def test_confirmed_within_days_boundary(conn):
@@ -167,7 +181,7 @@ async def test_send_pins_draft_answers_into_prompt(conn):
     r = await _submit(conn, dry_run=False, run_agent=fake)
     assert r["ok"] and r["status"] == "submitted"
     assert "PINNED ANSWERS" in fake.prompts[0]
-    assert "Visa?" in fake.prompts[0]
+    assert "Visa? -> Citizen" in fake.prompts[0]   # the value is the invariant
     row = _apps(conn)[-1]
     assert row["status"] == "submitted"
     assert row["submitted_at"] is not None
@@ -176,15 +190,43 @@ async def test_send_pins_draft_answers_into_prompt(conn):
     assert "submitted" in _event_types(conn)
 
 
-async def test_send_uses_pinned_answers_even_if_the_agent_reports_none(conn):
-    """The review invariant: what a human reviewed is what gets recorded."""
+@pytest.mark.parametrize("reported", [None, {}])
+async def test_send_uses_pinned_answers_when_the_agent_reports_none(
+        conn, reported):
+    """The review invariant: what a human reviewed is what gets recorded.
+    An empty ANSWERS_JSON is 'nothing reported', not 'no answers given'."""
     await _submit(conn, dry_run=True,
                   run_agent=fake_agent(AgentResult("draft_ready",
                                                    answers={"Visa?": "Citizen"})))
     await _submit(conn, dry_run=False,
-                  run_agent=fake_agent(AgentResult("applied")))
+                  run_agent=fake_agent(AgentResult("applied", answers=reported)))
     row = _apps(conn)[-1]
     assert json.loads(row["answers"]) == {"Visa?": "Citizen"}
+
+
+async def test_a_draft_with_no_answers_still_sends_in_send_mode(conn):
+    """A draft on record means a human review is expected -- falling
+    through to auto mode would let the agent improvise and submit."""
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'base-v1', 'draft')")
+    conn.commit()
+    fake = fake_agent(AgentResult("applied"))
+    await _submit(conn, dry_run=False, run_agent=fake)
+    assert "PINNED ANSWERS" in fake.prompts[0]
+
+
+@pytest.mark.parametrize("result,expected", [
+    (AgentResult("login_issue"), "failed"),
+    (AgentResult("draft_ready", answers={"q": "a"}), "failed"),
+])
+async def test_send_dispatch_for_a_non_submitting_outcome(conn, result,
+                                                          expected):
+    """Neither clicked Submit, and both are known states -- retryable."""
+    r = await _submit(conn, dry_run=False, run_agent=fake_agent(result))
+    assert not r["ok"]
+    row = _apps(conn)[-1]
+    assert row["status"] == expected
+    assert row["failure_reason"] == (result.reason or result.code)
 
 
 async def test_send_without_draft_runs_auto_mode(conn):
@@ -213,6 +255,17 @@ async def test_send_needs_answer_removes_the_in_flight_row(conn):
     assert _apps(conn) == []
 
 
+@pytest.mark.parametrize("dry_run", [True, False])
+async def test_a_needs_answer_with_no_question_is_still_truthy(conn, dry_run):
+    """worker.apply_tick parks on `if result.get("needs_answer")`, so a
+    bare RESULT:NEEDS_ANSWER: must not report an empty string -- that
+    falls through to job_skipped and clears the park."""
+    r = await _submit(conn, dry_run=dry_run,
+                      run_agent=fake_agent(AgentResult("needs_answer", "")))
+    assert r["needs_answer"]
+    assert _apps(conn) == []
+
+
 async def test_permanent_failure_writes_failed_permanent(conn):
     fake = fake_agent(AgentResult("failed", "sso_required"))
     r = await _submit(conn, dry_run=False, run_agent=fake)
@@ -235,27 +288,56 @@ async def test_retryable_failure_promotes_at_max_attempts(conn):
     assert not r["ok"] and "already has" in r["reason"]
 
 
-async def test_an_agent_crash_is_recorded_as_a_failure_not_raised(conn):
-    """run_agent does not return an AgentResult on every path (a broken
-    stdin pipe, a missing `claude` binary) -- submit() must not let that
-    escape and leave an in_flight row stranded."""
+@pytest.mark.parametrize("reason", UNKNOWN_STATE)
+async def test_an_unknown_state_send_holds_instead_of_retrying(conn, reason):
+    """The agent drove a real browser and then stopped reporting -- it may
+    have clicked Submit before it died. Retrying would be a double-submit
+    the moment SUBMISSION_IMPLEMENTED flips, so the row must BLOCK."""
+    if reason == "agent_error":
+        async def runner(prompt, job_id):
+            raise RuntimeError("claude CLI not on PATH")
+    else:
+        runner = fake_agent(AgentResult("failed", reason))
+
+    r = await _submit(conn, dry_run=False, run_agent=runner)
+    assert not r["ok"]
+    row = _apps(conn)[-1]
+    assert row["status"] == "held_unknown"
+    assert row["failure_reason"] == reason
+    # and it blocks: the queue can never re-pick this job
+    again = await _submit(conn, dry_run=False,
+                          run_agent=fake_agent(AgentResult("applied")))
+    assert not again["ok"] and "already has" in again["reason"]
+
+
+@pytest.mark.parametrize("reason", UNKNOWN_STATE)
+async def test_the_same_reasons_stay_retryable_on_a_draft(conn, reason):
+    """A draft submits nothing, so re-drafting is free and correct."""
+    if reason == "agent_error":
+        async def runner(prompt, job_id):
+            raise RuntimeError("nope")
+    else:
+        runner = fake_agent(AgentResult("failed", reason))
+
+    r = await _submit(conn, dry_run=True, run_agent=runner)
+    assert not r["ok"]
+    row = _apps(conn)[-1]
+    assert row["status"] == "failed"
+    assert row["failure_reason"] == reason
+
+
+async def test_an_agent_crash_keeps_the_slug_and_logs_the_detail(conn):
+    """failure_reason stays a queryable taxonomy slug (spec 5.3); the
+    exception text lands in the event payload instead."""
     async def boom(prompt, job_id):
         raise RuntimeError("claude CLI not on PATH")
 
     r = await _submit(conn, dry_run=False, run_agent=boom)
-    assert not r["ok"]
-    row = _apps(conn)[-1]
-    assert row["status"] == "failed"
-    assert "claude CLI not on PATH" in row["failure_reason"]
-
-
-async def test_an_agent_crash_during_a_draft_is_recorded_too(conn):
-    async def boom(prompt, job_id):
-        raise RuntimeError("nope")
-
-    r = await _submit(conn, dry_run=True, run_agent=boom)
-    assert not r["ok"]
-    assert _apps(conn)[-1]["status"] == "failed"
+    assert _apps(conn)[-1]["failure_reason"] == "agent_error"
+    payload = conn.execute("SELECT payload FROM event WHERE type ="
+                           " 'held_unknown'").fetchone()["payload"]
+    assert "claude CLI not on PATH" in payload
+    assert "claude CLI not on PATH" in r["reason"]
 
 
 # -- guards ---------------------------------------------------------------

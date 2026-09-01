@@ -26,13 +26,27 @@ SUBMISSION_IMPLEMENTED = False
 
 # Reasons a retry can never fix: the posting is gone, the platform is one
 # we refuse on principle, or the candidate is not eligible. Anything else
-# (stuck, page_error, timeout, login_issue, free text) is retryable until
+# (stuck, page_error, login_issue, free text) is retryable until
 # MAX_ATTEMPTS. See docs/lld-apply-button-v2.md section 5.2.
 PERMANENT_REASONS = {
     "expired", "sso_required", "easy_apply", "naukri_platform",
     "not_eligible_location", "already_applied", "not_a_job_application",
     "unsafe_permissions", "unsafe_verification", "site_blocked",
 }
+
+# Reasons that mean the agent drove a real browser and then stopped
+# reporting: it may have clicked Submit before it died. ON THE SEND PATH
+# these are neither "failed" nor "permanent" -- the application's true
+# state is UNKNOWN, so they become 'held_unknown' (a BLOCKING status) and
+# a human adjudicates, exactly as sweep_stale_in_flight does for a crashed
+# in_flight row (see docs/lld-apply-button-v2.md section 6, layer 2).
+# Retrying instead would be a double-submit vector the moment
+# SUBMISSION_IMPLEMENTED flips. The DRAFT path keeps them retryable:
+# nothing is submitted at draft time, so re-drafting is free and correct.
+# Matched on the part before the first ':' -- "unrecognized_result:<body>"
+# carries a payload.
+UNKNOWN_STATE_REASONS = {"agent_error", "timeout", "no_result_line",
+                         "unrecognized_result"}
 
 QA_VOLATILE_WINDOW_DAYS = 30
 
@@ -53,6 +67,10 @@ def classify_failure(reason: str, prior_failures: int) -> str:
     if reason in PERMANENT_REASONS:
         return "failed_permanent"
     return "failed_permanent" if prior_failures + 1 >= MAX_ATTEMPTS else "failed"
+
+
+def is_unknown_state(reason: str) -> bool:
+    return reason.split(":", 1)[0].strip() in UNKNOWN_STATE_REASONS
 
 
 def sweep_stale_in_flight(conn: sqlite3.Connection, minutes: int = 15) -> int:
@@ -127,7 +145,7 @@ def _prior_failures(conn, job_id: int) -> int:
 
 
 def _record_draft_outcome(conn, job_id: int, resume_version: str, url: str,
-                          result) -> dict:
+                          result, detail: str = "") -> dict:
     code = result.code
 
     if code == "draft_ready":
@@ -140,8 +158,13 @@ def _record_draft_outcome(conn, job_id: int, resume_version: str, url: str,
         return {"ok": True, "job_id": job_id, "status": "draft"}
 
     if code == "needs_answer":
-        return {"ok": False, "needs_answer": result.reason,
-                "reason": f"needs an answer: {result.reason}"}
+        # Never falsy: worker.apply_tick parks on `if result.get(
+        # "needs_answer")`, so a bare RESULT:NEEDS_ANSWER: with no question
+        # text would fall through to job_skipped and clear the very park
+        # this mechanism exists to set.
+        question = result.reason or "(question not reported)"
+        return {"ok": False, "needs_answer": question,
+                "reason": f"needs an answer: {question}"}
 
     if code == "captcha":
         conn.execute("INSERT INTO event (job_id, type, payload)"
@@ -158,6 +181,9 @@ def _record_draft_outcome(conn, job_id: int, resume_version: str, url: str,
         # a second time, rather than filing a retryable failure.
         status, reason = "held_unknown", "applied_during_draft"
     else:
+        # No UNKNOWN_STATE_REASONS special case here on purpose: a draft
+        # submits nothing, so a crashed/timed-out/unparseable draft run is
+        # simply retryable.
         reason = _reason_of(result)
         status = classify_failure(reason, _prior_failures(conn, job_id))
 
@@ -167,19 +193,20 @@ def _record_draft_outcome(conn, job_id: int, resume_version: str, url: str,
         (job_id, resume_version, json.dumps(result.answers or {}), status,
          reason, result.transcript_path or None))
     conn.execute("INSERT INTO event (job_id, type, payload) VALUES (?, ?, ?)",
-                 (job_id, status, reason))
+                 (job_id, status, detail or reason))
     conn.commit()
-    return {"ok": False, "reason": f"draft {status}: {reason}"}
+    return {"ok": False, "reason": f"draft {status}: {detail or reason}"}
 
 
 def _record_send_outcome(conn, job_id: int, app_id: int, url: str,
-                         pinned: dict | None, result) -> dict:
+                         pinned: dict | None, result, detail: str = "") -> dict:
     code = result.code
 
     if code == "applied":
-        # pinned wins when the agent reports nothing back: the review
-        # invariant says the recorded answers are what was reviewed.
-        answers = result.answers if result.answers is not None else (pinned or {})
+        # pinned wins when the agent reports nothing back -- an empty
+        # ANSWERS_JSON included. The review invariant says the recorded
+        # answers are what was reviewed, so `{}` must not overwrite them.
+        answers = result.answers or pinned or {}
         conn.execute(
             "UPDATE application SET status = 'submitted', answers = ?,"
             " submitted_at = datetime('now'), transcript_path = ?"
@@ -204,37 +231,45 @@ def _record_send_outcome(conn, job_id: int, app_id: int, url: str,
         # answered.
         conn.execute("DELETE FROM application WHERE id = ?", (app_id,))
         conn.commit()
-        return {"ok": False, "needs_answer": result.reason,
-                "reason": f"needs an answer: {result.reason}"}
+        question = result.reason or "(question not reported)"
+        return {"ok": False, "needs_answer": question,
+                "reason": f"needs an answer: {question}"}
 
     # expired / login_issue / failed / draft_ready-in-send-mode / anything
-    # unrecognized: the in_flight row becomes the failure record.
+    # unrecognized: the in_flight row becomes the failure record. A reason
+    # that means "the agent stopped reporting mid-run" holds instead of
+    # failing -- it may already have submitted (see UNKNOWN_STATE_REASONS).
     reason = _reason_of(result)
-    status = classify_failure(reason, _prior_failures(conn, job_id))
+    status = ("held_unknown" if is_unknown_state(reason)
+              else classify_failure(reason, _prior_failures(conn, job_id)))
     conn.execute(
         "UPDATE application SET status = ?, failure_reason = ?,"
         " transcript_path = ? WHERE id = ?",
         (status, reason, result.transcript_path or None, app_id))
     conn.execute("INSERT INTO event (job_id, type, payload) VALUES (?, ?, ?)",
-                 (job_id, status, reason))
+                 (job_id, status, detail or reason))
     conn.commit()
-    return {"ok": False, "reason": f"submission {status}: {reason}"}
+    return {"ok": False, "reason": f"submission {status}: {detail or reason}"}
 
 
-async def _run(runner, prompt: str, job_id: int):
+async def _run(runner, prompt: str, job_id: int) -> tuple:
     """run_agent does not return an AgentResult on every path -- a broken
     stdin pipe or a missing `claude`/`npx` binary raises out of it. Turn
-    that into a retryable failure so the caller always has a result to
-    record, and never leaves an in_flight row stranded."""
+    that into a recordable result so the caller always has one, and never
+    leaves an in_flight row stranded.
+
+    Returns (result, detail). The exception text goes in `detail`, for the
+    event payload, so `failure_reason` stays the queryable taxonomy slug
+    the schema promises (spec section 5.3)."""
     try:
-        return await runner(prompt, job_id)
+        return await runner(prompt, job_id), ""
     except Exception as exc:
         log.exception("apply agent crashed for job %s", job_id)
-        return agent_mod.AgentResult("failed", f"agent_error: {exc}")
+        return agent_mod.AgentResult("failed", "agent_error"), str(exc)
 
 
 async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
-                 brief: CareerBrief | None = None,
+                 brief: CareerBrief,
                  profile: CandidateProfile | None = None,
                  resume_version: str | None = None,
                  run_agent=None) -> dict:
@@ -298,9 +333,9 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
 
     if dry_run:
         prompt = agent_mod.build_prompt(*prompt_args, mode="draft", score=score)
-        result = await _run(runner, prompt, job_id)
+        result, detail = await _run(runner, prompt, job_id)
         return _record_draft_outcome(conn, job_id, resume_version,
-                                     row["url"], result)
+                                     row["url"], result, detail)
 
     # Real send. A draft on record means a human (or auto mode's own draft
     # pass) already reviewed those answers, and they are what must be sent
@@ -310,13 +345,18 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
         "SELECT answers FROM application WHERE job_id = ? AND status = 'draft'"
         " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
     pinned = None
-    if draft is not None and draft["answers"]:
+    if draft is not None:
+        # A draft exists => a human review is expected, so send mode is
+        # non-negotiable even if that draft recorded no answers. Falling
+        # through to auto mode there would let the agent improvise and
+        # submit answers nobody saw.
+        #
         # Reused verbatim, with no re-check of qa_bank's 30-day volatility
         # window even if the draft is older than that window. Revalidating
         # here would contradict the whole point of reuse -- "what was shown
         # for review is exactly what gets sent" -- by silently sending
         # different answers than what was reviewed. Reuse wins.
-        pinned = json.loads(draft["answers"])
+        pinned = json.loads(draft["answers"] or "{}")
         prompt = agent_mod.build_prompt(*prompt_args, mode="send",
                                         pinned_answers=pinned, score=score)
     else:
@@ -328,5 +368,6 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
     app_id = cur.lastrowid
     conn.commit()
 
-    result = await _run(runner, prompt, job_id)
-    return _record_send_outcome(conn, job_id, app_id, row["url"], pinned, result)
+    result, detail = await _run(runner, prompt, job_id)
+    return _record_send_outcome(conn, job_id, app_id, row["url"], pinned,
+                                result, detail)
