@@ -1,5 +1,7 @@
 # LLD — The Apply Button
 
+> Superseded by lld-apply-button-v2.md for the apply engine.
+
 Low-level design of what happens between a click on **Apply** and a row landing in
 `application`. Traced against `a7311cf` plus the working tree.
 
