@@ -1,11 +1,12 @@
+"""The apply engine's DB half: `submit()` owns the application state
+machine and every write; `apply/agent.py` owns the browser session that
+decides an outcome. See docs/lld-apply-button-v2.md section 5."""
 import datetime as dt
 import json
 import logging
 import sqlite3
-from pathlib import Path
 
-from pydantic import BaseModel
-
+from career_agent.apply import agent as agent_mod
 from career_agent.config import CandidateProfile, CareerBrief
 from career_agent.models import Job
 
@@ -15,42 +16,23 @@ RESUME_VERSION = "base-v1"
 MAX_ATTEMPTS = 3
 BLOCKING = ("in_flight", "submitted", "held_unknown", "failed_permanent")
 
-# Real Greenhouse automation exists (see _default_compute_answers /
-# _default_fill_and_submit below), but a real send stays refused until
-# this is flipped by hand -- see the "Rollout" section of
-# docs/superpowers/specs/2026-08-23-auto-submission-design.md. Flipping it
-# has no effect on non-Greenhouse jobs, which submit() refuses
-# unconditionally regardless of this flag.
+# The outermost kill switch: a real send is refused unless this is flipped
+# by hand, for EVERY source (the agent engine is source-agnostic, so the
+# old per-source refusal is gone and this flag is the only gate left). See
+# the "Rollout" section of
+# docs/superpowers/specs/2026-08-23-auto-submission-design.md. Drafting is
+# not gated -- it fills a form without submitting it.
 SUBMISSION_IMPLEMENTED = False
 
-
-class CaptchaEncountered(Exception):
-    """The site showed a captcha, so it has already classified this session as
-    suspicious. Backing off is cheaper than pushing through."""
-
-
-class NeedsAnswer(Exception):
-    """A form question has no candidate-profile field and no usable
-    qa_bank entry. Raised by resolve_answers; callers must park the job
-    rather than retry immediately -- see worker.apply_tick's handling."""
-    def __init__(self, question: str):
-        super().__init__(question)
-        self.question = question
-
-
-class FormField(BaseModel):
-    """One custom question read off a live Greenhouse form. Standard
-    fields (name/email/phone/resume/links) never appear here -- they're
-    answered directly from CandidateProfile before resolve_answers runs.
-    locator is a group selector (e.g. "[name='...']") for a radio/checkbox
-    question, or an id selector for anything else -- see
-    _read_custom_questions and _fill_field, which dispatch on the live
-    element rather than on any kind recorded here, since draft time and
-    send time are two separate page loads and answers are stored as a
-    flat locator->value dict with no room for extra metadata."""
-    label: str
-    locator: str
-
+# Reasons a retry can never fix: the posting is gone, the platform is one
+# we refuse on principle, or the candidate is not eligible. Anything else
+# (stuck, page_error, timeout, login_issue, free text) is retryable until
+# MAX_ATTEMPTS. See docs/lld-apply-button-v2.md section 5.2.
+PERMANENT_REASONS = {
+    "expired", "sso_required", "easy_apply", "naukri_platform",
+    "not_eligible_location", "already_applied", "not_a_job_application",
+    "unsafe_permissions", "unsafe_verification", "site_blocked",
+}
 
 QA_VOLATILE_WINDOW_DAYS = 30
 
@@ -67,216 +49,10 @@ def _confirmed_within_days(last_confirmed_at: str, days: int) -> bool:
     return (now - confirmed) <= dt.timedelta(days=days)
 
 
-def resolve_answers(questions: list[FormField], conn) -> dict[str, str]:
-    """Pure decision logic, no Playwright: for each custom question, use a
-    qa_bank hit if it exists and (when volatile) was confirmed inside the
-    reconfirmation window; otherwise raise NeedsAnswer. This project does
-    not attempt to answer a question from the facts store automatically
-    (see the plan's "Deviations from the spec" note) -- every custom
-    question goes through qa_bank only."""
-    from career_agent import store  # local: store.py imports this module
-                                     # (for RESUME_VERSION), so a top-level
-                                     # import here would be circular.
-    answers = {}
-    for q in questions:
-        row = store.qa_lookup(conn, q.label)
-        if row is None:
-            raise NeedsAnswer(q.label)
-        if row["is_volatile"] and not _confirmed_within_days(
-                row["last_confirmed_at"], QA_VOLATILE_WINDOW_DAYS):
-            raise NeedsAnswer(q.label)
-        answers[q.locator] = row["answer"]
-    return answers
-
-
-def _split_name(candidate_name: str) -> tuple[str, str]:
-    """Greenhouse always asks for first and last name separately.
-    Ponytail: a naive single-space split, wrong for a name with more than
-    one middle/last word grouping intent -- fine for the common case,
-    revisit if it matters."""
-    parts = candidate_name.strip().split(" ", 1)
-    return (parts[0], parts[1] if len(parts) > 1 else "")
-
-
-# Verify these against a real live Greenhouse posting before flipping
-# SUBMISSION_IMPLEMENTED -- they were not confirmed against a rendered
-# page from this environment, and Greenhouse has iterated its embed
-# markup before. linkedin_url/portfolio_url are confirmed STALE as of
-# 2026-08-27: a live Anthropic posting renders those as dynamic
-# "#question_<id>" custom questions, not these fixed ids, so they never
-# match and those two profile fields are silently never filled -- answer
-# them via qa_bank (label "LinkedIn Profile" / "Website") instead, same as
-# any other custom question, until this is revisited. The submit-button
-# selector in _default_fill_and_submit ("button[type=submit],
-# input[type=submit]") and the #resume file-upload call remain unverified
-# against a live posting.
-GREENHOUSE_STANDARD_FIELD_SELECTORS = {
-    "first_name": "#first_name",
-    "last_name": "#last_name",
-    "email": "#email",
-    "phone": "#phone",
-    "resume": "#resume",
-    "linkedin_url": "#job_application_urls_linkedin",
-    "portfolio_url": "#job_application_urls_portfolio",
-}
-
-
-async def _check_for_captcha(page, url: str) -> None:
-    if await page.locator("iframe[src*='recaptcha'], .h-captcha").count():
-        await page.screenshot(path=f"screenshots/captcha-{abs(hash(url))}.png")
-        raise CaptchaEncountered(url)
-
-
-async def _read_custom_questions(page) -> list[FormField]:
-    """Scan the form for label+input pairs beyond Greenhouse's standard
-    fields. Not unit tested -- see the plan's "Deviations from the spec"
-    note; verify against a real posting before trusting this.
-
-    A radio/checkbox question is a group of same-`name` inputs, not one
-    element with one id -- an id-selector locator would only ever let
-    _fill_field see (and .check()) the first option, never the one whose
-    value actually matches the stored answer. So a radio/checkbox group's
-    FormField.locator is a `[name='...']` group selector instead of an id
-    selector; _fill_field narrows it to the right option at fill time.
-    <select> and text-like inputs/textareas keep the id selector, which
-    already names exactly one element."""
-    standard = set(GREENHOUSE_STANDARD_FIELD_SELECTORS.values())
-    fields = []
-    for container in await page.locator(".field-wrapper:has(label)").all():
-        input_el = container.locator("input, select, textarea").first
-        if await input_el.count() == 0:
-            continue
-        field_id = await input_el.get_attribute("id")
-        if not field_id or f"#{field_id}" in standard:
-            continue  # a standard field, already answered from the profile
-        label_el = container.locator("label").first
-        label = (await label_el.inner_text()).strip()
-        input_type = (await input_el.get_attribute("type") or "").lower()
-        if input_type in ("radio", "checkbox"):
-            name = await input_el.get_attribute("name")
-            if not name:
-                continue  # can't build a group selector; leave unanswered
-                          # rather than mis-fill only the first option
-            locator = f"[name='{name}']"
-        else:
-            locator = f"#{field_id}"
-        fields.append(FormField(label=label, locator=locator))
-    return fields
-
-
-async def _default_compute_answers(url: str, job, brief, profile,
-                                   conn) -> dict:
-    """The real Greenhouse filler's read-only half: visit the form, decide
-    every answer, and return them WITHOUT clicking anything. Raises
-    NeedsAnswer (via resolve_answers) for a question nothing can answer,
-    and CaptchaEncountered if the page shows one. profile is required here
-    (only reached for job.source == 'ats' -- see submit()'s routing)."""
-    if profile is None:
-        raise RuntimeError(
-            "candidate_profile.toml not found -- see"
-            " candidate_profile.toml.example. Required before a Greenhouse"
-            " draft or send can run.")
-
-    from playwright.async_api import async_playwright
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
-        page = await browser.new_page()
-        try:
-            await page.goto(url)
-            await _check_for_captcha(page, url)
-
-            first_name, last_name = _split_name(profile.candidate_name)
-            sel = GREENHOUSE_STANDARD_FIELD_SELECTORS
-            answers = {}
-            # Every standard field gets the same existence guard -- a
-            # posting missing one of them (e.g. no phone field) must not
-            # produce a stored answer whose selector matches nothing, which
-            # would time out at real-send time rather than at draft time.
-            candidates = {
-                sel["first_name"]: first_name,
-                sel["last_name"]: last_name,
-                sel["email"]: profile.candidate_email,
-                sel["phone"]: profile.candidate_phone,
-                sel["linkedin_url"]: profile.linkedin_url,
-                sel["portfolio_url"]: profile.portfolio_url,
-            }
-            for selector, value in candidates.items():
-                if value and await page.locator(selector).count():
-                    answers[selector] = value
-
-            questions = await _read_custom_questions(page)
-            answers.update(resolve_answers(questions, conn))
-            return answers
-        finally:
-            await browser.close()
-
-
-async def _fill_field(page, locator: str, value) -> None:
-    """Dispatch by the live element's actual kind, not by anything recorded
-    at draft time (draft time and send time are two separate page loads).
-    Playwright's .fill() only works on a text-like <input>/<textarea>; it
-    raises on <select> and only ever touches the first element of a
-    radio/checkbox group, never the one matching the stored answer -- so
-    calling it unconditionally on every answer (the old behavior) would
-    error or silently mis-fill as soon as a form has one of those."""
-    field = page.locator(locator).first
-    tag = await field.evaluate("el => el.tagName.toLowerCase()")
-    if tag == "select":
-        await field.select_option(str(value))
-        return
-    input_type = (await field.get_attribute("type") or "").lower()
-    if input_type in ("radio", "checkbox"):
-        # locator is a `[name='...']` group selector here (see
-        # _read_custom_questions); narrow it to the option whose value
-        # matches the stored answer before checking it.
-        await page.locator(f"{locator}[value={json.dumps(str(value))}]").check()
-        return
-    await field.fill(str(value))
-
-
-async def _default_fill_and_submit(url: str, answers: dict, resume_path) -> None:
-    """The real Greenhouse filler's write half: type in answers already
-    decided by _default_compute_answers, attach the résumé, and click
-    Submit. Makes no decisions of its own."""
-    from playwright.async_api import async_playwright
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
-        page = await browser.new_page()
-        try:
-            await page.goto(url)
-            await _check_for_captcha(page, url)
-
-            for locator, value in answers.items():
-                await _fill_field(page, locator, value)
-            await page.locator(
-                GREENHOUSE_STANDARD_FIELD_SELECTORS["resume"]
-            ).set_input_files(str(resume_path))
-            await page.locator("button[type=submit], input[type=submit]").first.click()
-        finally:
-            await browser.close()
-
-
-async def _generic_stub_compute_answers(url: str, job, brief, profile,
-                                        conn) -> dict:
-    """Non-Greenhouse jobs (job.source != 'ats'): there is no known form
-    structure to read, so this proves the page loads and hands back a
-    placeholder -- the same behavior every source got before this file's
-    v3 changes (this is _default_filler, renamed to match the other two
-    functions' signature and to name what it's actually for now that a
-    real filler exists alongside it)."""
-    from playwright.async_api import async_playwright
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
-        page = await browser.new_page()
-        try:
-            await page.goto(url)
-            await _check_for_captcha(page, url)
-            return {"note": "filled from facts store and qa_bank"}
-        finally:
-            await browser.close()
+def classify_failure(reason: str, prior_failures: int) -> str:
+    if reason in PERMANENT_REASONS:
+        return "failed_permanent"
+    return "failed_permanent" if prior_failures + 1 >= MAX_ATTEMPTS else "failed"
 
 
 def sweep_stale_in_flight(conn: sqlite3.Connection, minutes: int = 15) -> int:
@@ -290,37 +66,194 @@ def sweep_stale_in_flight(conn: sqlite3.Connection, minutes: int = 15) -> int:
     return cur.rowcount
 
 
+async def _live_run_agent(prompt: str, job_id: int):
+    """Default agent runner: a real Chrome around a real `claude` session.
+    Tests inject their own run_agent instead -- nothing in the test suite
+    ever reaches this, by house convention (no test spawns a browser or a
+    subprocess)."""
+    from career_agent.apply import chrome as chrome_mod
+
+    proc = chrome_mod.launch_chrome()
+    try:
+        return await agent_mod.run_agent(prompt, job_id=job_id)
+    finally:
+        chrome_mod.cleanup(proc)
+
+
+def _resume_text(row) -> str:
+    """Body text for the prompt's RESUME TEXT section.
+
+    resume.content is tailor.py's JSON -- the tailored summary and bullets
+    only, not the work history an agent filling a Workday/iCIMS employment
+    section needs -- so the body comes off the rendered DOCX and the
+    tailored parts are appended. Degrades rather than raising: an
+    unreadable file falls back to the JSON, then to ""."""
+    parts = []
+    try:
+        import docx
+
+        doc = docx.Document(row["path"])
+        body = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        if body:
+            parts.append(body)
+    except Exception:
+        log.debug("could not read resume docx at %r", row["path"], exc_info=True)
+
+    content = row["content"]
+    if content:
+        try:
+            data = json.loads(content)
+            tailored = [data["summary"]] if data.get("summary") else []
+            tailored += [b.get("text", "") for b in data.get("bullets", [])]
+            tailored = [t for t in tailored if t]
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            tailored = [str(content)]
+        if tailored:
+            parts.append("Tailored for this job:\n"
+                         + "\n".join(f"- {t}" for t in tailored))
+    return "\n\n".join(parts)
+
+
+def _reason_of(result) -> str:
+    """AgentResult("expired") carries no reason; the code itself is the
+    taxonomy slug in that case."""
+    return result.reason or result.code
+
+
+def _prior_failures(conn, job_id: int) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) n FROM application"
+        " WHERE job_id = ? AND status = 'failed'", (job_id,)).fetchone()["n"]
+
+
+def _record_draft_outcome(conn, job_id: int, resume_version: str, url: str,
+                          result) -> dict:
+    code = result.code
+
+    if code == "draft_ready":
+        conn.execute(
+            "INSERT INTO application (job_id, resume_version, answers, status,"
+            " transcript_path) VALUES (?, ?, ?, 'draft', ?)",
+            (job_id, resume_version, json.dumps(result.answers or {}),
+             result.transcript_path or None))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    if code == "needs_answer":
+        return {"ok": False, "needs_answer": result.reason,
+                "reason": f"needs an answer: {result.reason}"}
+
+    if code == "captcha":
+        conn.execute("INSERT INTO event (job_id, type, payload)"
+                     " VALUES (?, 'captcha_held', ?)",
+                     (job_id, result.transcript_path or url))
+        conn.commit()
+        return {"ok": False, "held": True,
+                "reason": "captcha encountered; held for review"}
+
+    if code == "applied":
+        # Draft mode explicitly forbids clicking Submit. If the agent says
+        # it applied anyway, the true state is unknown and possibly
+        # submitted -- hold it (a BLOCKING status) so no later run can send
+        # a second time, rather than filing a retryable failure.
+        status, reason = "held_unknown", "applied_during_draft"
+    else:
+        reason = _reason_of(result)
+        status = classify_failure(reason, _prior_failures(conn, job_id))
+
+    conn.execute(
+        "INSERT INTO application (job_id, resume_version, answers, status,"
+        " failure_reason, transcript_path) VALUES (?, ?, ?, ?, ?, ?)",
+        (job_id, resume_version, json.dumps(result.answers or {}), status,
+         reason, result.transcript_path or None))
+    conn.execute("INSERT INTO event (job_id, type, payload) VALUES (?, ?, ?)",
+                 (job_id, status, reason))
+    conn.commit()
+    return {"ok": False, "reason": f"draft {status}: {reason}"}
+
+
+def _record_send_outcome(conn, job_id: int, app_id: int, url: str,
+                         pinned: dict | None, result) -> dict:
+    code = result.code
+
+    if code == "applied":
+        # pinned wins when the agent reports nothing back: the review
+        # invariant says the recorded answers are what was reviewed.
+        answers = result.answers if result.answers is not None else (pinned or {})
+        conn.execute(
+            "UPDATE application SET status = 'submitted', answers = ?,"
+            " submitted_at = datetime('now'), transcript_path = ?"
+            " WHERE id = ?",
+            (json.dumps(answers), result.transcript_path or None, app_id))
+        conn.execute("INSERT INTO event (job_id, type, payload)"
+                     " VALUES (?, 'submitted', ?)", (job_id, url))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "submitted"}
+
+    if code == "captcha":
+        conn.execute("DELETE FROM application WHERE id = ?", (app_id,))
+        conn.execute("INSERT INTO event (job_id, type, payload)"
+                     " VALUES (?, 'captcha_held', ?)", (job_id, url))
+        conn.commit()
+        return {"ok": False, "held": True,
+                "reason": "captcha encountered; held for review"}
+
+    if code == "needs_answer":
+        # Nothing was sent, so the attempt leaves no trace: the worker
+        # parks on the question and the job re-enters the queue once it is
+        # answered.
+        conn.execute("DELETE FROM application WHERE id = ?", (app_id,))
+        conn.commit()
+        return {"ok": False, "needs_answer": result.reason,
+                "reason": f"needs an answer: {result.reason}"}
+
+    # expired / login_issue / failed / draft_ready-in-send-mode / anything
+    # unrecognized: the in_flight row becomes the failure record.
+    reason = _reason_of(result)
+    status = classify_failure(reason, _prior_failures(conn, job_id))
+    conn.execute(
+        "UPDATE application SET status = ?, failure_reason = ?,"
+        " transcript_path = ? WHERE id = ?",
+        (status, reason, result.transcript_path or None, app_id))
+    conn.execute("INSERT INTO event (job_id, type, payload) VALUES (?, ?, ?)",
+                 (job_id, status, reason))
+    conn.commit()
+    return {"ok": False, "reason": f"submission {status}: {reason}"}
+
+
+async def _run(runner, prompt: str, job_id: int):
+    """run_agent does not return an AgentResult on every path -- a broken
+    stdin pipe or a missing `claude`/`npx` binary raises out of it. Turn
+    that into a retryable failure so the caller always has a result to
+    record, and never leaves an in_flight row stranded."""
+    try:
+        return await runner(prompt, job_id)
+    except Exception as exc:
+        log.exception("apply agent crashed for job %s", job_id)
+        return agent_mod.AgentResult("failed", f"agent_error: {exc}")
+
+
 async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
                  brief: CareerBrief | None = None,
                  profile: CandidateProfile | None = None,
-                 compute_answers=None, fill_and_submit=None,
-                 resume_version: str | None = None) -> dict:
+                 resume_version: str | None = None,
+                 run_agent=None) -> dict:
+    """Draft (dry_run=True) or really send (dry_run=False) one application,
+    by running one apply-agent session and translating its AgentResult into
+    this module's state machine. `run_agent` is the only test seam:
+    `async (prompt: str, job_id: int) -> AgentResult`."""
     row = conn.execute("SELECT * FROM job WHERE id = ?", (job_id,)).fetchone()
     if row is None:
         return {"ok": False, "reason": f"job {job_id} not found"}
-    is_greenhouse = row["source"] == "ats"
-    job = Job(source=row["source"], external_id=row["external_id"],
-              company=row["company"], title=row["title"],
-              location=row["location"], is_remote=bool(row["is_remote"]),
-              comp_min=row["comp_min"], comp_max=row["comp_max"],
-              posted_at=row["posted_at"], url=row["url"],
-              description=row["description"])
 
-    # Refuse a real send with no injected override, before anything is
-    # written. Greenhouse jobs are refused only while SUBMISSION_IMPLEMENTED
-    # is False (the manual, later "trust it" decision -- see the spec's
-    # Rollout section). Every other source is refused unconditionally: no
-    # filler exists for "some other website" and none is built in this round.
-    if not dry_run and fill_and_submit is None:
-        if not is_greenhouse:
-            return {"ok": False, "unsupported": True, "reason":
-                    "Submission automation only exists for Greenhouse jobs"
-                    " today. Apply on the site yourself, then record the"
-                    " outcome."}
-        if not SUBMISSION_IMPLEMENTED:
-            return {"ok": False, "unsupported": True, "reason":
-                    "The Greenhouse filler is built but not enabled yet."
-                    " Apply on the site yourself, then record the outcome."}
+    # Kill switch first, before anything is written. It now gates a real
+    # send for every source, not just Greenhouse -- an injected run_agent
+    # (tests only) is the escape hatch, same as the old injected filler.
+    if not dry_run and run_agent is None and not SUBMISSION_IMPLEMENTED:
+        return {"ok": False, "unsupported": True, "reason":
+                "The agentic apply engine is built but real sends are not"
+                " enabled yet (SUBMISSION_IMPLEMENTED). Apply on the site"
+                " yourself, then record the outcome."}
 
     live = conn.execute(
         f"SELECT status FROM application WHERE job_id = ? AND status IN "
@@ -329,80 +262,65 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
         return {"ok": False,
                 "reason": f"job {job_id} already has a {live['status']} attempt"}
 
-    resume_version = resume_version or RESUME_VERSION
+    if profile is None:
+        raise RuntimeError(
+            "candidate_profile.toml not found -- see"
+            " candidate_profile.toml.example. The apply agent needs it for"
+            " every source.")
 
-    def _default_compute_fn():
-        return _default_compute_answers if is_greenhouse else _generic_stub_compute_answers
+    resume_version = resume_version or RESUME_VERSION
+    resume_row = conn.execute(
+        "SELECT path, content FROM resume WHERE version = ?",
+        (resume_version,)).fetchone()
+    if resume_row is None:
+        # Required for a draft too, not just a send: the agent uploads the
+        # file during the draft run, so a missing one has to fail here
+        # rather than produce a prompt pointing at nothing.
+        return {"ok": False,
+                "reason": f"no résumé on record for version {resume_version!r}"}
+
+    from career_agent import store  # local: store.py imports this module
+                                    # for RESUME_VERSION, so a top-level
+                                    # import back would be circular.
+    job = Job(source=row["source"], external_id=row["external_id"],
+              company=row["company"], title=row["title"],
+              location=row["location"], is_remote=bool(row["is_remote"]),
+              comp_min=row["comp_min"], comp_max=row["comp_max"],
+              posted_at=row["posted_at"], url=row["url"],
+              description=row["description"])
+    score_row = conn.execute(
+        "SELECT weighted_score FROM assessment WHERE job_id = ?"
+        " ORDER BY created_at DESC, id DESC LIMIT 1", (job_id,)).fetchone()
+    prompt_args = (job, profile, brief, store.qa_all(conn),
+                   _resume_text(resume_row), resume_row["path"])
+    score = score_row["weighted_score"] if score_row else None
+    runner = run_agent or _live_run_agent
 
     if dry_run:
-        compute_fn = compute_answers or _default_compute_fn()
-        try:
-            answers = await compute_fn(row["url"], job, brief, profile, conn)
-        except CaptchaEncountered as exc:
-            conn.execute("INSERT INTO event (job_id, type, payload)"
-                         " VALUES (?, 'captcha_held', ?)", (job_id, str(exc)))
-            conn.commit()
-            return {"ok": False, "held": True,
-                    "reason": "captcha encountered; held for review"}
-        except NeedsAnswer as exc:
-            return {"ok": False, "needs_answer": exc.question,
-                    "reason": f"needs an answer: {exc.question}"}
-        conn.execute(
-            "INSERT INTO application (job_id, resume_version, answers, status)"
-            " VALUES (?, ?, ?, 'draft')",
-            (job_id, resume_version, json.dumps(answers)))
-        conn.commit()
-        return {"ok": True, "job_id": job_id, "status": "draft"}
+        prompt = agent_mod.build_prompt(*prompt_args, mode="draft", score=score)
+        result = await _run(runner, prompt, job_id)
+        return _record_draft_outcome(conn, job_id, resume_version,
+                                     row["url"], result)
 
-    # Real send: reuse the draft's own answers rather than recomputing --
-    # what a human reviewed (or what auto mode drafted a moment earlier) is
-    # exactly what must be sent. Only falls back to computing fresh when
-    # submit() is called directly with no draft on record (not reachable
-    # through apply_tick's normal path, but submit() stays safe to call
-    # this way).
+    # Real send. A draft on record means a human (or auto mode's own draft
+    # pass) already reviewed those answers, and they are what must be sent
+    # -- never recomputed. No draft means auto mode's single pass, where
+    # the agent decides and submits in one session.
     draft = conn.execute(
         "SELECT answers FROM application WHERE job_id = ? AND status = 'draft'"
         " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
-    send_fn = fill_and_submit or _default_fill_and_submit
-    if draft is not None and draft["answers"] is not None:
+    pinned = None
+    if draft is not None and draft["answers"]:
         # Reused verbatim, with no re-check of qa_bank's 30-day volatility
-        # window (resolve_answers's QA_VOLATILE_WINDOW_DAYS) even if the
-        # draft is older than that window and a volatile answer it used has
-        # since gone stale. This is a real tension, not an oversight:
-        # revalidating volatility here would contradict the whole point of
-        # reuse -- "what a human reviewed (or what auto mode drafted a
-        # moment ago) is exactly what gets sent" -- by silently sending
-        # different answers than what was shown for review. Reuse wins.
-        answers = json.loads(draft["answers"])
-    elif compute_answers is not None:
-        # No draft on record, but the caller supplied its own
-        # compute_answers -- honor it rather than silently sending nothing.
-        try:
-            answers = await compute_answers(row["url"], job, brief, profile, conn)
-        except CaptchaEncountered as exc:
-            conn.execute("INSERT INTO event (job_id, type, payload)"
-                         " VALUES (?, 'captcha_held', ?)", (job_id, str(exc)))
-            conn.commit()
-            return {"ok": False, "held": True,
-                    "reason": "captcha encountered; held for review"}
-        except NeedsAnswer as exc:
-            return {"ok": False, "needs_answer": exc.question,
-                    "reason": f"needs an answer: {exc.question}"}
+        # window even if the draft is older than that window. Revalidating
+        # here would contradict the whole point of reuse -- "what was shown
+        # for review is exactly what gets sent" -- by silently sending
+        # different answers than what was reviewed. Reuse wins.
+        pinned = json.loads(draft["answers"])
+        prompt = agent_mod.build_prompt(*prompt_args, mode="send",
+                                        pinned_answers=pinned, score=score)
     else:
-        # No draft and no caller override: apply_tick's normal flow always
-        # drafts before it sends, so this is only reached by a caller that
-        # invokes submit(dry_run=False) directly. Silently launching the
-        # real Greenhouse/generic filler here -- a live browser, needing a
-        # profile the caller never supplied -- would be a surprising side
-        # effect of a missing draft, not a safety net, so this sends with
-        # no extra answers rather than guessing which default to run.
-        answers = {}
-
-    resume_row = conn.execute("SELECT path FROM resume WHERE version = ?",
-                              (resume_version,)).fetchone()
-    if resume_row is None:
-        return {"ok": False,
-                "reason": f"no résumé on record for version {resume_version!r}"}
+        prompt = agent_mod.build_prompt(*prompt_args, mode="auto", score=score)
 
     cur = conn.execute(
         "INSERT INTO application (job_id, resume_version, status, started_at)"
@@ -410,32 +328,5 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
     app_id = cur.lastrowid
     conn.commit()
 
-    try:
-        await send_fn(row["url"], answers, Path(resume_row["path"]))
-    except CaptchaEncountered as exc:
-        conn.execute("DELETE FROM application WHERE id = ?", (app_id,))
-        conn.execute("INSERT INTO event (job_id, type, payload)"
-                     " VALUES (?, 'captcha_held', ?)", (job_id, str(exc)))
-        conn.commit()
-        return {"ok": False, "held": True,
-                "reason": "captcha encountered; held for review"}
-    except Exception as exc:
-        failures = conn.execute(
-            "SELECT COUNT(*) n FROM application"
-            " WHERE job_id = ? AND status = 'failed'", (job_id,)).fetchone()["n"]
-        status = "failed_permanent" if failures + 1 >= MAX_ATTEMPTS else "failed"
-        conn.execute("UPDATE application SET status = ? WHERE id = ?",
-                     (status, app_id))
-        conn.execute("INSERT INTO event (job_id, type, payload) VALUES (?, ?, ?)",
-                     (job_id, status, str(exc)))
-        conn.commit()
-        return {"ok": False, "reason": f"submission {status}: {exc}"}
-
-    conn.execute(
-        "UPDATE application SET status = 'submitted', answers = ?,"
-        " submitted_at = datetime('now') WHERE id = ?",
-        (json.dumps(answers), app_id))
-    conn.execute("INSERT INTO event (job_id, type, payload)"
-                 " VALUES (?, 'submitted', ?)", (job_id, row["url"]))
-    conn.commit()
-    return {"ok": True, "job_id": job_id, "status": "submitted"}
+    result = await _run(runner, prompt, job_id)
+    return _record_send_outcome(conn, job_id, app_id, row["url"], pinned, result)
