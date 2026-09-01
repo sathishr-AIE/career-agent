@@ -1,0 +1,149 @@
+"""Real-Chrome lifecycle for the apply agent: launch the system Chrome with
+CDP remote debugging on an isolated profile cloned once from the user's own
+profile. Single worker, port 9222. See docs/lld-apply-button-v2.md §4."""
+import json
+import logging
+import os
+import platform
+import shutil
+import subprocess
+import time
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+PROFILE_DIR = Path("data/chrome-profile")
+
+_SKIP_ON_CLONE = {"Cache", "Code Cache", "GPUCache", "ShaderCache",
+                  "GrShaderCache", "Service Worker", "CacheStorage",
+                  "Crashpad", "Temp", "SingletonLock", "SingletonSocket",
+                  "SingletonCookie", "BrowserMetrics", "SafeBrowsing"}
+
+_CHROME_CANDIDATES = [
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/usr/bin/google-chrome", "/usr/bin/chromium",
+]
+
+
+def chrome_command(chrome_exe: str, profile_dir: Path, port: int = 9222,
+                   headless: bool = False) -> list[str]:
+    cmd = [chrome_exe,
+           f"--remote-debugging-port={port}",
+           f"--user-data-dir={profile_dir}",
+           "--profile-directory=Default",
+           "--no-first-run", "--no-default-browser-check",
+           "--window-size=1280,800",
+           "--disable-session-crashed-bubble", "--hide-crash-restore-bubble",
+           "--noerrdialogs", "--password-store=basic",
+           "--disable-save-password-bubble",
+           "--deny-permission-prompts", "--use-fake-ui-for-media-stream",
+           "--use-fake-device-for-media-stream", "--disable-notifications"]
+    if headless:
+        cmd.append("--headless=new")
+    return cmd
+
+
+def get_chrome_path() -> str:
+    override = os.environ.get("CHROME_PATH")
+    if override:
+        return override
+    for c in _CHROME_CANDIDATES:
+        if Path(c).exists():
+            return c
+    found = shutil.which("chrome") or shutil.which("google-chrome")
+    if found:
+        return found
+    raise RuntimeError("Chrome not found -- set CHROME_PATH in .env")
+
+
+def _user_profile_source() -> Path:
+    if platform.system() == "Windows":
+        return Path(os.environ["LOCALAPPDATA"]) / "Google/Chrome/User Data"
+    if platform.system() == "Darwin":
+        return Path.home() / "Library/Application Support/Google/Chrome"
+    return Path.home() / ".config/google-chrome"
+
+
+def ensure_profile() -> Path:
+    """One-time clone of the user's Chrome profile (cookies, sessions,
+    fingerprint). Chrome must be closed during the first clone or files
+    are locked -- the copy skips what it can't read."""
+    if (PROFILE_DIR / "Default").exists():
+        return PROFILE_DIR
+    src = _user_profile_source()
+    if not src.exists():
+        PROFILE_DIR.mkdir(parents=True, exist_ok=True)  # fresh profile fallback
+        return PROFILE_DIR
+    log.info("Cloning Chrome profile from %s (first run)...", src)
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        if item.name in _SKIP_ON_CLONE:
+            continue
+        try:
+            if item.is_dir():
+                shutil.copytree(item, PROFILE_DIR / item.name, dirs_exist_ok=True,
+                                ignore=shutil.ignore_patterns(*_SKIP_ON_CLONE))
+            else:
+                shutil.copy2(item, PROFILE_DIR / item.name)
+        except (PermissionError, OSError):
+            pass  # locked file; skip
+    return PROFILE_DIR
+
+
+def _patch_prefs(profile_dir: Path) -> None:
+    prefs = profile_dir / "Default" / "Preferences"
+    if not prefs.exists():
+        return
+    try:
+        data = json.loads(prefs.read_text(encoding="utf-8"))
+        data.setdefault("profile", {})["exit_type"] = "Normal"
+        data.setdefault("session", {})["restore_on_startup"] = 4
+        data["credentials_enable_service"] = False
+        data.setdefault("autofill", {})["profile_enabled"] = False
+        prefs.write_text(json.dumps(data), encoding="utf-8")
+    except Exception:
+        log.debug("could not patch Chrome prefs", exc_info=True)
+
+
+def _kill_port(port: int) -> None:
+    """Zombie sweep: kill whatever still listens on the CDP port."""
+    try:
+        if platform.system() == "Windows":
+            out = subprocess.run(["netstat", "-ano", "-p", "TCP"],
+                                 capture_output=True, text=True, timeout=10).stdout
+            for line in out.splitlines():
+                if f":{port}" in line and "LISTENING" in line:
+                    pid = line.split()[-1]
+                    if pid.isdigit():
+                        subprocess.run(["taskkill", "/F", "/T", "/PID", pid],
+                                       capture_output=True, timeout=10)
+        else:
+            out = subprocess.run(["lsof", "-ti", f":{port}"],
+                                 capture_output=True, text=True, timeout=10).stdout
+            for pid in out.split():
+                subprocess.run(["kill", "-9", pid], capture_output=True)
+    except Exception:
+        log.debug("port sweep failed", exc_info=True)
+
+
+def launch_chrome(port: int = 9222, headless: bool = False) -> subprocess.Popen:
+    profile = ensure_profile()
+    _kill_port(port)
+    _patch_prefs(profile)
+    proc = subprocess.Popen(chrome_command(get_chrome_path(), profile, port,
+                                           headless),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(3)  # let the debug port open
+    return proc
+
+
+def cleanup(proc: subprocess.Popen | None) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    if platform.system() == "Windows":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                       capture_output=True, timeout=10)
+    else:
+        proc.kill()
