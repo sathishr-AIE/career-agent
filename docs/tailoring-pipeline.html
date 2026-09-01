@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tailoring Pipeline</title>
+<style>
+  :root {
+    --ink: #1B2027;
+    --ink-soft: #4A5160;
+    --paper: #F5F6F8;
+    --surface: #FFFFFF;
+    --line: rgba(27,32,39,0.14);
+    --line-strong: rgba(27,32,39,0.28);
+    --accent-judgment: #B8722A;
+    --accent-judgment-soft: #F4E3CE;
+    --accent-verify: #1F7A5C;
+    --accent-verify-soft: #D9EEE4;
+    --code-bg: #ECEEF2;
+    --shadow: 0 1px 2px rgba(20,24,30,0.04), 0 8px 24px rgba(20,24,30,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ink: #E7E9EF;
+      --ink-soft: #A8AEBB;
+      --paper: #12151C;
+      --surface: #181C25;
+      --line: rgba(231,233,239,0.14);
+      --line-strong: rgba(231,233,239,0.26);
+      --accent-judgment: #E0A15C;
+      --accent-judgment-soft: #3A2A18;
+      --accent-verify: #4FBE93;
+      --accent-verify-soft: #163229;
+      --code-bg: #1E222C;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #E7E9EF;
+    --ink-soft: #A8AEBB;
+    --paper: #12151C;
+    --surface: #181C25;
+    --line: rgba(231,233,239,0.14);
+    --line-strong: rgba(231,233,239,0.26);
+    --accent-judgment: #E0A15C;
+    --accent-judgment-soft: #3A2A18;
+    --accent-verify: #4FBE93;
+    --accent-verify-soft: #163229;
+    --code-bg: #1E222C;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    line-height: 1.55;
+  }
+
+  main {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 56px 24px 96px;
+    display: flex;
+    flex-direction: column;
+    gap: 40px;
+  }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  h1 {
+    font-size: clamp(30px, 4vw, 40px);
+    font-weight: 700;
+    margin: 8px 0 0;
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+  }
+
+  .lede {
+    max-width: 62ch;
+    font-size: 17px;
+    color: var(--ink-soft);
+    margin: 14px 0 0;
+  }
+
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 18px;
+    padding: 6px 14px 6px 10px;
+    border-radius: 999px;
+    background: var(--accent-verify-soft);
+    border: 1px solid color-mix(in srgb, var(--accent-verify) 35%, transparent);
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px;
+    color: var(--ink);
+    width: fit-content;
+  }
+  .status-pill .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent-verify);
+    flex: none;
+  }
+
+  section {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  .section-head h2 {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin: 0;
+  }
+
+  figure {
+    margin: 0;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 20px 20px 18px;
+    box-shadow: var(--shadow);
+  }
+
+  .svg-scroll {
+    overflow-x: auto;
+  }
+
+  svg {
+    display: block;
+    width: 100%;
+    max-width: 620px;
+    height: auto;
+    margin: 0 auto;
+  }
+
+  figcaption {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+    font-size: 13.5px;
+    color: var(--ink-soft);
+    max-width: 60ch;
+  }
+
+  .node-title { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    margin-top: 14px;
+    font-size: 12.5px;
+    color: var(--ink-soft);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .legend i {
+    width: 12px; height: 12px; border-radius: 3px; flex: none;
+    border-width: 1.5px; border-style: solid;
+  }
+  .legend .j { background: var(--accent-judgment-soft); border-color: var(--accent-judgment); }
+  .legend .v { background: var(--accent-verify-soft); border-color: var(--accent-verify); }
+
+  .steps {
+    counter-reset: step;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    border-top: 1px solid var(--line);
+  }
+  .step {
+    counter-increment: step;
+    display: grid;
+    grid-template-columns: 34px 1fr;
+    gap: 4px 16px;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .step::before {
+    content: counter(step);
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 13px;
+    color: var(--ink-soft);
+    padding-top: 2px;
+  }
+  .step h3 {
+    grid-column: 2;
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .step p {
+    grid-column: 2;
+    margin: 4px 0 0;
+    font-size: 14.5px;
+    color: var(--ink-soft);
+    max-width: 58ch;
+  }
+  code {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.92em;
+    background: var(--code-bg);
+    padding: 0.1em 0.35em;
+    border-radius: 5px;
+  }
+
+  .callout {
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--ink-soft);
+    border-radius: 10px;
+    padding: 14px 16px;
+    font-size: 14px;
+    color: var(--ink-soft);
+    background: var(--surface);
+  }
+  .callout strong { color: var(--ink); }
+
+  footer {
+    font-size: 12.5px;
+    color: var(--ink-soft);
+    border-top: 1px solid var(--line);
+    padding-top: 18px;
+  }
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">career-agent · v2</div>
+    <h1>Tailoring Pipeline</h1>
+    <p class="lede">
+      For any job the gate already marked <code>submit</code> or <code>hold</code>,
+      this is what happens between clicking Apply and having a real,
+      job-specific resume file in hand.
+    </p>
+    <div class="status-pill"><span class="dot"></span>Built, tested, merged to main</div>
+  </header>
+
+  <section>
+    <div class="section-head"><h2>The flow</h2></div>
+    <figure>
+      <div class="svg-scroll">
+        <svg viewBox="0 0 760 930" role="img"
+             aria-label="Both the dashboard's Apply click and the auto-mode worker loop call one shared function, tailor_for_apply. It reuses an existing resume if one exists; otherwise an LLM call selects and rephrases verified facts, then a separate, deterministic step renders them into the DOCX template — the model never touches the file itself.">
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5"
+                    markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor"></path>
+            </marker>
+          </defs>
+
+          <g style="color: var(--ink-soft)" stroke="currentColor" stroke-width="1.6" fill="none">
+            <!-- entries converge into shared function -->
+            <line x1="200" y1="80" x2="200" y2="102" marker-end="url(#arrow)"></line>
+            <polyline points="200,102 200,112 380,112 380,120" marker-end="url(#arrow)"></polyline>
+            <line x1="560" y1="80" x2="560" y2="102" marker-end="url(#arrow)"></line>
+            <polyline points="560,102 560,112 380,112" ></polyline>
+
+            <!-- shared fn -> decision -->
+            <line x1="380" y1="175" x2="380" y2="207" marker-end="url(#arrow)"></line>
+
+            <!-- No path down the spine -->
+            <line x1="380" y1="300" x2="380" y2="333" marker-end="url(#arrow)"></line>
+            <line x1="380" y1="393" x2="380" y2="428" marker-end="url(#arrow)"></line>
+            <line x1="380" y1="488" x2="380" y2="523" marker-end="url(#arrow)"></line>
+            <line x1="380" y1="573" x2="360" y2="648" marker-end="url(#arrow)"></line>
+
+            <!-- Yes bypass -->
+            <polyline points="500,255 610,255 610,600 428,648" marker-end="url(#arrow)"></polyline>
+
+            <!-- submit -> draft -->
+            <line x1="380" y1="705" x2="380" y2="733" marker-end="url(#arrow)"></line>
+
+            <!-- fan out -->
+            <line x1="380" y1="778" x2="205" y2="828" marker-end="url(#arrow)"></line>
+            <line x1="380" y1="778" x2="565" y2="828" marker-end="url(#arrow)"></line>
+          </g>
+
+          <!-- arrow labels -->
+          <g font-family="IBM Plex Mono, ui-monospace, monospace" font-size="11" fill="var(--ink-soft)">
+            <text x="392" y="322" text-anchor="start">No — generate</text>
+            <text x="560" y="248" text-anchor="middle">Yes — reuse</text>
+            <text x="398" y="415" text-anchor="start">TailorResult</text>
+            <text x="398" y="510" text-anchor="start">resume.docx</text>
+            <text x="330" y="628" text-anchor="end">resume_version</text>
+          </g>
+
+          <!-- entry pills -->
+          <g>
+            <rect x="90" y="30" width="220" height="50" rx="10" style="fill: var(--surface); stroke: var(--line-strong)" stroke-width="1.4"></rect>
+            <text x="200" y="51" text-anchor="middle" class="node-title" font-size="12.5" fill="var(--ink)">Dashboard</text>
+            <text x="200" y="67" text-anchor="middle" font-size="11" fill="var(--ink-soft)">Apply / Override click</text>
+
+            <rect x="450" y="30" width="220" height="50" rx="10" style="fill: var(--surface); stroke: var(--line-strong)" stroke-width="1.4"></rect>
+            <text x="560" y="51" text-anchor="middle" class="node-title" font-size="12.5" fill="var(--ink)">Auto-mode</text>
+            <text x="560" y="67" text-anchor="middle" font-size="11" fill="var(--ink-soft)">worker loop tick</text>
+          </g>
+
+          <!-- shared function -->
+          <g>
+            <rect x="260" y="120" width="240" height="55" rx="10" style="fill: var(--surface); stroke: var(--line-strong)" stroke-width="1.6"></rect>
+            <text x="380" y="145" text-anchor="middle" class="node-title" font-size="13.5" fill="var(--ink)">tailor_for_apply()</text>
+            <text x="380" y="163" text-anchor="middle" font-size="10.5" fill="var(--ink-soft)">one function, both entry points</text>
+          </g>
+
+          <!-- decision diamond -->
+          <g>
+            <polygon points="380,207 500,255 380,303 260,255" style="fill: var(--surface); stroke: var(--line-strong)" stroke-width="1.6"></polygon>
+            <text x="380" y="250" text-anchor="middle" font-size="12" fill="var(--ink)">Resume already</text>
+            <text x="380" y="265" text-anchor="middle" font-size="12" fill="var(--ink)">exists for this job?</text>
+          </g>
+
+          <!-- LLM step (judgment) -->
+          <g>
+            <rect x="260" y="333" width="240" height="60" rx="10" style="fill: var(--accent-judgment-soft); stroke: var(--accent-judgment)" stroke-width="1.8"></rect>
+            <text x="380" y="358" text-anchor="middle" class="node-title" font-size="13.5" fill="var(--ink)">tailor() — LLM call</text>
+            <text x="380" y="375" text-anchor="middle" font-size="10.5" fill="var(--ink-soft)">selects &amp; rephrases verified facts,</text>
+            <text x="380" y="388" text-anchor="middle" font-size="10.5" fill="var(--ink-soft)">cites the fact id behind every line</text>
+          </g>
+
+          <!-- render step (deterministic) -->
+          <g>
+            <rect x="260" y="428" width="240" height="60" rx="10" style="fill: var(--accent-verify-soft); stroke: var(--accent-verify)" stroke-width="1.8"></rect>
+            <text x="380" y="453" text-anchor="middle" class="node-title" font-size="13.5" fill="var(--ink)">render_docx()</text>
+            <text x="380" y="470" text-anchor="middle" font-size="10.5" fill="var(--ink-soft)">deterministic — fills your template's</text>
+            <text x="380" y="483" text-anchor="middle" font-size="10.5" fill="var(--ink-soft)">markers, no model involved</text>
+          </g>
+
+          <!-- store step -->
+          <g>
+            <rect x="280" y="523" width="200" height="50" rx="10" style="fill: var(--surface); stroke: var(--line-strong)" stroke-width="1.4"></rect>
+            <text x="380" y="545" text-anchor="middle" class="node-title" font-size="12.5" fill="var(--ink)">insert_resume()</text>
+            <text x="380" y="561" text-anchor="middle" font-size="10.5" fill="var(--ink-soft)">new row — never overwrites</text>
+          </g>
+
+          <!-- submit -->
+          <g>
+            <rect x="260" y="648" width="240" height="57" rx="10" style="fill: var(--surface); stroke: var(--line-strong)" stroke-width="1.6"></rect>
+            <text x="380" y="672" text-anchor="middle" class="node-title" font-size="13" fill="var(--ink)">ats.submit()</text>
+            <text x="380" y="690" text-anchor="middle" font-size="10.5" fill="var(--ink-soft)">draft carries this resume_version</text>
+          </g>
+
+          <!-- draft pill -->
+          <g>
+            <rect x="270" y="733" width="220" height="45" rx="22" style="fill: var(--paper); stroke: var(--line-strong)" stroke-width="1.4"></rect>
+            <text x="380" y="760" text-anchor="middle" font-size="12.5" fill="var(--ink)">Draft application created</text>
+          </g>
+
+          <!-- terminals -->
+          <g>
+            <rect x="55" y="828" width="300" height="62" rx="10" style="fill: var(--surface); stroke: var(--line-strong)" stroke-width="1.4"></rect>
+            <text x="205" y="853" text-anchor="middle" font-size="12.5" fill="var(--ink)">Applications page</text>
+            <text x="205" y="870" text-anchor="middle" font-size="10.5" fill="var(--ink-soft)">download link on that job's row</text>
+
+            <rect x="415" y="828" width="300" height="62" rx="10" style="fill: var(--surface); stroke: var(--line-strong)" stroke-width="1.4"></rect>
+            <text x="565" y="847" text-anchor="middle" font-size="12.5" fill="var(--ink)">Resumes page</text>
+            <text x="565" y="864" text-anchor="middle" font-size="10.5" fill="var(--ink-soft)">full history + which fact backs</text>
+            <text x="565" y="877" text-anchor="middle" font-size="10.5" fill="var(--ink-soft)">each bullet</text>
+          </g>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i class="j"></i>the one step that calls the model</span>
+        <span><i class="v"></i>deterministic — no model call, same output every time for the same input</span>
+      </div>
+      <figcaption>
+        Both entry points call the same function. It never re-tailors a job that already
+        has a resume. When it does tailor, the model only ever <em>selects and rephrases</em>
+        facts you already verified — the actual file is built afterward, by code that has
+        no model in the loop.
+      </figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Step by step</h2></div>
+    <div class="steps">
+      <div class="step">
+        <h3>Something triggers a draft</h3>
+        <p>
+          Either you click <strong>Apply</strong> (or <strong>Override</strong> on a
+          skipped job) on the dashboard, or, in auto mode, the background worker picks
+          the next queued job on its own. Both paths call the exact same
+          <code>worker.tailor_for_apply()</code> — there's only one implementation of
+          this logic in the whole app.
+        </p>
+      </div>
+      <div class="step">
+        <h3>Check for an existing resume first</h3>
+        <p>
+          A job is tailored once. If a resume row already exists for this job, that
+          version is reused immediately — no model call, no new file. This is what
+          makes clicking Apply twice, or the worker retrying, cheap and safe.
+        </p>
+      </div>
+      <div class="step">
+        <h3>The model selects and rephrases — nothing more</h3>
+        <p>
+          If no resume exists yet, one LLM call runs: it reads your verified
+          <code>fact</code> table and the job description, then picks which facts fit
+          this job and rewrites them as resume bullets. Every bullet must name the
+          exact fact id it came from, and any id that doesn't exist in your facts
+          table gets the reply rejected and retried once. The model never invents a
+          claim — it can only rearrange and reword what you already told it is true.
+        </p>
+      </div>
+      <div class="step">
+        <h3>A separate step builds the actual file</h3>
+        <p>
+          <code>render_docx()</code> takes that output and drops it into your own
+          <code>resume/master.docx</code>, replacing two marker paragraphs
+          (<code>&lt;&lt;SUMMARY&gt;&gt;</code> and <code>&lt;&lt;PROJECT_BULLET&gt;&gt;</code>)
+          while leaving your formatting, header, and layout untouched. No model is
+          involved in this step — it's the same deterministic code every time.
+        </p>
+      </div>
+      <div class="step">
+        <h3>The result is saved, never overwritten</h3>
+        <p>
+          A new row goes into the <code>resume</code> table — one row per generation,
+          version-numbered like <code>tailored-42-r1</code>. Older versions are never
+          replaced, so months later you can still see exactly what was sent for any
+          job.
+        </p>
+      </div>
+      <div class="step">
+        <h3>The draft carries that version forward</h3>
+        <p>
+          <code>ats.submit()</code> writes the draft application with this resume
+          version attached. From there it shows up with a download link on the
+          Applications page, and in full on the new Resumes page — where every bullet
+          shows exactly which fact backs it.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <div class="callout">
+    <strong>What this covers.</strong> This is just the tailoring slice of v2 — per-role
+    resumes and where they show up in the dashboard. Recruiter-message handling,
+    calendar events, PDF export, and a "retailor this job" button were all deliberately
+    left out of this pass; they're separate, later work.
+  </div>
+
+  <footer>career-agent · docs/superpowers/specs/2026-08-22-per-role-tailoring-design.md</footer>
+</main>
+</body>
+</html>

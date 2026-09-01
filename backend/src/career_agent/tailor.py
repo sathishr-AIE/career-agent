@@ -165,3 +165,86 @@ async def ensure_tailored(conn, job_id: int, job: Job, brief: CareerBrief,
                           "bullets": [b.model_dump() for b in result.bullets],
                           "prompt_version": TAILOR_PROMPT_VERSION})
     return store.insert_resume(conn, job_id, version, str(out_path), content)
+
+
+SUMMARY_HEADING_WORDS = ("summary", "profile", "objective", "about")
+
+
+def _is_list_paragraph(paragraph: Paragraph) -> bool:
+    return (paragraph.style.name or "").startswith("List")
+
+
+def _looks_like_summary_heading(text: str) -> bool:
+    """A short line naming a summary section -- 'PROFESSIONAL SUMMARY',
+    'Profile', 'Career Objective'. Length-capped so a prose sentence that
+    happens to contain 'summary' isn't mistaken for a heading."""
+    stripped = text.strip().rstrip(":").lower()
+    return (0 < len(stripped) <= 40
+            and any(word in stripped for word in SUMMARY_HEADING_WORDS))
+
+
+def prepare_master(doc) -> list[str]:
+    """Insert the two markers into a normal resume, in place.
+
+    A resume people actually keep has prose under a 'SUMMARY' heading and
+    real bullets -- never the literal markers render_docx needs. This reads
+    the document's own structure to place them: the paragraph after a
+    summary heading becomes <<SUMMARY>>, and the first run of list-styled
+    paragraphs collapses to a single <<PROJECT_BULLET>> (render_docx clones
+    that marker once per generated bullet, so leaving the originals would
+    append tailored bullets after stale hardcoded ones).
+
+    Returns a list of human-readable descriptions of what it changed --
+    an automatic rewrite nobody can see is the failure mode this avoids.
+    Raises ValueError naming what it could not find, rather than guessing
+    at a document it does not understand.
+    """
+    paragraphs = doc.paragraphs
+    changes = []
+
+    summary_idx = None
+    for i, para in enumerate(paragraphs):
+        if _looks_like_summary_heading(para.text):
+            # the next non-empty paragraph is the summary prose itself
+            for j in range(i + 1, len(paragraphs)):
+                if paragraphs[j].text.strip():
+                    summary_idx = j
+                    break
+            if summary_idx is not None:
+                break
+    if summary_idx is None:
+        raise ValueError(
+            "could not find a summary section (a heading like 'PROFESSIONAL "
+            "SUMMARY' followed by a paragraph)")
+
+    bullet_run = []
+    for i, para in enumerate(paragraphs):
+        if i == summary_idx or not para.text.strip():
+            continue
+        if _is_list_paragraph(para):
+            bullet_run.append(i)
+        elif bullet_run:
+            break  # first contiguous run only
+    if not bullet_run:
+        raise ValueError("could not find any bulleted list paragraphs")
+
+    replaced = paragraphs[summary_idx].text.strip()
+    _set_text(paragraphs[summary_idx], "<<SUMMARY>>")
+    changes.append(f'summary paragraph ("{replaced[:60]}...") '
+                   "replaced with <<SUMMARY>>")
+
+    _set_text(paragraphs[bullet_run[0]], "<<PROJECT_BULLET>>")
+    for i in bullet_run[1:]:
+        paragraphs[i]._p.getparent().remove(paragraphs[i]._p)
+    changes.append(f"{len(bullet_run)} bullet(s) replaced with one "
+                   "<<PROJECT_BULLET>> marker, cloned per tailored bullet")
+    return changes
+
+
+def has_markers(doc) -> bool:
+    try:
+        for marker in ("<<SUMMARY>>", "<<PROJECT_BULLET>>"):
+            _find_marker(doc, marker)
+    except ValueError:
+        return False
+    return True

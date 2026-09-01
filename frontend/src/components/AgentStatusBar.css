@@ -1,0 +1,72 @@
+.status-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-6);
+  color: var(--graphite-text);
+  font-size: 0.8125rem;
+}
+
+.status-bar__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-bar__dot--idle,
+.status-bar__dot--stopped {
+  background: var(--graphite-text-dim);
+}
+.status-bar__dot--running {
+  background: var(--submit);
+  box-shadow: 0 0 0 3px var(--submit-dim);
+}
+.status-bar__dot--paused {
+  background: var(--hold);
+  box-shadow: 0 0 0 3px var(--hold-dim);
+}
+.status-bar__dot--error {
+  background: var(--skip);
+  box-shadow: 0 0 0 3px var(--skip-dim);
+}
+
+.status-bar__label {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.status-bar__job {
+  color: var(--graphite-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-bar__spacer {
+  flex: 1;
+}
+
+.status-bar__killswitch {
+  font-family: var(--font-data);
+  font-size: 0.6875rem;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--hold-dim);
+  color: var(--hold);
+  letter-spacing: 0.02em;
+}
+
+.status-bar__answer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--hold);
+  font-weight: 600;
+}
+
+.status-bar__answer a {
+  color: inherit;
+}

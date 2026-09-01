@@ -61,22 +61,62 @@ Every submission carries an explainable decision record: why it qualified, what 
 
 ## Status
 
-**v1 is implemented and runnable** — discovery, the quality gate, a live dashboard, and outcome tracking. See [`docs/product-vision.md`](docs/product-vision.md) for the full vision this is building toward.
+**v1, v2, and v3 are all implemented** — discovery, the quality gate, a live dashboard, outcome tracking, per-role resume tailoring, and a real Greenhouse form-filler. See [`docs/product-vision.md`](docs/product-vision.md) for the full vision this is building toward.
 
-> **It does not submit applications.** Applying is manual, by design: auto-submission is
-> deferred to v3, gated on per-role tailoring landing first and on outcome data showing
-> tailored applications actually convert. The dashboard finds and scores roles and tracks
-> what you did about them — you apply on the site yourself. See
-> [the v1 design's phase table](docs/superpowers/specs/2026-08-18-career-agent-v1-design.md)
-> for the reasoning: *"An application is a consumable resource. There is roughly one useful
-> attempt per company per role."* Naukri submission is not planned at any version — it is a
-> discovery source only.
+> **It does not submit applications yet.** The Greenhouse filler is built, but
+> `SUBMISSION_IMPLEMENTED` in `career_agent/apply/ats.py` ships `False` — nothing sends
+> for real until that's flipped by hand, after manually verifying the filler against a
+> real live posting (see "Real Greenhouse submission (v3)" below). This is a deliberate
+> departure from the phase gate in the table below, which called for outcome data proving
+> tailored applications convert before auto-submission was even built; that evidence gate
+> was superseded by building the filler now and keeping the manual flag as the actual
+> trust boundary. Every non-Greenhouse source keeps an unconditional refusal regardless of
+> the flag. Naukri submission is not planned at any version — it is a discovery source
+> only.
 
 ## Running it
 
-**Prerequisites:** Python 3.13+ and [uv](https://docs.astral.sh/uv/).
+**Prerequisites:** Python 3.13+, [uv](https://docs.astral.sh/uv/), and Node.js 18+ (for the frontend).
+
+The backend (Python package, config, data) lives in `backend/`; the dashboard's frontend
+is a separate app in `frontend/`. Run each from its own directory, in two terminals.
+
+### Starting the app (day-to-day)
+
+Once the one-time setup below has been done, this is all firing it up takes — two terminals, both left running:
+
+**Terminal 1 — backend:**
+
+```powershell
+cd D:\Work-space\Automations\career-agent\backend
+uv run career-agent serve
+```
+
+`uv run` finds and uses `backend\.venv` automatically, so there's nothing to activate.
+Serves the API and legacy dashboard at [http://localhost:8000](http://localhost:8000).
+
+**Terminal 2 — frontend:**
+
+```powershell
+cd D:\Work-space\Automations\career-agent\frontend
+npm run dev
+```
+
+Open [http://localhost:5173](http://localhost:5173) — this is the dashboard. It proxies
+`/api/*` to the backend, so terminal 1 has to be running first.
+
+> **If `career-agent` or `python -m career_agent...` says "not found" / "No module named
+> career_agent":** you're in a different Python environment than `backend\.venv` — a
+> global uv Python, a conda env, an old venv from before the repo was split, etc. Either
+> `cd backend; .\.venv\Scripts\Activate.ps1` first, or just use `uv run career-agent ...`
+> from `backend/` as above, which sidesteps activation entirely.
+
+### First-time setup
+
+**Backend:**
 
 ```bash
+cd backend
 uv venv
 uv pip install -e ".[dev]"
 playwright install chromium   # needed to actually submit applications
@@ -85,17 +125,26 @@ cp .env.example .env          # fill in CLAUDE_CODE_OAUTH_TOKEN and APIFY_TOKEN
 
 `CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token`; it's required even for `serve` alone, since the dashboard's discovery run uses it. `APIFY_TOKEN` is only needed to actually discover jobs (Run Now / `career-agent run`).
 
-Edit `career_brief.toml` (target roles, locations, salary floor, daily application cap, non-negotiables) and `ats_boards.toml` (company ATS boards to also search) before your first real run — both are read from the current directory.
+Edit `career_brief.toml` (target roles, locations, salary floor, daily application cap, non-negotiables) and `ats_boards.toml` (company ATS boards to also search) before your first real run — both are read from the current directory (`backend/`).
 
-Two commands, via the `career-agent` console script (`--help` for all flags):
+Two commands, via the `career-agent` console script (`--help` for all flags), both run from `backend/`:
 
 - **`career-agent run`** — one-shot: discovers jobs, hard-filters, and scores them against `career_brief.toml`. Writes to `data/career.db`. This is what a scheduled task would call daily (see `scripts/install-scheduler.ps1`).
-- **`career-agent serve`** — starts the dashboard at [http://localhost:8000](http://localhost:8000):
+- **`career-agent serve`** — starts the backend at [http://localhost:8000](http://localhost:8000). This serves two things at once: the original Jinja dashboard (being migrated page by page to the React frontend below — pages not yet migrated still live here), and the `/api/*` JSON API the React frontend runs on. Either way, this needs to be running before the frontend has anything to show:
   - **`/`** — Overview: KPIs, the discovery→apply funnel, source performance, score distribution, recent discoveries/outcomes, and a **Run Now** button that triggers the same discover+score pipeline as `career-agent run`, in the background. Run Now opens a live monitor — current stage, live counts (found/passed/scored/shortlisted), and a streaming activity feed — that you can dismiss to keep working while the run continues.
   - **`/applications`** — the live application queue: Start/Pause/Resume/Stop a worker that walks scored jobs, applying automatically (**Auto** mode) or pausing for your review before each send (**Manual** mode, the default).
   - **`/resumes`** — shows the master template's status and every tailored resume generated so far, with the verified fact each bullet was built from.
 
-Per-role tailoring (the first Apply click on a job) needs a master resume at `resume/master.docx`. It must contain two literal marker paragraphs: `<<SUMMARY>>` (a paragraph whose text gets replaced with the tailored summary) and `<<PROJECT_BULLET>>` (a bullet-styled paragraph cloned once per selected fact, then removed). Everything else in the template — header, contact info, education, layout — is left untouched.
+Per-role tailoring (the first Apply click on a job) needs a master resume at `backend/resume/master.docx`. It must contain two literal marker paragraphs: `<<SUMMARY>>` (a paragraph whose text gets replaced with the tailored summary) and `<<PROJECT_BULLET>>` (a bullet-styled paragraph cloned once per selected fact, then removed). Everything else in the template — header, contact info, education, layout — is left untouched. The Resumes page also lets you upload one directly and have the markers inserted automatically.
+
+**Frontend:**
+
+```bash
+cd frontend
+npm install
+```
+
+Open [http://localhost:5173](http://localhost:5173). It proxies `/api/*` and file downloads to the backend on `:8000`, so nothing needs configuring beyond having that backend up.
 
 ## Real Greenhouse submission (v3)
 
@@ -132,12 +181,18 @@ point, not decoration.
 | Phase | Delivers | Gate to advance |
 | --- | --- | --- |
 | **v1** *(shipped)* | Discovery, hard filter, scored gate, dashboard, manual apply, outcome tracking | The gate agrees with your judgment, and callback data exists |
-| **v2** | Per-role tailoring from the facts store, resume rendering | Nothing claimed that you cannot defend |
-| **v3** | Auto-submission within limits | Tailoring proven, and outcomes show tailored applications convert |
+| **v2** *(shipped)* | Per-role tailoring from the facts store, resume rendering | Nothing claimed that you cannot defend |
+| **v3** *(shipped, gated)* | Real Greenhouse auto-submission | Tailoring proven, and outcomes show tailored applications convert |
 
-Deferred and unscheduled: recruiter-message handling and calendar (v2); **Naukri
-submission — no Actor exists and no connector is planned, so Naukri stays discovery-only
-at every version**; warm-path and referral detection (unscheduled).
+v3's code shipped ahead of its own gate above: the Greenhouse filler was built and
+tested before outcome data existed to prove tailored applications convert.
+`SUBMISSION_IMPLEMENTED` is the actual gate now — a manual switch flipped only after
+verifying the filler against a real posting, not the outcome-evidence condition
+originally specified for this phase.
+
+Deferred and unscheduled: recruiter-message handling and calendar; warm-path and
+referral detection; **Naukri submission — no Actor exists and no connector is planned,
+so Naukri stays discovery-only at every version**.
 
 An earlier draft of this README carried a different, pre-implementation roadmap that
 listed autonomous submission under v1. That numbering was superseded by the design spec
@@ -147,9 +202,25 @@ above and was wrong about what v1 does.
 
 ```
 career-agent/
+├── CLAUDE.md                  # guidance for Claude Code working in this repo
 ├── README.md
+├── backend/
+│   ├── career_brief.toml      # your search/apply preferences (version-controlled)
+│   ├── ats_boards.toml        # company ATS boards to scrape directly
+│   ├── candidate_profile.toml.example  # copy to candidate_profile.toml (gitignored PII)
+│   ├── src/career_agent/      # discovery, gate, tailor, apply/ats.py, web/ dashboard + API
+│   │   └── web/
+│   │       ├── app.py         # Jinja routes (legacy pages, migrating out)
+│   │       ├── api.py         # JSON /api/* routes for the React frontend
+│   │       ├── context.py     # shared page-data builders (both frontends read these)
+│   │       ├── actions.py     # shared mutations — Apply, Send, Save Settings, ...
+│   │       └── templates/     # Jinja2 templates for pages not yet migrated
+│   ├── tests/                 # pytest, including tests/golden/ (gate.py regression set)
+│   └── scripts/                # scheduler install, auth spike
+├── frontend/                  # Vite + React SPA dashboard (npm run dev → :5173)
 └── docs/
-    └── product-vision.md    # full product vision (mirrored from Obsidian)
+    ├── product-vision.md      # full product vision (mirrored from Obsidian)
+    └── superpowers/           # design specs and implementation plans per feature
 ```
 
 Working notes live in the Obsidian vault under `Automations/job-applyier` — that vault is the source of truth for the vision; `docs/` mirrors it.

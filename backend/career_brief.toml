@@ -10,10 +10,10 @@ title_families = ["ai engineer", "machine learning engineer",
 search_locations = ["Chennai"]
 
 # What the hard filter ACCEPTS on the way back.
-locations = ["Chennai", "Remote"]
+locations = ["Chennai", "hybrid"]
 
 remote_ok = true
-salary_floor_inr = 1200000
+salary_floor_inr = 800000
 work_authorization = ["India"]
 
 daily_cap = 5

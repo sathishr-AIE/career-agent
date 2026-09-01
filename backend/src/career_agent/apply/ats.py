@@ -101,13 +101,15 @@ def _split_name(candidate_name: str) -> tuple[str, str]:
 # Verify these against a real live Greenhouse posting before flipping
 # SUBMISSION_IMPLEMENTED -- they were not confirmed against a rendered
 # page from this environment, and Greenhouse has iterated its embed
-# markup before. This dict is the most likely thing to need fixing, but
-# it is not the ONLY unverified assumption in this file: the custom
-# question container selector in _read_custom_questions
-# (".field:has(label)"), the submit-button selector in
-# _default_fill_and_submit ("button[type=submit], input[type=submit]"),
-# and the #resume file-upload call are equally unverified against a live
-# posting and live outside this dict.
+# markup before. linkedin_url/portfolio_url are confirmed STALE as of
+# 2026-08-27: a live Anthropic posting renders those as dynamic
+# "#question_<id>" custom questions, not these fixed ids, so they never
+# match and those two profile fields are silently never filled -- answer
+# them via qa_bank (label "LinkedIn Profile" / "Website") instead, same as
+# any other custom question, until this is revisited. The submit-button
+# selector in _default_fill_and_submit ("button[type=submit],
+# input[type=submit]") and the #resume file-upload call remain unverified
+# against a live posting.
 GREENHOUSE_STANDARD_FIELD_SELECTORS = {
     "first_name": "#first_name",
     "last_name": "#last_name",
@@ -140,7 +142,7 @@ async def _read_custom_questions(page) -> list[FormField]:
     already names exactly one element."""
     standard = set(GREENHOUSE_STANDARD_FIELD_SELECTORS.values())
     fields = []
-    for container in await page.locator(".field:has(label)").all():
+    for container in await page.locator(".field-wrapper:has(label)").all():
         input_el = container.locator("input, select, textarea").first
         if await input_el.count() == 0:
             continue

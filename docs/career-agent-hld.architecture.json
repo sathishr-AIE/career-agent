@@ -1,0 +1,376 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Career Agent — High-Level Design",
+    "locale": "en",
+    "output": "docs/career-agent-hld.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1190,
+      570
+    ],
+    "views": [
+      {
+        "id": "discover",
+        "label": "Discover",
+        "focus": [
+          "boards",
+          "discovery",
+          "db"
+        ],
+        "note": "Three lanes pull listings; upsert dedupes by fingerprint and drops stale posts."
+      },
+      {
+        "id": "gate-before-spend",
+        "label": "Gate before spend",
+        "focus": [
+          "db",
+          "filter",
+          "gate",
+          "claude"
+        ],
+        "note": "The free deterministic filter runs first; only survivors are worth a paid model call."
+      },
+      {
+        "id": "tailor-and-apply",
+        "label": "Tailor and apply",
+        "focus": [
+          "db",
+          "worker",
+          "tailor",
+          "filler"
+        ],
+        "note": "The queue worker takes one job at a time, résumé first, and drafts before it sends."
+      },
+      {
+        "id": "operator-control",
+        "label": "Operator control",
+        "focus": [
+          "operator",
+          "spa",
+          "web",
+          "db"
+        ],
+        "note": "Every run, pause, override and unanswered question routes back to one human."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "operator",
+      "type": "external",
+      "label": "Operator",
+      "sublabel": "one job seeker",
+      "pos": [
+        60,
+        140
+      ],
+      "size": [
+        190,
+        56
+      ]
+    },
+    {
+      "id": "spa",
+      "type": "frontend",
+      "label": "React SPA",
+      "sublabel": "Vite :5173 → /api/*",
+      "pos": [
+        60,
+        232
+      ],
+      "size": [
+        190,
+        56
+      ]
+    },
+    {
+      "id": "web",
+      "type": "backend",
+      "label": "FastAPI Web Layer",
+      "sublabel": "context.py + actions.py",
+      "pos": [
+        60,
+        324
+      ],
+      "size": [
+        190,
+        62
+      ]
+    },
+    {
+      "id": "boards",
+      "type": "external",
+      "label": "Job Boards",
+      "sublabel": "LinkedIn · Naukri · ATS",
+      "pos": [
+        335,
+        30
+      ],
+      "size": [
+        180,
+        56
+      ]
+    },
+    {
+      "id": "discovery",
+      "type": "backend",
+      "label": "Discovery",
+      "sublabel": "nightly or on demand",
+      "pos": [
+        330,
+        160
+      ],
+      "size": [
+        190,
+        58
+      ]
+    },
+    {
+      "id": "filter",
+      "type": "backend",
+      "label": "Hard Filter",
+      "sublabel": "deterministic and free",
+      "pos": [
+        620,
+        160
+      ],
+      "size": [
+        190,
+        58
+      ]
+    },
+    {
+      "id": "gate",
+      "type": "security",
+      "label": "Scored Gate",
+      "sublabel": "5 dims → submit|hold|skip",
+      "pos": [
+        910,
+        160
+      ],
+      "size": [
+        190,
+        58
+      ]
+    },
+    {
+      "id": "claude",
+      "type": "external",
+      "label": "Claude Agent SDK",
+      "sublabel": "scoring + tailoring",
+      "pos": [
+        915,
+        30
+      ],
+      "size": [
+        180,
+        56
+      ]
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "SQLite career.db",
+      "sublabel": "WAL, single source of truth",
+      "pos": [
+        330,
+        320
+      ],
+      "size": [
+        770,
+        70
+      ]
+    },
+    {
+      "id": "worker",
+      "type": "backend",
+      "label": "Apply Worker",
+      "sublabel": "auto or manual tick",
+      "pos": [
+        330,
+        440
+      ],
+      "size": [
+        190,
+        58
+      ]
+    },
+    {
+      "id": "tailor",
+      "type": "backend",
+      "label": "Résumé Tailor",
+      "sublabel": "memoized → master.docx",
+      "pos": [
+        620,
+        440
+      ],
+      "size": [
+        190,
+        58
+      ]
+    },
+    {
+      "id": "filler",
+      "type": "security",
+      "label": "Greenhouse Filler",
+      "sublabel": "Playwright form filler",
+      "pos": [
+        910,
+        440
+      ],
+      "size": [
+        190,
+        62
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Local machine — one operator, no server, no hosted account",
+      "wraps": [
+        "operator",
+        "spa",
+        "web",
+        "discovery",
+        "filter",
+        "gate",
+        "db",
+        "worker",
+        "tailor",
+        "filler"
+      ],
+      "pad": 32
+    }
+  ],
+  "connections": [
+    {
+      "from": "operator",
+      "to": "spa",
+      "label": "runs and reviews",
+      "variant": "emphasis",
+      "labelDy": 24
+    },
+    {
+      "from": "spa",
+      "to": "web",
+      "label": "JSON over /api/*",
+      "variant": "emphasis",
+      "labelDy": 24
+    },
+    {
+      "from": "web",
+      "to": "db",
+      "label": "read + write",
+      "labelDy": 20
+    },
+    {
+      "from": "web",
+      "to": "discovery",
+      "label": "Run Now",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "from": "discovery",
+      "to": "boards",
+      "label": "per-title queries"
+    },
+    {
+      "from": "discovery",
+      "to": "db",
+      "label": "upsert, dedupe by fingerprint",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "db",
+      "to": "filter",
+      "label": "unscored pool",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelDy": -67
+    },
+    {
+      "from": "filter",
+      "to": "gate",
+      "label": "survivors only",
+      "variant": "emphasis"
+    },
+    {
+      "from": "gate",
+      "to": "claude",
+      "label": "5-dimension score prompt",
+      "variant": "emphasis"
+    },
+    {
+      "from": "gate",
+      "to": "db",
+      "label": "verdict + weighted score",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "db",
+      "to": "worker",
+      "label": "queue: submit or hold",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "worker",
+      "to": "tailor",
+      "label": "before drafting"
+    },
+    {
+      "from": "tailor",
+      "to": "filler",
+      "label": "résumé version",
+      "variant": "emphasis"
+    },
+    {
+      "from": "filler",
+      "to": "db",
+      "label": "draft, then submitted",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "bottom"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "What and who",
+      "items": [
+        "A quality-gated job-search agent for one person",
+        "Discovers, scores, tailors a résumé, drafts the application",
+        "Two frontends, one data path: both call context.py and actions.py"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Why the gate comes first",
+      "items": [
+        "The hard filter is deterministic, free, and retires jobs permanently",
+        "Only survivors cost a model call, capped by max_score_per_run",
+        "Credibility is scored from the verified facts store, never invented"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Rails and rhythm",
+      "items": [
+        "SUBMISSION_IMPLEMENTED ships False, so every real send is refused",
+        "An unanswerable form question parks the run instead of guessing",
+        "Two independent state machines in run_state: pipeline and apply"
+      ]
+    }
+  ]
+}

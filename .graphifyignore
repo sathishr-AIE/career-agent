@@ -1,0 +1,6 @@
+# Scratch workspace for the subagent-driven-development skill. Contains a
+# nested .gitignore with a bare `*`, which triggers a pattern-scope-leak bug
+# in graphify's directory pruning (a directory's own ignore rules bleed into
+# every directory visited afterward in the same walk). Excluding it here
+# sidesteps the walk ever loading that file.
+.superpowers/

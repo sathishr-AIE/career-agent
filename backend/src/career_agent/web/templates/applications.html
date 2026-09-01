@@ -60,6 +60,8 @@
       <td>{{ j["source"] }}</td>
       <td class="{{ j['verdict'] }}">{{ j["verdict"] }}</td>
       <td>
+        <button hx-post="/apply/{{ j['id'] }}" class="btn"
+                title="Draft this job now, ahead of the queue. Review it in the status card above.">Apply</button>
         <button hx-post="/queue/{{ j['id'] }}/priority" hx-vals='{"direction":"up"}'>▲</button>
         <button hx-post="/queue/{{ j['id'] }}/priority" hx-vals='{"direction":"down"}'>▼</button>
         <button hx-post="/queue/{{ j['id'] }}/skip">Skip</button>
@@ -126,6 +128,17 @@
       <td class="{{ j['verdict'] }}">{{ j["verdict"] }}</td>
       <td>
         {% call action_cell(j) %}
+        {# A drafted job is already parked in the status card awaiting #}
+        {# review; a second Apply would not be refused (draft is not in #}
+        {# ats.BLOCKING) -- it would quietly add a second draft row. #}
+        {% if j["has_draft"] %}
+        <span class="rationale">Drafted &mdash; review in the status card above.</span>
+        {% else %}
+        {# /apply refuses a skip verdict, and this tab lists skip rows #}
+        {# when the page is loaded as ?show=skipped. #}
+        <button class="btn" hx-post="{{ '/override/' ~ j['id'] if j['verdict'] == 'skip' else '/apply/' ~ j['id'] }}"
+                title="Draft this job now. Review it in the status card above.">Apply</button>
+        {% endif %}
         <button hx-post="/dismiss/{{ j['id'] }}" hx-swap="outerHTML">Dismiss</button>
         {% endcall %}
       </td>

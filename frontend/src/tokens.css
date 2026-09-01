@@ -1,0 +1,130 @@
+/* Career Agent design tokens.
+   Metaphor: this is a docket, not a dashboard -- the gate returns a verdict
+   (submit/hold/skip) with a rationale and a weighted score, so color is
+   reserved for verdicts and nothing else. See the split-frontend design
+   plan for the full rationale behind each choice below. */
+
+@import '@fontsource/instrument-sans/400.css';
+@import '@fontsource/instrument-sans/600.css';
+@import '@fontsource/instrument-sans/700.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+
+:root {
+  /* -- color: shell & content, neutral -- */
+  --graphite: #191b1f;   /* shell -- warm-neutral dark, not blue-black */
+  --graphite-raised: #23262b; /* sidebar / status bar panels on the shell */
+  --graphite-line: rgba(255, 255, 255, 0.08);
+  --graphite-text: #e8e6e1;
+  --graphite-text-dim: #9a9b9f;
+
+  --paper: #fbfaf8;      /* content plane -- slightly warm, not clinical white */
+  --paper-raised: #ffffff;
+  --paper-line: rgba(20, 22, 26, 0.09);
+  --ink: #14161a;
+  --ink-dim: #63666d;
+
+  /* -- color: verdicts, the only saturated hues in the system -- */
+  --submit: #1f7a4c;
+  --submit-dim: rgba(31, 122, 76, 0.16);
+  --hold: #b4761a;
+  --hold-dim: rgba(180, 118, 26, 0.16);
+  --skip: #a33a48;
+  --skip-dim: rgba(163, 58, 72, 0.16);
+  --signal: #2c5fd0;     /* focus rings + the one primary action, nothing else */
+
+  /* -- type -- */
+  --font-display: 'Instrument Sans', system-ui, -apple-system, sans-serif;
+  --font-body: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-data: 'IBM Plex Mono', ui-monospace, 'Cascadia Code', monospace;
+
+  /* -- spacing (rem, so it scales with the reader's own text-size setting) -- */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
+  --radius: 10px;
+  --radius-lg: 16px;
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --graphite-line: rgba(255, 255, 255, 0.28);
+    --paper-line: rgba(20, 22, 26, 0.3);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 1rem;
+  line-height: 1.5;
+  letter-spacing: 0;
+  background: var(--graphite);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+.display {
+  font-family: var(--font-display);
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.data,
+.mono {
+  font-family: var(--font-data);
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+/* Feedback on pointer-down, not on release -- apple-design's response rule. */
+button:active {
+  transform: scale(0.98);
+  transition: transform 100ms ease-out;
+}
+
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

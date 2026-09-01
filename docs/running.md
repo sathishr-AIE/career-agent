@@ -21,6 +21,24 @@ Nothing runs on its own until you ask it to.
 - `.\scripts\install-scheduler.ps1` opts in to a daily 08:00 run.
 - `Unregister-ScheduledTask -TaskName CareerAgentDaily` opts back out.
 
+## Troubleshooting
+
+`career-agent.exe` blocked ("An Application Control policy has blocked this file")?
+The `career-agent` command is a `pip`/`uv`-generated launcher stub — unsigned, built
+locally — which a corporate Windows Defender Application Control or AppLocker policy
+may refuse to run even though it trusts `python.exe` itself. Use the equivalent
+`python -m` invocation instead, same as `install-scheduler.ps1` already does for the
+scheduled task:
+
+```powershell
+python -m career_agent.run serve
+python -m career_agent.run run
+```
+
+If `python.exe` is blocked too, ask IT to allowlist `.venv\Scripts\python.exe` (or the
+specific `career-agent.exe` path — note it changes on every reinstall, so a path or
+publisher rule is more durable than a hash rule).
+
 ## Changing what it searches for
 
 Edit `career_brief.toml`. `search_locations` decides what each source is asked

@@ -1,0 +1,234 @@
+"""JSON mirror of the Jinja routes in app.py, for the Vite/React frontend
+(see the split-frontend plan). Every route here calls the same
+career_agent.web.context / career_agent.web.actions functions the Jinja
+routes call, so the two frontends read and write through one data path and
+can't drift apart during the page-by-page migration.
+
+career_agent.web.app imports this module's router (app.include_router) to
+mount it, so importing app.py back at *module load* time here would be
+circular. `_app()` defers that import to *call* time instead -- by the time
+a request handler runs, app.py has finished importing, so the deferred
+import is free and safe. It also keeps DB_PATH / BRIEF_PATH /
+CANDIDATE_PROFILE_PATH a single source of truth: tests monkeypatch them on
+the app module (`monkeypatch.setattr(web, "DB_PATH", ...)`), and reading
+them through the app module here picks up that same patched value, exactly
+like every Jinja route already does."""
+from fastapi import APIRouter, Body, File, UploadFile
+from fastapi.responses import JSONResponse
+
+from career_agent.web import actions, context
+
+router = APIRouter(prefix="/api")
+
+
+def _app():
+    from career_agent.web import app as app_module
+    return app_module
+
+
+@router.get("/overview")
+def api_overview():
+    m = _app()
+    return context.overview_context(m._conn(), m.BRIEF_PATH)
+
+
+@router.get("/applications")
+def api_applications(show: str = "queue"):
+    m = _app()
+    return context.applications_context(
+        m._conn(), show, m.BRIEF_PATH, scheduled=m.scheduled_task_installed())
+
+
+@router.get("/resumes")
+def api_resumes():
+    m = _app()
+    return context.resumes_context(m._conn(), m.BRIEF_PATH)
+
+
+@router.post("/resumes")
+async def api_upload_resume(file: UploadFile = File(...)):
+    result = await actions.upload_master_resume(file)
+    return JSONResponse(status_code=200 if result["ok"] else 422, content=result)
+
+
+@router.get("/settings")
+def api_settings():
+    m = _app()
+    return context.settings_context(m._conn(), m.BRIEF_PATH, m.CANDIDATE_PROFILE_PATH)
+
+
+_SETTINGS_DEFAULTS = {
+    "target_titles": "", "title_families": "", "search_locations": "",
+    "locations": "", "work_authorization": "", "excluded_companies": "",
+    "non_negotiables": "", "remote_ok": False, "salary_floor_inr": "",
+    "daily_cap": "", "gate_threshold": "", "staleness_days": "",
+    "scoring_model": "", "max_score_per_run": "", "brief_present": False,
+    "candidate_present": False, "candidate_name": "", "candidate_email": "",
+    "candidate_phone": "", "linkedin_url": "", "portfolio_url": "",
+}
+_SETTINGS_NUMERIC_FIELDS = ("salary_floor_inr", "daily_cap", "gate_threshold",
+                           "staleness_days", "max_score_per_run")
+
+
+@router.put("/settings")
+def api_settings_save(body: dict = Body(...)):
+    """Body is the same field set the Jinja settings form posts (see
+    actions.save_settings' docstring) as JSON instead of form-encoded --
+    numbers and booleans are accepted either as JSON types or as strings and
+    normalized to the strings actions.save_settings expects."""
+    m = _app()
+    conn = m._conn()
+    form = {**_SETTINGS_DEFAULTS, **body}
+    for field in _SETTINGS_NUMERIC_FIELDS:
+        if form[field] is not None and not isinstance(form[field], str):
+            form[field] = str(form[field])
+    result = actions.save_settings(conn, form, m.BRIEF_PATH, m.CANDIDATE_PROFILE_PATH)
+    if not result["ok"]:
+        return JSONResponse(status_code=422, content=result)
+    return context.settings_context(conn, m.BRIEF_PATH, m.CANDIDATE_PROFILE_PATH)
+
+
+def _result(result: dict) -> JSONResponse:
+    return JSONResponse(status_code=200 if result["ok"] else 422, content=result)
+
+
+@router.post("/apply/{job_id}")
+async def api_apply(job_id: int):
+    m = _app()
+    result = await actions.do_apply(
+        m._conn(), job_id, allow_skip=False, event="human_applied",
+        brief_path=m.BRIEF_PATH, candidate_profile_path=m.CANDIDATE_PROFILE_PATH)
+    return _result(result)
+
+
+@router.post("/override/{job_id}")
+async def api_override(job_id: int):
+    m = _app()
+    result = await actions.do_apply(
+        m._conn(), job_id, allow_skip=True, event="human_override",
+        brief_path=m.BRIEF_PATH, candidate_profile_path=m.CANDIDATE_PROFILE_PATH)
+    return _result(result)
+
+
+@router.post("/answer/{job_id}")
+def api_answer(job_id: int, question: str = Body(...), answer: str = Body(...),
+              is_volatile: bool = Body(False)):
+    m = _app()
+    result = actions.answer_question(m._conn(), job_id, question, answer,
+                                     is_volatile=is_volatile)
+    return _result(result)
+
+
+@router.post("/send/{job_id}")
+async def api_send(job_id: int):
+    m = _app()
+    result = await actions.send(m._conn(), job_id, brief_path=m.BRIEF_PATH,
+                                candidate_profile_path=m.CANDIDATE_PROFILE_PATH)
+    return _result(result)
+
+
+@router.post("/dismiss/{job_id}")
+def api_dismiss(job_id: int):
+    m = _app()
+    return _result(actions.dismiss(m._conn(), job_id))
+
+
+@router.post("/applied/{job_id}")
+def api_mark_applied(job_id: int, when: str = Body("")):
+    m = _app()
+    return _result(actions.mark_applied(m._conn(), job_id, when,
+                                        brief_path=m.BRIEF_PATH))
+
+
+@router.post("/outcome/{application_id}")
+def api_record_outcome(application_id: int, type: str = Body(""),
+                       occurred_at: str = Body(""), notes: str = Body("")):
+    m = _app()
+    return _result(actions.record_outcome(m._conn(), application_id, type,
+                                          occurred_at, notes))
+
+
+@router.get("/run/status")
+def api_run_status():
+    m = _app()
+    return context.run_status_context(m._conn())
+
+
+@router.post("/run/start")
+async def api_run_start(mode: str = Body(...)):
+    m = _app()
+    return _result(await actions.run_start(m._conn(), mode, m.BRIEF_PATH,
+                                           m.CANDIDATE_PROFILE_PATH))
+
+
+@router.post("/run/pause")
+def api_run_pause():
+    m = _app()
+    return _result(actions.run_pause(m._conn()))
+
+
+@router.post("/run/resume")
+async def api_run_resume():
+    m = _app()
+    return _result(await actions.run_resume(m._conn(), m.BRIEF_PATH,
+                                            m.CANDIDATE_PROFILE_PATH))
+
+
+@router.post("/run/stop")
+def api_run_stop():
+    m = _app()
+    return _result(actions.run_stop(m._conn()))
+
+
+@router.post("/pipeline/run-now")
+async def api_pipeline_run_now():
+    """Same asyncio.create_task + _background_tasks bookkeeping as the
+    Jinja route (app.pipeline_run_now) -- reusing app.py's own task registry
+    here, via the deferred import, rather than a second one, so a run
+    started from either frontend is tracked and cancelled the same way."""
+    import asyncio
+
+    m = _app()
+    conn = m._conn()
+    state = m.worker.get_run_state(conn, "pipeline")
+    if state["status"] not in ("idle", "error"):
+        return JSONResponse(status_code=409, content={
+            "ok": False, "message": "A pipeline run is already in progress."})
+    m.worker.set_run_state(conn, "pipeline", status="running", last_error=None,
+                           stage=None, found=0, duplicates=0, passed=0,
+                           scored=0, shortlisted=0)
+    conn.execute("UPDATE run_state SET started_at = datetime('now')"
+                 " WHERE kind = 'pipeline'")
+    conn.commit()
+    m.store.log(conn, None, "pipeline_started")
+    task = asyncio.create_task(
+        m.pipeline.run_background(m._conn, m.DB_PATH, m.BRIEF_PATH))
+    m._background_tasks.add(task)
+    task.add_done_callback(m._background_tasks.discard)
+    return {"ok": True, "message": "ok"}
+
+
+@router.get("/pipeline/status")
+def api_pipeline_status():
+    m = _app()
+    return context.pipeline_status_context(m._conn())
+
+
+@router.post("/queue/{job_id}/skip")
+async def api_queue_skip(job_id: int):
+    m = _app()
+    return _result(await actions.queue_skip(
+        m._conn(), job_id, brief_path=m.BRIEF_PATH,
+        candidate_profile_path=m.CANDIDATE_PROFILE_PATH))
+
+
+@router.post("/queue/{job_id}/retry")
+def api_queue_retry(job_id: int):
+    m = _app()
+    return _result(actions.queue_retry(m._conn(), job_id))
+
+
+@router.post("/queue/{job_id}/priority")
+def api_queue_priority(job_id: int, direction: str = Body(...)):
+    m = _app()
+    return _result(actions.queue_priority(m._conn(), job_id, direction))

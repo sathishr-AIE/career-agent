@@ -155,6 +155,14 @@ def test_index_shows_submit_and_hold_with_rationale(client):
     assert "strong match" in r.text
 
 
+def test_queue_tab_offers_an_apply_button_per_job(client):
+    """The Queue tab previously only had priority/Skip controls -- no way to
+    manually draft a specific job out of turn without starting the worker."""
+    r = client.get("/applications")
+    queue_html = r.text.split('id="tab-queue"')[1].split('id="tab-all"')[0]
+    assert 'hx-post="/apply/1"' in queue_html
+
+
 def test_index_hides_skips_by_default(client):
     """The Skipped tab's markup is always present in the response (tabs are
     client-side CSS toggles, per the applications.html design), but the
@@ -209,6 +217,51 @@ def test_apply_denial_reason_is_escaped(client, monkeypatch):
     r = client.post("/apply/1")
     assert r.status_code == 200
     assert "<script>" not in r.text
+
+
+def test_apply_parks_the_job_so_the_draft_shows_in_the_status_card(client, monkeypatch):
+    """The Queue tab's Apply button posts to /apply/{job_id}, but until this
+    sets current_job_id, the status card (the only place Send/Skip render)
+    has no idea a draft exists -- it only ever shows the job matching
+    current_job_id, same as apply_tick's own park-before-draft pattern."""
+    async def fake_submit(conn, job_id, dry_run, brief=None, profile=None,
+                          resume_version=None):
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+
+    r = client.post("/apply/1")
+    assert r.status_code == 200
+
+    conn = db.connect(web.DB_PATH)
+    assert worker.get_run_state(conn, "apply")["current_job_id"] == 1
+
+    status = client.get("/run/status")
+    assert "AI Engineer" in status.text
+    assert 'hx-post="/send/1"' in status.text
+
+
+def test_apply_refuses_when_another_job_is_already_parked(client, monkeypatch):
+    """Without this guard, clicking Apply on a second job while the first
+    one is awaiting review would silently overwrite current_job_id and
+    orphan the first draft -- invisible in the status card, but still a
+    live 'draft' row nobody can find a Send button for."""
+    conn = db.connect(web.DB_PATH)
+    worker.set_run_state(conn, "apply", current_job_id=2)
+
+    calls = []
+
+    async def spy(*args, **kwargs):
+        calls.append(args)
+        return {"ok": True, "job_id": 1, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", spy)
+
+    r = client.post("/apply/1")
+    assert r.status_code == 200
+    assert "denied" in r.text
+    assert calls == [], "must refuse before ever calling submit()"
+    assert worker.get_run_state(conn, "apply")["current_job_id"] == 2
 
 
 def test_send_without_a_draft_is_refused(client, monkeypatch):
@@ -1615,6 +1668,49 @@ def test_the_skipped_tab_offers_mark_applied_and_keeps_track_anyway(client):
     assert "Track anyway" in skipped
 
 
+def _all_tab(text):
+    """The All Applications panel only. Slicing from 'id="tab-all"' to the
+    end would run on into the Skipped panel that follows it in the markup,
+    so anything found there would be credited to the wrong tab."""
+    return text.split('id="tab-all"')[1].split('id="tab-skipped"')[0]
+
+
+def test_all_applications_offers_apply_for_an_undrafted_job(client):
+    """The Queue tab has a per-row Apply; without one here a job you are
+    already looking at has to be found again in the other tab to act on."""
+    assert 'hx-post="/apply/1"' in _all_tab(client.get("/applications").text)
+
+
+def test_all_applications_hides_apply_once_a_draft_exists(client):
+    """A drafted job is parked in the status card awaiting review. 'draft'
+    is not in ats.BLOCKING, so a second Apply would not be refused -- it
+    would quietly insert a second draft row."""
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'tailored-1-r1', 'draft')")
+    conn.commit()
+
+    all_tab = _all_tab(client.get("/applications").text)
+    assert 'hx-post="/apply/1"' not in all_tab
+    assert "Drafted" in all_tab
+
+
+def test_all_applications_apply_uses_override_for_a_skip_verdict(client):
+    """Loaded as ?show=skipped the route passes all_rows as `jobs`, so the
+    All tab includes skip-verdict rows. /apply refuses those ("Use Apply
+    anyway to override"), so the button has to post to /override instead."""
+    all_tab = _all_tab(client.get("/applications?show=skipped").text)
+    assert 'hx-post="/override/2"' in all_tab
+    assert 'hx-post="/apply/2"' not in all_tab
+
+
+def test_the_skipped_tab_does_not_gain_a_duplicate_apply_button(client):
+    """Track anyway already posts to /override there; the new button lives
+    in the All tab's caller() block, not in the shared macro."""
+    skipped = client.get("/applications").text.split('id="tab-skipped"')[1]
+    assert skipped.count('hx-post="/override/2"') == 1
+
+
 def test_marking_applied_says_when_it_hits_the_daily_cap(client, brief_path):
     """A hand-marked row counts against daily_cap like any other and the run
     auto-pauses at it, so the click that caused the pause has to say so."""
@@ -1687,6 +1783,90 @@ def test_resumes_page_shows_no_master_when_none_exists(client, monkeypatch):
     # the full path, not just the basename -- a bare "file.docx" doesn't tell
     # anyone where to put it
     assert str(missing) in r.text
+
+
+def _upload(client, path, filename=None):
+    return client.post("/resumes/master", files={
+        "file": (filename or path.name, path.read_bytes(),
+                 "application/vnd.openxmlformats-officedocument"
+                 ".wordprocessingml.document")})
+
+
+def test_uploading_a_marker_carrying_docx_installs_the_master(
+        client, tmp_path, monkeypatch):
+    """The Resumes page previously only reported whether a master existed --
+    there was no way to put one there, so Apply failed with 'No master
+    template' and the UI offered no way out."""
+    target = tmp_path / "resume" / "master.docx"
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", target)
+    source = tmp_path / "upload.docx"
+    build_tailor_template(source)
+
+    r = _upload(client, source)
+    assert r.status_code == 200
+    assert "denied" not in r.text
+    assert target.exists()
+    assert target.read_bytes() == source.read_bytes()
+
+
+def test_a_rejected_upload_does_not_clobber_the_installed_master(
+        client, tmp_path, monkeypatch):
+    """The property that matters most: a master already in place survives a
+    bad upload untouched. Uses a docx auto-preparation cannot rescue (no
+    summary section, no bullets) so it reaches the rejection path."""
+    target = tmp_path / "resume" / "master.docx"
+    target.parent.mkdir(parents=True)
+    build_tailor_template(target)
+    good_bytes = target.read_bytes()
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", target)
+
+    import docx
+    unpreparable = tmp_path / "unpreparable.docx"
+    doc = docx.Document()
+    doc.add_paragraph("SATHISH R")
+    doc.add_paragraph("Just a name and nothing else resembling a resume.")
+    doc.save(str(unpreparable))
+
+    r = _upload(client, unpreparable)
+    assert r.status_code == 200
+    assert "denied" in r.text
+    assert target.read_bytes() == good_bytes, \
+        "a rejected upload must not clobber the master already installed"
+
+
+def test_uploading_a_non_docx_is_refused_without_a_traceback(
+        client, tmp_path, monkeypatch):
+    target = tmp_path / "resume" / "master.docx"
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", target)
+    pdf = tmp_path / "resume.pdf"
+    pdf.write_bytes(b"%PDF-1.4 not really a docx")
+
+    r = _upload(client, pdf)
+    assert r.status_code == 200
+    assert "denied" in r.text
+    assert not target.exists()
+
+
+def test_uploading_leaves_no_temp_file_behind_on_rejection(
+        client, tmp_path, monkeypatch):
+    """The temp file is written beside the target so os.replace stays a
+    same-directory rename; a rejected upload must clean it up rather than
+    leaving litter in the user's resume folder."""
+    target = tmp_path / "resume" / "master.docx"
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", target)
+    pdf = tmp_path / "resume.pdf"
+    pdf.write_bytes(b"%PDF-1.4 not really a docx")
+
+    _upload(client, pdf)
+    leftovers = list(target.parent.glob("*")) if target.parent.exists() else []
+    assert leftovers == []
+
+
+def test_resumes_page_offers_the_upload_form(client, monkeypatch):
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", Path("/no/such/file.docx"))
+    r = client.get("/resumes")
+    assert 'hx-post="/resumes/master"' in r.text
+    assert "&lt;&lt;SUMMARY&gt;&gt;" in r.text
 
 
 def test_resumes_page_shows_the_master_when_present(client, monkeypatch, tmp_path):
@@ -1860,3 +2040,90 @@ def test_do_apply_needs_answer_parks_the_run_so_the_card_shows(client, monkeypat
     status = client.get("/run/status")
     assert "Answer needed" in status.text
     assert "Notice period?" in status.text
+
+
+def _plain_resume(path, summary_heading="PROFESSIONAL SUMMARY", bullets=3):
+    """A resume shaped like a real one: a summary heading followed by prose,
+    and a run of list-styled bullets. No markers anywhere."""
+    import docx
+    doc = docx.Document()
+    doc.add_paragraph("SATHISH R")
+    doc.add_paragraph("Chennai, India | someone@example.com")
+    if summary_heading:
+        doc.add_paragraph(summary_heading)
+        doc.add_paragraph("AI engineer building production LLM systems.")
+    doc.add_paragraph("EXPERIENCE")
+    for i in range(bullets):
+        doc.add_paragraph(f"Did notable thing number {i}.", style="List Paragraph")
+    doc.add_paragraph("EDUCATION")
+    doc.save(str(path))
+    return path
+
+
+def test_uploading_a_plain_resume_auto_inserts_the_markers(
+        client, tmp_path, monkeypatch):
+    """A real resume has prose under a 'SUMMARY' heading and real bullets,
+    never the literal markers. Rejecting it made the user hand-edit magic
+    strings into Word; preparing it here is what makes the upload usable."""
+    target = tmp_path / "resume" / "master.docx"
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", target)
+    source = _plain_resume(tmp_path / "plain.docx")
+
+    r = _upload(client, source)
+    assert "denied" not in r.text
+    assert target.exists()
+
+    import docx
+    texts = [p.text.strip() for p in docx.Document(str(target)).paragraphs]
+    assert "<<SUMMARY>>" in texts
+    assert texts.count("<<PROJECT_BULLET>>") == 1, \
+        "render_docx clones the marker per bullet, so exactly one must remain"
+
+
+def test_auto_prepare_reports_what_it_replaced(client, tmp_path, monkeypatch):
+    """Silent rewriting is the failure mode the user rejected. Saying what
+    changed is what makes an automatic edit reviewable."""
+    target = tmp_path / "resume" / "master.docx"
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", target)
+    source = _plain_resume(tmp_path / "plain.docx", bullets=3)
+
+    r = _upload(client, source)
+    assert "PROFESSIONAL SUMMARY" in r.text or "summary" in r.text.lower()
+    assert "3" in r.text, "must say how many bullets it collapsed"
+
+
+def test_an_already_marked_docx_is_installed_unchanged(
+        client, tmp_path, monkeypatch):
+    """Re-uploading an already-prepared file must be idempotent, not
+    double-prepared into nonsense."""
+    target = tmp_path / "resume" / "master.docx"
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", target)
+    source = tmp_path / "prepared.docx"
+    build_tailor_template(source)
+
+    r = _upload(client, source)
+    assert "denied" not in r.text
+    assert target.read_bytes() == source.read_bytes()
+
+
+def test_a_resume_with_no_summary_section_is_still_refused(
+        client, tmp_path, monkeypatch):
+    """Auto-preparation guesses from structure. When there is no structure
+    to read, it must say so rather than pick a paragraph at random."""
+    target = tmp_path / "resume" / "master.docx"
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", target)
+    source = _plain_resume(tmp_path / "nosummary.docx", summary_heading=None)
+
+    r = _upload(client, source)
+    assert "denied" in r.text
+    assert not target.exists()
+
+
+def test_a_resume_with_no_bullets_is_refused(client, tmp_path, monkeypatch):
+    target = tmp_path / "resume" / "master.docx"
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", target)
+    source = _plain_resume(tmp_path / "nobullets.docx", bullets=0)
+
+    r = _upload(client, source)
+    assert "denied" in r.text
+    assert not target.exists()

@@ -46,6 +46,10 @@ desktop.ini
 screenshots/
 resume/
 
+# Local knowledge-graph tool cache. Regenerated on demand, ~4MB of
+# per-file semantic JSON -- nothing here is project source.
+graphify-out/
+
 # Isolation worktrees. Never tracked: a worktree nested in an
 # un-ignored path is also a path git resolves through the parent
 # checkout, which is why worktree creation refuses it.
