@@ -622,7 +622,7 @@ async def test_the_agent_gets_an_absolute_resume_path(conn, tmp_path, monkeypatc
     given = _upload_path(fake.prompts[0])
     assert given.is_absolute(), given
     assert given.exists()
-    assert given.parent == (tmp_path / "work").resolve()
+    assert given.parent == (tmp_path / "work" / "job1").resolve()
 
 
 async def test_a_missing_resume_file_refuses_and_writes_nothing(conn):
@@ -668,7 +668,7 @@ async def test_the_resume_is_staged_under_the_candidates_own_name(
     assert given.name == "Jane_Doe_Resume.docx"     # PROFILE is "Jane Doe"
     assert given.is_absolute() and given.exists()
     assert given.read_text(encoding="utf-8") == "the rendered docx"
-    assert given.parent == (tmp_path / "work").resolve()
+    assert given.parent == (tmp_path / "work" / "job1").resolve()
     assert src.exists()                             # the original is untouched
 
 
@@ -927,3 +927,36 @@ async def test_a_late_hold_does_not_delete_a_swept_row(conn, result, key):
     again = await _submit(conn, dry_run=False,
                           run_agent=fake_agent(AgentResult("applied")))
     assert not again["ok"] and "already has" in again["reason"]
+
+
+async def test_two_jobs_do_not_share_one_staged_resume(conn, tmp_path):
+    """Staging happens before _agent_lock() is taken, and the basename is
+    the same for every job -- one shared path would let a second submit()
+    overwrite the copy the first run is about to upload, and send the wrong
+    résumé to a real employer."""
+    job2 = _second_job(conn)
+    for version, body, job in (("tailored-1-r1", "resume for job 1", 1),
+                               ("tailored-2-r1", "resume for job 2", job2)):
+        src = tmp_path / f"{version}.docx"
+        src.write_text(body, encoding="utf-8")
+        conn.execute("INSERT INTO resume (version, path) VALUES (?, ?)",
+                     (version, str(src)))
+    conn.commit()
+
+    staged = {}
+
+    async def runner(prompt, job_id, nonce):
+        staged[job_id] = _upload_path(prompt)
+        await asyncio.sleep(0.01)
+        return AgentResult("draft_ready", answers={})
+
+    await asyncio.gather(
+        ats_apply.submit(conn, 1, dry_run=True, brief=BRIEF, profile=PROFILE,
+                         resume_version="tailored-1-r1", run_agent=runner),
+        ats_apply.submit(conn, job2, dry_run=True, brief=BRIEF, profile=PROFILE,
+                         resume_version="tailored-2-r1", run_agent=runner))
+
+    assert staged[1] != staged[job2]
+    assert staged[1].name == staged[job2].name == "Jane_Doe_Resume.docx"
+    assert staged[1].read_text(encoding="utf-8") == "resume for job 1"
+    assert staged[job2].read_text(encoding="utf-8") == "resume for job 2"

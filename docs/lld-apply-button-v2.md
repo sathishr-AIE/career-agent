@@ -116,7 +116,7 @@ its source is AGPL):
 | Section | Content / source |
 |---|---|
 | JOB | url, title, company, score from the `job` + latest `assessment` rows |
-| FILES | absolute resume path, copied to `<agent WORK_DIR>/<Candidate_Name>_Resume.docx` (clean filename — recruiters see it; the work dir is outside the repo, see §3.3) |
+| FILES | absolute resume path, copied to `<agent WORK_DIR>/job<id>/<Candidate_Name>_Resume.docx` (clean filename — recruiters see it; the work dir is outside the repo, see §3.3) |
 | RESUME TEXT | tailored resume content (from the `resume` row's rendered text; used for text fields) |
 | APPLICANT PROFILE | `CandidateProfile` fields (name split, email, phone, linkedin, portfolio) + standard defaults (18+, background check yes, how-heard, EEO decline-to-answer) |
 | KNOWN ANSWERS | every `qa_bank` row as "Q → A", with volatile rows past the 30-day window marked *stale — reconfirm before using*; the agent prefers these verbatim when a form question matches |

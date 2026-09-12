@@ -177,21 +177,25 @@ def _agent_lock() -> asyncio.Lock:
     return _AGENT_LOCK
 
 
-def _stage_resume(resume_path: Path, profile: CandidateProfile) -> Path:
+def _stage_resume(resume_path: Path, profile: CandidateProfile,
+                  job_id: int) -> Path:
     """Copy the rendered résumé into the agent's work dir under a clean
     `<Candidate_Name>_Resume.docx` and return that path -- spec 3.2 FILES.
 
     The filename is the single most visible artefact of this whole system:
     handing the agent `tailored-847-r1.docx` tells every recruiter who
-    opens the attachment that it was machine-generated per job. Only the
-    name changes; the bytes are copied verbatim and the stored file is
-    never touched.
+    opens the attachment that it was machine-generated per job. A file
+    input uploads the basename, so only that changes; the bytes are copied
+    verbatim and the stored file is never touched.
 
-    One name per candidate, reused across jobs -- `submit()` serializes
-    agent runs behind `_agent_lock()`, so two runs can never race on it."""
+    Per-job subdirectory, because the basename is the same for every job:
+    staging happens before `_agent_lock()` is taken, so one shared filename
+    would let a second submit() overwrite the copy a first run is about to
+    upload -- and send someone the wrong résumé."""
     safe = re.sub(r'[\\/:*?"<>|\s]+', "_",
                   profile.candidate_name.strip()).strip("_") or "Candidate"
-    dest = (agent_mod.WORK_DIR / f"{safe}_Resume{resume_path.suffix}").resolve()
+    dest = (agent_mod.WORK_DIR / f"job{job_id}"
+            / f"{safe}_Resume{resume_path.suffix}").resolve()
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(resume_path, dest)
     return dest
@@ -466,8 +470,8 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
         "SELECT weighted_score FROM assessment WHERE job_id = ?"
         " ORDER BY created_at DESC, id DESC LIMIT 1", (job_id,)).fetchone()
     prompt_args = (job, profile, brief, store.qa_all(conn),
-                   _resume_text(resume_row), str(_stage_resume(resume_path,
-                                                               profile)))
+                   _resume_text(resume_row),
+                   str(_stage_resume(resume_path, profile, job_id)))
     score = score_row["weighted_score"] if score_row else None
     runner = run_agent or _live_run_agent
     # One unguessable token per run, stamped into every RESULT line the
