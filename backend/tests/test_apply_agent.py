@@ -1,5 +1,9 @@
 # backend/tests/test_apply_agent.py
+import io
 import json as _json
+import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -244,3 +248,100 @@ def test_transcripts_stay_in_the_repos_data_logs():
     recorded by absolute path in application.transcript_path."""
     assert agent_mod.LOG_DIR == Path("data/logs")
     assert not agent_mod.LOG_DIR.is_absolute()
+
+
+# -- F2/F3: the run watchdog, and what the transcript records --------------
+# No test here spawns a subprocess (house convention): `claude` is stood in
+# for by a pure-Python fake whose stdout is a generator.
+
+class _FakeProc:
+    """A `claude -p` session that never exits on its own. `block` is the
+    event its stdout waits on after the lines run out -- exactly the hang
+    the watchdog exists for: stdout stays OPEN, so consume_stream never
+    reaches EOF and proc.wait() is never even called."""
+
+    def __init__(self, lines, block=None):
+        self.pid = 424242
+        self.stdin = io.StringIO()
+        self.stdout = self._gen(lines, block)
+        self.returncode = None
+
+    def _gen(self, lines, block):
+        yield from lines
+        if block is not None:
+            block.wait(10)
+            self._block_released = True
+        else:
+            self.returncode = 0
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("claude", timeout)
+        return self.returncode
+
+
+@pytest.fixture
+def sandboxed(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent_mod, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(agent_mod, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(agent_mod, "require_binaries", lambda: None)
+
+
+def _install(monkeypatch, proc, block=None):
+    """Wire the fake process in, and make _kill_tree actually kill it."""
+    killed = []
+
+    def fake_kill(pid):
+        killed.append(pid)
+        proc.returncode = -9
+        if block is not None:
+            block.set()
+
+    monkeypatch.setattr(agent_mod.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(agent_mod, "_kill_tree", fake_kill)
+    return killed
+
+
+def test_a_hung_agent_is_killed_at_the_deadline(sandboxed, monkeypatch):
+    """consume_stream(proc.stdout) blocks until stdout closes, so proc.wait
+    only ever bounded the tail: a session that hangs with stdout open held
+    the worker thread forever and orphaned Chrome on port 9222."""
+    block = threading.Event()
+    proc = _FakeProc(['{"type": "assistant", "message": {"content":'
+                      ' [{"type": "text", "text": "working on it"}]}}'], block)
+    killed = _install(monkeypatch, proc, block)
+
+    started = time.monotonic()
+    r = agent_mod._run_agent_blocking("prompt", 7, 9222, 0.2, "sonnet")
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 3, f"the deadline was not wall-clock ({elapsed:.1f}s)"
+    assert killed == [proc.pid], "the process tree must be killed on expiry"
+    assert r.code == "failed" and r.reason == "timeout"
+    assert r.duration_ms > 0
+    # the transcript is kept: a timed-out run is exactly when someone wants
+    # to see what the agent was doing
+    assert "working on it" in Path(r.transcript_path).read_text(encoding="utf-8")
+
+
+def test_the_transcript_foots_the_run_cost_and_duration(sandboxed, monkeypatch):
+    """Nothing else persists cost_usd/duration_ms -- there is no DB column --
+    so without this footer there would be no record of what a run cost next
+    to the transcript of what it did."""
+    proc = _FakeProc([
+        _json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "filling the form"}]}}),
+        _json.dumps({"type": "result", "total_cost_usd": 0.0421,
+                     "result": "RESULT:APPLIED"}),
+    ])
+    _install(monkeypatch, proc)
+
+    r = agent_mod._run_agent_blocking("prompt", 7, 9222, 30, "sonnet")
+
+    assert r.code == "applied"
+    assert r.cost_usd == 0.0421 and r.duration_ms >= 0
+    footer = Path(r.transcript_path).read_text(encoding="utf-8").strip().splitlines()[-1]
+    assert "job 7" in footer and "$0.0421" in footer and "ms" in footer

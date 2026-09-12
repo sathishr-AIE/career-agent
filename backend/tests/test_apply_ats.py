@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 import docx
@@ -677,3 +678,18 @@ async def test_a_name_with_path_characters_still_makes_a_legal_filename(
     r = await _submit(conn, dry_run=True, profile=profile, run_agent=fake)
     assert r["ok"]
     assert _upload_path(fake.prompts[0]).name == "A_B_C_D_Resume.docx"
+
+
+# -- F3: what a run cost survives the run ----------------------------------
+
+async def test_the_run_cost_and_duration_are_logged(conn, caplog):
+    """AgentResult carries cost_usd/duration_ms and nothing read them: after
+    a live trial there would be no record of what any run cost. No DB column
+    for P0 -- the log line and the transcript footer are the record."""
+    fake = fake_agent(AgentResult("draft_ready", answers={},
+                                  cost_usd=0.0421, duration_ms=12345))
+    with caplog.at_level(logging.INFO, logger="career_agent.apply.ats"):
+        await _submit(conn, dry_run=True, run_agent=fake)
+    assert "0.0421" in caplog.text
+    assert "12345" in caplog.text
+    assert "job 1" in caplog.text

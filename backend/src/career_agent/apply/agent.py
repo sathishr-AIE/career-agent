@@ -9,6 +9,7 @@ import re
 import shutil as _shutil
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -500,40 +501,61 @@ def _run_agent_blocking(prompt, job_id, cdp_port, timeout_s, model) -> AgentResu
                             stderr=subprocess.STDOUT, text=True,
                             encoding="utf-8", errors="replace", env=env,
                             cwd=str(session_dir), shell=False)
+
+    # timeout_s is a wall-clock deadline, enforced by a watchdog rather than
+    # by proc.wait: consume_stream(proc.stdout) below blocks until stdout
+    # CLOSES, so a session that hangs with stdout open never reaches a wait
+    # at all -- it held the asyncio.to_thread worker forever, left
+    # _live_run_agent's `finally: cleanup(proc)` unreached (Chrome orphaned
+    # on port 9222) and wedged the apply worker. Killing the tree closes
+    # stdout, so consume_stream hits EOF naturally and the transcript
+    # collected so far survives.
+    timed_out = threading.Event()
+
+    def _watchdog():
+        timed_out.set()
+        _kill_tree(proc.pid)
+
+    alarm = threading.Timer(timeout_s, _watchdog)
+    alarm.daemon = True
+    alarm.start()
     try:
         proc.stdin.write(prompt)
         proc.stdin.close()
-        # ponytail: soft timeout; move to a reader thread with a hard
-        # deadline if hangs show up in practice. consume_stream(proc.stdout)
-        # blocks until stdout closes, so timeout_s is enforced by proc.wait
-        # only after EOF -- a truly hung agent holds the thread until Chrome
-        # dies with it.
         text, cost = consume_stream(proc.stdout)
-        proc.wait(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        _kill_tree(proc.pid)
-        # consume_stream already ran to EOF before proc.wait, so the
-        # transcript and cost are fully collected even though the process
-        # itself timed out -- keep them, a timed-out run is exactly when
-        # someone wants to see what the agent was doing.
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        transcript = log_dir / f"apply_{ts}_job{job_id}.txt"
-        transcript.write_text(text, encoding="utf-8")
-        return AgentResult("failed", "timeout", transcript_path=str(transcript),
-                           cost_usd=cost, duration_ms=int((time.time() - start) * 1000))
+        try:
+            proc.wait(timeout=10)   # stdout is at EOF; this only reaps
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc.pid)
     finally:
+        alarm.cancel()
         if proc.poll() is None:
             _kill_tree(proc.pid)
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    transcript = log_dir / f"apply_{ts}_job{job_id}.txt"
-    transcript.write_text(text, encoding="utf-8")
+    duration_ms = int((time.time() - start) * 1000)
+    transcript = _write_transcript(log_dir, job_id, text, cost, duration_ms)
+    if timed_out.is_set():
+        return AgentResult("failed", "timeout", transcript_path=str(transcript),
+                           cost_usd=cost, duration_ms=duration_ms)
 
     result = parse_result(text)
     result.transcript_path = str(transcript)
     result.cost_usd = cost
-    result.duration_ms = int((time.time() - start) * 1000)
+    result.duration_ms = duration_ms
     return result
+
+
+def _write_transcript(log_dir, job_id: int, text: str, cost: float,
+                      duration_ms: int) -> Path:
+    """The per-job audit trail, with what the run cost footed onto it --
+    nothing else persists cost_usd/duration_ms, so without this line there
+    is no record of what any run cost next to what it did."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    transcript = log_dir / f"apply_{ts}_job{job_id}.txt"
+    transcript.write_text(
+        f"{text}\n\n-- job {job_id}: cost ${cost:.4f}, {duration_ms} ms --\n",
+        encoding="utf-8")
+    return transcript
 
 
 def _kill_tree(pid: int) -> None:
