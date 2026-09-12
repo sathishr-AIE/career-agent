@@ -1,6 +1,7 @@
 # LLD v2 — The Apply Flow, Agentic Edition
 
-*Status: design, not yet implemented. Supersedes the apply-engine half of
+*Status: implemented, on branch `feat/agentic-apply-p0` (commits `8059203..1dbd5cf`).
+Supersedes the apply-engine half of
 [lld-apply-button.md](lld-apply-button.md); everything upstream of `submit()` (queue
 selection, guard, tailoring, run_state, dashboard routes) described there is unchanged.
 Rationale and the ApplyPilot study behind this design:
@@ -237,18 +238,31 @@ exception plumbing.
 ### 5.2 Failure classification
 
 ```python
-PERMANENT = {"expired", "sso_required", "easy_apply", "naukri_platform",
-             "not_eligible_location", "already_applied", "not_a_job_application",
-             "unsafe_permissions", "unsafe_verification", "site_blocked"}
+PERMANENT_REASONS = {"expired", "sso_required", "easy_apply", "naukri_platform",
+                      "not_eligible_location", "already_applied", "not_a_job_application",
+                      "unsafe_permissions", "unsafe_verification", "site_blocked"}
+UNKNOWN_STATE_REASONS = {"agent_error", "timeout", "no_result_line", "unrecognized_result"}
 ```
 
-- code in PERMANENT (or `EXPIRED`) → `status='failed_permanent'`, `failure_reason=<slug>`.
-- retryable (`stuck`, `page_error`, `timeout`, `login_issue`, free-text) → `status='failed'`;
-  when it's the `MAX_ATTEMPTS`-th failed row for the job → `failed_permanent`
-  (today's counting logic, unchanged).
+- code in PERMANENT_REASONS (or `EXPIRED`) → `status='failed_permanent'`, `failure_reason=<slug>`.
+- A third category besides permanent/retryable: **unknown-state**, matched on the reason's
+  slug before any `:` (`is_unknown_state()`). Each of these four means the agent drove a
+  real browser and then stopped reporting — it may have clicked Submit before dying, so the
+  true state is unknown, not "did not happen." **Send path only**: `status='held_unknown'`
+  (a BLOCKING status — the queue never re-picks the job, a human adjudicates), the same
+  doctrine `sweep_stale_in_flight` already documents; retrying would be a double-submit
+  vector. **Draft path**: the same four stay retryable `failed` — a draft submits nothing,
+  so re-drafting is free and correct.
+- Other retryable reasons (`stuck`, `page_error`, `login_issue`, free text) → `status='failed'`
+  on either path; the `MAX_ATTEMPTS`-th failed row for the job → `failed_permanent` (today's
+  counting logic, unchanged).
+- `applied` reported at draft time (the agent submitted despite draft-mode instructions) is
+  recorded as `held_unknown` with `failure_reason='applied_during_draft'`, for the same
+  double-send reason.
 - Every terminal write also inserts an `event` row with the reason (today's pattern).
-- `captcha` stays a **hold** (event only, no application row) — the job re-enters the
-  queue after review, matching current behavior; CapSolver is P2.
+- `captcha` stays a **hold** (event only; the send path also deletes its `in_flight` row, so
+  no application row survives either path) — the job re-enters the queue after review,
+  matching current behavior; CapSolver is P2.
 
 ### 5.3 Data model deltas (via `_add_column_if_missing`, house rules)
 

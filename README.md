@@ -61,17 +61,17 @@ Every submission carries an explainable decision record: why it qualified, what 
 
 ## Status
 
-**v1, v2, and v3 are all implemented** — discovery, the quality gate, a live dashboard, outcome tracking, per-role resume tailoring, and a real Greenhouse form-filler. See [`docs/product-vision.md`](docs/product-vision.md) for the full vision this is building toward.
+**v1, v2, and v3 are all implemented** — discovery, the quality gate, a live dashboard, outcome tracking, per-role resume tailoring, and a real, agentic apply engine (one Claude Code session per job, driving a real Chrome). See [`docs/product-vision.md`](docs/product-vision.md) for the full vision this is building toward.
 
-> **It does not submit applications yet.** The Greenhouse filler is built, but
+> **It does not submit applications yet.** The apply agent is built, but
 > `SUBMISSION_IMPLEMENTED` in `career_agent/apply/ats.py` ships `False` — nothing sends
-> for real until that's flipped by hand, after manually verifying the filler against a
-> real live posting (see "Real Greenhouse submission (v3)" below). This is a deliberate
+> for real until that's flipped by hand, after manually verifying it against a
+> real live posting (see "Real application submission (v3)" below). This is a deliberate
 > departure from the phase gate in the table below, which called for outcome data proving
 > tailored applications convert before auto-submission was even built; that evidence gate
-> was superseded by building the filler now and keeping the manual flag as the actual
-> trust boundary. Every non-Greenhouse source keeps an unconditional refusal regardless of
-> the flag. Naukri submission is not planned at any version — it is a discovery source
+> was superseded by building the agent now and keeping the manual flag as the actual
+> trust boundary. The flag gates every source alike — there is no more per-source
+> refusal. Naukri submission is not planned at any version — it is a discovery source
 > only.
 
 ## Running it
@@ -119,11 +119,15 @@ Open [http://localhost:5173](http://localhost:5173) — this is the dashboard. I
 cd backend
 uv venv
 uv pip install -e ".[dev]"
-playwright install chromium   # needed to actually submit applications
 cp .env.example .env          # fill in CLAUDE_CODE_OAUTH_TOKEN and APIFY_TOKEN
 ```
 
 `CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token`; it's required even for `serve` alone, since the dashboard's discovery run uses it. `APIFY_TOKEN` is only needed to actually discover jobs (Run Now / `career-agent run`).
+
+Drafting or sending an application (the dashboard's Apply/Send buttons, or the apply
+worker) also needs the `claude` CLI and `npx` on PATH — the apply agent spawns `claude -p`
+with a Playwright MCP server attached — and a real Chrome install; see "Real application
+submission (v3)" below. Discovery and scoring (`career-agent run`) don't need any of that.
 
 Edit `career_brief.toml` (target roles, locations, salary floor, daily application cap, non-negotiables) and `ats_boards.toml` (company ATS boards to also search) before your first real run — both are read from the current directory (`backend/`).
 
@@ -146,28 +150,27 @@ npm install
 
 Open [http://localhost:5173](http://localhost:5173). It proxies `/api/*` and file downloads to the backend on `:8000`, so nothing needs configuring beyond having that backend up.
 
-## Real Greenhouse submission (v3)
+## Real application submission (v3)
 
-`career_agent/apply/ats.py` includes a real Greenhouse form-filler, but
-`SUBMISSION_IMPLEMENTED` ships `False` — nothing sends for real until you
-flip that constant by hand, after you've verified it against real postings.
+`career_agent/apply/ats.py` drives a real agentic apply engine — one Claude Code session
+per job, filling the form in a real Chrome over CDP — but `SUBMISSION_IMPLEMENTED` ships
+`False` — nothing sends for real until you flip that constant by hand, after you've
+verified it against real postings.
 
 Setup:
 
-1. Copy `candidate_profile.toml.example` to `candidate_profile.toml` and
+1. Have the `claude` CLI and `npx` on PATH, and a real Chrome install (the path
+   auto-detects; override with `CHROME_PATH` in `.env` if needed).
+2. Copy `candidate_profile.toml.example` to `candidate_profile.toml` and
    fill in your real name, email, and phone (this file is gitignored).
-2. Use manual mode's draft step (Apply, not Send) against a few real
-   Greenhouse postings first. Drafting is safe with the flag off — it runs
-   the real filler and shows you exactly what it would send, with zero
-   real applications going out.
-3. Check `career_agent/apply/ats.py`'s `GREENHOUSE_STANDARD_FIELD_SELECTORS`
-   dict against what you actually see in those drafts. These selectors were
-   not verified against a live Greenhouse posting during development —
-   Greenhouse has changed its embed markup before, and this is the one
-   place to fix it if the field ids are wrong.
+3. With Chrome fully closed, use manual mode's draft step (Apply, not Send) against a
+   few real postings first — the first draft clones your existing Chrome profile
+   (cookies, sessions) into an isolated worker profile, which needs Chrome not running.
+   Drafting is safe with the flag off — it runs the real agent and shows you exactly
+   what it would send, with zero real applications going out.
 4. Only once you trust the drafts, flip `SUBMISSION_IMPLEMENTED = True`.
 
-Questions the filler can't answer (no `qa_bank` entry, or a stale volatile
+Questions the agent can't answer (no `qa_bank` entry, or a stale volatile
 one) show up as "Answer needed" on the Applications page's status card —
 answer once, and it's remembered for every future application via `qa_bank`.
 
@@ -182,12 +185,12 @@ point, not decoration.
 | --- | --- | --- |
 | **v1** *(shipped)* | Discovery, hard filter, scored gate, dashboard, manual apply, outcome tracking | The gate agrees with your judgment, and callback data exists |
 | **v2** *(shipped)* | Per-role tailoring from the facts store, resume rendering | Nothing claimed that you cannot defend |
-| **v3** *(shipped, gated)* | Real Greenhouse auto-submission | Tailoring proven, and outcomes show tailored applications convert |
+| **v3** *(shipped, gated)* | Real auto-submission via an agentic apply engine (all sources) | Tailoring proven, and outcomes show tailored applications convert |
 
-v3's code shipped ahead of its own gate above: the Greenhouse filler was built and
+v3's code shipped ahead of its own gate above: the apply engine was built and
 tested before outcome data existed to prove tailored applications convert.
 `SUBMISSION_IMPLEMENTED` is the actual gate now — a manual switch flipped only after
-verifying the filler against a real posting, not the outcome-evidence condition
+verifying it against a real posting, not the outcome-evidence condition
 originally specified for this phase.
 
 Deferred and unscheduled: recruiter-message handling and calendar; warm-path and

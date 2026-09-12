@@ -30,7 +30,6 @@ migration finishes. Don't assume `backend/src/career_agent/web/templates/` is de
 cd backend
 uv venv
 uv pip install -e ".[dev]"
-playwright install chromium        # needed for the Greenhouse filler / real submission
 cp .env.example .env               # CLAUDE_CODE_OAUTH_TOKEN + APIFY_TOKEN
 ```
 
@@ -44,8 +43,10 @@ cp .env.example .env               # CLAUDE_CODE_OAUTH_TOKEN + APIFY_TOKEN
 
 `career-agent run` and `serve` both read `career_brief.toml` and `ats_boards.toml` from
 the current directory (`backend/`; `--brief`/`--boards`/`--db` flags override the paths).
-Real Greenhouse submission additionally needs `candidate_profile.toml` (copy from
-`candidate_profile.toml.example`) — both TOML files holding secrets/PII are gitignored.
+Real submission additionally needs `candidate_profile.toml` (copy from
+`candidate_profile.toml.example`) — both TOML files holding secrets/PII are gitignored —
+plus the `claude` CLI and `npx` on PATH and a real Chrome install (the apply agent drives
+Chrome over CDP via a Playwright MCP server; see README's apply-path setup).
 
 ## Architecture
 
@@ -103,29 +104,34 @@ concurrent dashboard polling don't deadlock on `database is locked`.
    document.
 5. **Apply** (`apply/ats.py`, `web/worker.py`) — see below.
 
-### The two-phase Greenhouse filler and the `SUBMISSION_IMPLEMENTED` gate
+### The agentic apply engine and the `SUBMISSION_IMPLEMENTED` gate
 
-`apply/ats.py`'s `submit()` always drafts first (`dry_run=True`, writes an
-`application` row with `status='draft'` and its computed `answers` JSON) and a later real
-send (`dry_run=False`) reuses that draft's answers rather than recomputing — "what was
-shown for review is exactly what gets sent."
+`apply/ats.py`'s `submit()` builds one prompt per job (`apply/agent.py`'s `build_prompt`)
+and hands it to `run_agent`, which spawns a `claude -p` session driving a real Chrome
+(`apply/chrome.py`'s `launch_chrome`/`cleanup`, a profile cloned once from the user's own)
+over CDP through a Playwright MCP server; the agent's sentinel `RESULT:` line
+(`parse_result`) becomes a classified `AgentResult` that `submit()` turns into an
+`application` row. Three prompt modes: `draft` (`dry_run=True` — fills the form, never
+submits, records `status='draft'` with its answers JSON for human review), `send`
+(`dry_run=False` with an existing draft — pinned to that draft's reviewed answers, "what
+was shown for review is exactly what gets sent"), and `auto` (`dry_run=False` with no
+draft — the worker's auto mode, one browser session both decides and submits).
 
-The filler itself is split for testability: `resolve_answers` (pure, fully unit-tested —
-given a form's custom questions, decide each from `qa_bank` or raise `NeedsAnswer`) vs.
-the Playwright-driven shell around it (`_default_compute_answers` reads the live DOM,
-`_default_fill_and_submit` types the decided answers back in). The shell has no automated
-tests by design — verify it manually against a real posting, per the README's setup
-steps, before trusting it.
-
-`submit()` routes by `job.source`: only `"ats"` (Greenhouse) gets the real filler, gated
-by the module-level `SUBMISSION_IMPLEMENTED` constant, which **ships `False`** — flipping
-it is a deliberate manual step, not something any code path does automatically. Every
-other source keeps an unconditional refusal regardless of the flag.
+`SUBMISSION_IMPLEMENTED` still **ships `False`** and now gates a real send for every
+source, not just Greenhouse — the agent is source-agnostic, so the old per-source refusal
+is gone. Failures fall into three buckets: permanent (`expired`, `sso_required`, etc. →
+`failed_permanent`), retryable (`stuck`, `page_error`, ... → `failed`, promoted to
+`failed_permanent` at `MAX_ATTEMPTS`), and unknown-state (`agent_error`, `timeout`,
+`no_result_line`, `unrecognized_result` — the agent may have clicked Submit before it
+stopped reporting), which on the send path holds as `status='held_unknown'` for a human to
+adjudicate rather than risk a double-submit; the draft path keeps those same reasons
+retryable since nothing was sent. `application.failure_reason` (the taxonomy slug) and
+`application.transcript_path` (the per-job agent log) record the outcome.
 
 A form question with no `qa_bank` entry (or a stale one past the 30-day volatility
-window) raises `NeedsAnswer`, and the apply worker parks the run (`current_job_id` stays
-set) rather than looping — the dashboard's "Answer needed" card on `/applications` is
-what unparks it, via `qa_bank.qa_upsert`.
+window) makes the agent emit `RESULT:NEEDS_ANSWER:<question>`, and the apply worker parks
+the run (`current_job_id` stays set) rather than looping — the dashboard's "Answer
+needed" card on `/applications` is what unparks it, via `qa_bank.qa_upsert`.
 
 ### Config split: brief vs. profile vs. boards vs. settings
 
@@ -137,7 +143,7 @@ are — don't conflate them:
   `save_brief`, which round-trips through `tomlkit` to preserve comments/formatting —
   never `write_text`.
 - `candidate_profile.toml` (`CandidateProfile`, `config.py`) — gitignored PII (name,
-  email, phone) needed only for a real Greenhouse send. Same `_save_toml` round-trip
+  email, phone) needed only for a real send. Same `_save_toml` round-trip
   helper as the brief.
 - `ats_boards.toml` (`Board`, `config.py`) — which company ATS boards to scrape directly.
 - `setting` table (`store.py`, via the Settings page) — operational choices
@@ -146,10 +152,10 @@ are — don't conflate them:
 
 ## Testing conventions
 
-- Playwright-touching code (the three `*_compute_answers`/`*_fill_and_submit` functions
-  in `apply/ats.py`) is exercised only through injected test doubles, never a real or
-  synthetic browser page — this project has deliberately avoided being the first to need
-  `playwright install chromium` in CI.
+- The subprocess/browser shell (`apply/agent.py`'s `run_agent`, `apply/chrome.py`'s
+  `launch_chrome`/`cleanup`) is exercised only through the injected `run_agent` test seam
+  in `submit()`, never a real Chrome or `claude` subprocess — this project has
+  deliberately avoided being the first to need a live browser or spend API credits in CI.
 - `tests/golden/test_golden.py` checks `gate.score` against hand-labeled real listings —
   run it after any `gate.py` prompt change.
 - Datetime comparisons against SQLite's naive-UTC `datetime('now')` strings stay naive
