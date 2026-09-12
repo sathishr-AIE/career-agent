@@ -214,11 +214,14 @@ _MODE_ENDING = {
     "send": (
         "9. Fill using the PINNED ANSWERS, verify every field against them, click "
         "Submit, confirm the thank-you/received page, then output RESULT:APPLIED.\n"
-        "10. A human reviewed the PINNED ANSWERS and nothing else. If the form asks "
-        "something that is not covered by the PINNED ANSWERS and not answerable from "
-        "the APPLICANT PROFILE, do NOT improvise an answer and do NOT submit -- stop "
-        "and output RESULT:NEEDS_ANSWER:<the exact question text>. Anything you invent "
-        "here would be sent without anyone having seen it."
+        "10. A human reviewed the PINNED ANSWERS and nothing else, so in this mode "
+        "step 8 and SCREENING STRATEGY do not license composing anything new. If the "
+        "form asks something that is not covered by the PINNED ANSWERS and not "
+        "answerable from the APPLICANT PROFILE or KNOWN ANSWERS, do NOT improvise an "
+        "answer and do NOT submit -- stop and output RESULT:NEEDS_ANSWER:<the exact "
+        "question text>. Anything you invent here -- a freshly composed open-ended "
+        "answer included -- would be sent without anyone having seen it; an answer "
+        "taken verbatim from the PROFILE or KNOWN ANSWERS is not an invention."
     ),
     "auto": (
         "9. Verify every field, output the `ANSWERS_JSON:` line, click Submit, confirm "
@@ -622,10 +625,22 @@ def _kill_tree(pid: int) -> None:
 
 
 async def run_agent(prompt: str, *, job_id: int, nonce: str,
-                    cdp_port: int = 9222, timeout_s: int = 300,
+                    cdp_port: int = 9222, timeout_s: int = 600,
                     model: str = APPLY_MODEL) -> AgentResult:
     """asyncio.to_thread wrapper: the same event-loop rule as
     web/pipeline.py's run_once -- the dashboard must stay responsive.
+
+    timeout_s (10 min) is paired with ats.sweep_stale_in_flight's window
+    (20 min) and must stay strictly under it: this deadline is armed at
+    spawn, so it always fires FIRST and a timing-out run resolves its own
+    in_flight row before the sweep can touch it -- the sweep-vs-returning-run
+    race never opens. Raise one of the two and you must raise the other
+    (tests/test_apply_ats.py
+    ::test_the_agent_deadline_fires_before_the_sweep_window enforces it).
+    10 min, not 5: a multi-page ATS form (Workday/iCIMS -- snapshot, upload,
+    parse, several screens of screening questions) routinely runs past five
+    minutes, and killing a healthy run costs a `failed:timeout` toward
+    MAX_ATTEMPTS on the draft path and a `held_unknown` on the send path.
 
     `nonce` must be the one build_prompt stamped into `prompt`; it is the
     only thing parse_result will accept a result line under."""

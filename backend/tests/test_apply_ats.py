@@ -564,8 +564,8 @@ async def test_a_precondition_escaping_mid_run_is_not_unknown_state(conn):
 # -- the sweep/late-return double-submit race ------------------------------
 
 def _sweeping_agent(conn, result):
-    """A run that outlives sweep_stale_in_flight's 15-minute window:
-    timeout_s is not a wall-clock bound, so the sweep flips the row to
+    """A run that outlives sweep_stale_in_flight's window:
+    if the deadline's kill fails to land, the sweep flips the row to
     held_unknown while the agent is still driving the browser."""
     async def _fake(prompt, job_id, nonce):
         conn.execute("UPDATE application SET started_at ="
@@ -779,7 +779,7 @@ async def test_two_agent_runs_never_overlap(conn):
 async def test_a_queued_send_does_not_age_its_own_in_flight_row(conn):
     """The in_flight row is written inside the lock, not before it: a run
     waiting its turn would otherwise have started_at ticking toward
-    sweep_stale_in_flight's 15 minutes while it had not begun."""
+    sweep_stale_in_flight's window while it had not begun."""
     job2 = _second_job(conn)
     started = []
 
@@ -796,6 +796,62 @@ async def test_a_queued_send_does_not_age_its_own_in_flight_row(conn):
         ats_apply.submit(conn, job2, dry_run=False, brief=BRIEF, profile=PROFILE,
                          run_agent=runner))
     assert started == [1, 1], f"in_flight rows seen per run: {started}"
+
+
+async def test_two_same_job_sends_produce_one_row_and_one_refusal(conn):
+    """The BLOCKING check and the in_flight INSERT are separated by the
+    lock's await, so while a third run holds the lock the auto worker and a
+    dashboard Send can both pass the check seeing no live row. Without a
+    re-check inside the lock the loser's INSERT hits
+    one_live_application_per_job and the IntegrityError escapes submit() --
+    worker.apply_tick turns that into run_state 'error' and the whole apply
+    queue stops."""
+    job2 = _second_job(conn)
+    holding = asyncio.Event()
+
+    async def holder(prompt, job_id, nonce):
+        holding.set()
+        await asyncio.sleep(0.05)
+        return AgentResult("draft_ready", answers={})
+
+    async def runner(prompt, job_id, nonce):
+        await asyncio.sleep(0.01)
+        return AgentResult("applied", answers={"q": "a"})
+
+    held = asyncio.create_task(
+        ats_apply.submit(conn, job2, dry_run=True, brief=BRIEF,
+                         profile=PROFILE, run_agent=holder))
+    await holding.wait()          # another run owns the lock: both sends queue
+
+    results = await asyncio.gather(
+        ats_apply.submit(conn, 1, dry_run=False, brief=BRIEF, profile=PROFILE,
+                         run_agent=runner),
+        ats_apply.submit(conn, 1, dry_run=False, brief=BRIEF, profile=PROFILE,
+                         run_agent=runner))
+    await held
+
+    assert [r["ok"] for r in results].count(True) == 1
+    loser = [r for r in results if not r["ok"]][0]
+    assert "already has" in loser["reason"]
+    assert [a["status"] for a in _apps(conn)] == ["submitted"]
+
+
+def test_the_agent_deadline_fires_before_the_sweep_window():
+    """Ordering invariant: a timing-out run must always resolve its own
+    in_flight row before sweep_stale_in_flight can touch it, or the
+    sweep-vs-returning-run race opens. Raise one of these and you raise
+    both."""
+    import inspect
+
+    deadline_s = inspect.signature(
+        agent_mod.run_agent).parameters["timeout_s"].default
+    sweep_s = inspect.signature(
+        ats_apply.sweep_stale_in_flight).parameters["minutes"].default * 60
+    assert deadline_s >= 600, (
+        "a multi-page ATS form (Workday/iCIMS: snapshot -> upload -> parse ->"
+        f" several screens) needs more than {deadline_s}s of healthy run")
+    assert deadline_s < sweep_s, (
+        f"agent deadline {deadline_s}s must fire before the {sweep_s}s sweep")
 
 
 # -- F7: clearing a held_unknown (web/actions.queue_retry) -----------------

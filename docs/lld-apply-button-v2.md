@@ -126,13 +126,13 @@ its source is AGPL):
 | PLATFORM RULES | LinkedIn listing → follow Apply to the employer's own site; in-platform Easy Apply → `RESULT:FAILED:easy_apply`; Naukri in-platform apply → `RESULT:FAILED:naukri_platform`; SSO login pages (accounts.google.com, login.microsoftonline.com, okta, auth0) → `RESULT:FAILED:sso_required` |
 | SCREENING STRATEGY | hard facts: profile/known-answers only; skills in-domain: answer confidently; open-ended: 2–3 job-specific sentences grounded in the resume; EEO: decline |
 | STEP-BY-STEP | navigate → snapshot → location check → find Apply → login-wall protocol → upload resume (delete pre-parsed one first) → audit ATS pre-fills against PROFILE → screening → mode-specific ending (below) |
-| MODE ENDING | `draft`: fill everything, screenshot the completed form to `data/apply-work/draft_job_<id>.png`, output `ANSWERS_JSON: {...}` then `RESULT:DRAFT_READY`; do NOT submit. `send`: PINNED ANSWERS block ("use EXACTLY these answers for these questions"), fill, verify, submit, confirm the thank-you page, `RESULT:APPLIED` — plus: a field the PINNED ANSWERS do not cover and the PROFILE cannot answer is `RESULT:NEEDS_ANSWER`, never an improvised answer. `auto`: fill, output `ANSWERS_JSON`, verify every field, submit, confirm, `RESULT:APPLIED`. |
+| MODE ENDING | `draft`: fill everything, screenshot the completed form to `data/apply-work/draft_job_<id>.png`, output `ANSWERS_JSON: {...}` then `RESULT:DRAFT_READY`; do NOT submit. `send`: PINNED ANSWERS block ("use EXACTLY these answers for these questions"), fill, verify, submit, confirm the thank-you page, `RESULT:APPLIED` — plus: a field the PINNED ANSWERS do not cover and neither the PROFILE nor the KNOWN ANSWERS can answer is `RESULT:NEEDS_ANSWER`, never an improvised answer. `auto`: fill, output `ANSWERS_JSON`, verify every field, submit, confirm, `RESULT:APPLIED`. |
 | EFFICIENCY | snapshot once per page; `browser_fill_form` all fields in one call; keep thinking short |
 | FORM TRICKS | popup tabs, upload-to-prefill pages, stubborn dropdowns/checkboxes, phone digits, honeypots, placeholder formats |
 | GIVE-UP RULES | 3 attempts same page → `failed:stuck`; closed posting → `EXPIRED`; broken page → `failed:page_error`; any CAPTCHA → `RESULT:CAPTCHA` (no solving in P0). Stop immediately, output the code, never loop. |
 | RESULT CODES | the exact grammar `parse_result` accepts (below), every line stamped with this run's nonce |
 
-### 3.3 `run_agent(prompt, *, cdp_port=9222, timeout_s=300, model=APPLY_MODEL) -> AgentResult`
+### 3.3 `run_agent(prompt, *, cdp_port=9222, timeout_s=600, model=APPLY_MODEL) -> AgentResult`
 
 - Writes `<system temp>/career-agent-apply/.mcp-apply.json` — the agent's work dir lives
   OUTSIDE the repo on purpose: the session reads untrusted posting text under
@@ -155,7 +155,12 @@ its source is AGPL):
   unaffected by either flag.
 - Streams stdout line-by-line: `assistant` text and humanized `tool_use` lines append to a
   per-job transcript `data/logs/apply_<ts>_job<id>.txt`; the final `result` message yields
-  `cost_usd`. Wall-clock timeout 300 s → process-tree kill → `AgentResult("failed", "timeout")`.
+  `cost_usd`. Wall-clock timeout 600 s → process-tree kill → `AgentResult("failed", "timeout")`.
+  600 s, not 300: a multi-page ATS form (Workday/iCIMS) routinely runs past five minutes,
+  and killing a healthy run costs a `failed:timeout` toward `MAX_ATTEMPTS` (draft) or a
+  `held_unknown` (send). It is also always strictly under `sweep_stale_in_flight`'s 20 min:
+  armed at spawn, this deadline fires first, so a timing-out run resolves its own
+  `in_flight` row before the sweep can touch it. Raise one, raise the other.
 - Wall-clock deadline enforced by a watchdog timer, not by `proc.wait`: `consume_stream`
   blocks until stdout *closes*, so a session that hangs with stdout open would never reach
   a wait at all. On expiry the process tree is killed, which closes stdout, and the

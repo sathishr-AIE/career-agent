@@ -367,6 +367,13 @@ def test_send_mode_forbids_improvising_an_unpinned_field():
     assert "not covered by the PINNED ANSWERS" in steps
     assert "NEEDS_ANSWER" in steps
     assert "improvise" in steps
+    # ... but KNOWN ANSWERS is a legitimate source, and the ONE the park
+    # exists to fill: omit it and an answered question comes back to a
+    # prompt that still orders a stop -- park, answer, requeue, park, one
+    # paid browser session per lap, forever.
+    uncovered = [ln for ln in steps.splitlines()
+                 if "not covered by the PINNED ANSWERS" in ln][0]
+    assert "KNOWN ANSWERS" in uncovered and "APPLICANT PROFILE" in uncovered
 
 
 def test_auto_mode_carries_no_pinned_answer_rule():

@@ -67,6 +67,17 @@ def _confirmed_within_days(last_confirmed_at: str, days: int) -> bool:
     return (now - confirmed) <= dt.timedelta(days=days)
 
 
+def _blocking_status(conn, job_id: int):
+    return conn.execute(
+        f"SELECT status FROM application WHERE job_id = ? AND status IN "
+        f"({','.join('?' * len(BLOCKING))})", (job_id, *BLOCKING)).fetchone()
+
+
+def _blocked(job_id: int, live) -> dict:
+    return {"ok": False,
+            "reason": f"job {job_id} already has a {live['status']} attempt"}
+
+
 def classify_failure(reason: str, prior_failures: int) -> str:
     if reason in PERMANENT_REASONS:
         return "failed_permanent"
@@ -77,9 +88,16 @@ def is_unknown_state(reason: str) -> bool:
     return reason.split(":", 1)[0].strip() in UNKNOWN_STATE_REASONS
 
 
-def sweep_stale_in_flight(conn: sqlite3.Connection, minutes: int = 15) -> int:
+def sweep_stale_in_flight(conn: sqlite3.Connection, minutes: int = 20) -> int:
     """A crash during submission leaves in_flight behind. Its true state is
-    unknown, so it blocks rather than allowing a possible double send."""
+    unknown, so it blocks rather than allowing a possible double send.
+
+    20 minutes, paired with agent.run_agent's 600 s deadline and always the
+    LARGER of the two: the agent's own deadline is armed at spawn, so a
+    timing-out run always resolves its own row before this sweep can touch
+    it, and the sweep-vs-returning-run race never opens. Raise one of the
+    two and you must raise the other (tests/test_apply_ats.py
+    ::test_the_agent_deadline_fires_before_the_sweep_window enforces it)."""
     cur = conn.execute(
         "UPDATE application SET status = 'held_unknown'"
         " WHERE status = 'in_flight'"
@@ -329,9 +347,10 @@ def _record_send_outcome(conn, job_id: int, app_id: int, url: str,
     reason = _reason_of(result)
     status = ("held_unknown" if is_unknown_state(reason)
               else classify_failure(reason, _prior_failures(conn, job_id)))
-    # `AND status = 'in_flight'` closes a double-submit race: timeout_s is
-    # not a wall-clock bound, so a run can outlive sweep_stale_in_flight's
-    # 15 minutes and come back to find its own row already held_unknown.
+    # `AND status = 'in_flight'` closes a double-submit race: the agent's
+    # deadline is meant to fire well before sweep_stale_in_flight's window,
+    # but if that kill ever fails to land a run can outlive the sweep and
+    # come back to find its own row already held_unknown.
     # Overwriting that with 'failed' (not BLOCKING) would re-admit the job
     # to QUEUE_WHERE and apply a second time to a form this run may
     # already have submitted. The 'applied' branch above stays
@@ -399,12 +418,9 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
                 " enabled yet (SUBMISSION_IMPLEMENTED). Apply on the site"
                 " yourself, then record the outcome."}
 
-    live = conn.execute(
-        f"SELECT status FROM application WHERE job_id = ? AND status IN "
-        f"({','.join('?' * len(BLOCKING))})", (job_id, *BLOCKING)).fetchone()
+    live = _blocking_status(conn, job_id)
     if live:
-        return {"ok": False,
-                "reason": f"job {job_id} already has a {live['status']} attempt"}
+        return _blocked(job_id, live)
 
     if profile is None:
         raise RuntimeError(
@@ -516,8 +532,19 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
 
     # The in_flight row is written INSIDE the lock: started_at is what
     # sweep_stale_in_flight measures, so a run queued behind another would
-    # otherwise age toward the 15-minute window while it had not begun.
+    # otherwise age toward that window while it had not begun.
     async with _agent_lock():
+        # ...and the BLOCKING check is re-run here, authoritatively. The
+        # early one above ran before the lock's await, so while a third run
+        # holds the lock the auto worker and a dashboard Send can both pass
+        # it seeing no live row; the loser's INSERT would then raise
+        # sqlite3.IntegrityError (one_live_application_per_job) out of
+        # submit(), which worker.apply_tick turns into run_state 'error' --
+        # stopping the whole apply queue over a refusal it already knows how
+        # to report.
+        live = _blocking_status(conn, job_id)
+        if live:
+            return _blocked(job_id, live)
         cur = conn.execute(
             "INSERT INTO application (job_id, resume_version, status, started_at)"
             " VALUES (?, ?, 'in_flight', datetime('now'))",
