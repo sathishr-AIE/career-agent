@@ -4,6 +4,7 @@ import docx
 import pytest
 
 from career_agent import db, store
+from career_agent.apply import agent as agent_mod
 from career_agent.apply import ats as ats_apply
 from career_agent.apply.agent import AgentResult
 from career_agent.config import CandidateProfile, CareerBrief
@@ -475,3 +476,100 @@ async def test_second_real_submission_is_refused(conn):
                       run_agent=fake_agent(AgentResult("applied")))
     assert not r["ok"] and "already" in r["reason"]
     assert len(_apps(conn)) == 1
+
+
+# -- preconditions: a missing binary must not brick the queue --------------
+
+@pytest.fixture
+def no_live_runner(monkeypatch):
+    """Belt and braces for the tests below, which are the only ones that
+    reach submit() with run_agent=None on a path that could otherwise
+    launch Chrome."""
+    async def _never(prompt, job_id):
+        raise AssertionError("the live runner must never run in a test")
+    monkeypatch.setattr(ats_apply, "_live_run_agent", _never)
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+async def test_a_missing_binary_writes_no_application_row(conn, monkeypatch,
+                                                          no_live_runner, dry_run):
+    """`npx` off PATH means no browser launched and nothing submitted. It
+    must not become held_unknown -- in auto mode that converts the whole
+    queue to a permanently stuck state over a missing binary."""
+    def boom():
+        raise agent_mod.PreconditionError("agentic apply needs `npx` on PATH")
+    monkeypatch.setattr(ats_apply, "preflight", boom)
+    # the kill switch would otherwise mask the send path before preflight
+    monkeypatch.setattr(ats_apply, "SUBMISSION_IMPLEMENTED", True)
+
+    r = await _submit(conn, dry_run=dry_run)
+    assert not r["ok"] and "npx" in r["reason"]
+    assert conn.execute("SELECT COUNT(*) n FROM application").fetchone()["n"] == 0
+    assert _event_types(conn) == []
+    # ... and the refusal must carry the flag worker.apply_tick pauses on:
+    # no row means QUEUE_WHERE re-admits this job, so clearing the park
+    # instead would re-pick it on the very next tick, forever.
+    assert r["unsupported"]
+
+
+async def test_preflight_is_skipped_when_a_runner_is_injected(conn, monkeypatch):
+    """Preconditions describe what _live_run_agent needs; no test on this
+    machine may require the claude/npx/Chrome binaries."""
+    def boom():
+        raise AssertionError("preflight must not run for an injected runner")
+    monkeypatch.setattr(ats_apply, "preflight", boom)
+    r = await _submit(conn, dry_run=True,
+                      run_agent=fake_agent(AgentResult("draft_ready", answers={})))
+    assert r["ok"]
+
+
+async def test_a_precondition_escaping_mid_run_is_not_unknown_state(conn):
+    """The backstop check inside _run_agent_blocking: nothing launched, so
+    the send path must not hold it as 'possibly submitted'."""
+    async def boom(prompt, job_id):
+        raise agent_mod.PreconditionError("Chrome not found -- set CHROME_PATH")
+
+    r = await _submit(conn, dry_run=False, run_agent=boom)
+    assert not r["ok"]
+    row = _apps(conn)[-1]
+    assert row["status"] == "failed"            # retryable, not held_unknown
+    assert row["failure_reason"] == "precondition"
+
+
+# -- the sweep/late-return double-submit race ------------------------------
+
+def _sweeping_agent(conn, result):
+    """A run that outlives sweep_stale_in_flight's 15-minute window:
+    timeout_s is not a wall-clock bound, so the sweep flips the row to
+    held_unknown while the agent is still driving the browser."""
+    async def _fake(prompt, job_id):
+        conn.execute("UPDATE application SET started_at ="
+                     " datetime('now', '-30 minutes') WHERE status = 'in_flight'")
+        conn.commit()
+        assert ats_apply.sweep_stale_in_flight(conn) == 1
+        return result
+    return _fake
+
+
+async def test_a_late_failure_does_not_reopen_a_swept_row(conn):
+    """Turning held_unknown back into 'failed' re-admits the job to the
+    queue and applies a second time to a form the first run may already
+    have submitted."""
+    r = await _submit(conn, dry_run=False,
+                      run_agent=_sweeping_agent(conn, AgentResult("failed", "stuck")))
+    assert not r["ok"]
+    row = _apps(conn)[-1]
+    assert row["status"] == "held_unknown"
+    assert row["status"] in ats_apply.BLOCKING     # ... so QUEUE_WHERE skips it
+    again = await _submit(conn, dry_run=False,
+                          run_agent=fake_agent(AgentResult("applied")))
+    assert not again["ok"] and "already has" in again["reason"]
+
+
+async def test_a_late_applied_still_upgrades_a_swept_row(conn):
+    """The truthful upgrade must never be suppressed: the form really was
+    submitted."""
+    r = await _submit(conn, dry_run=False,
+                      run_agent=_sweeping_agent(conn, AgentResult("applied")))
+    assert r["ok"] and r["status"] == "submitted"
+    assert _apps(conn)[-1]["status"] == "submitted"

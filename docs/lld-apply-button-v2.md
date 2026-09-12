@@ -128,18 +128,29 @@ its source is AGPL):
 
 ### 3.3 `run_agent(prompt, *, cdp_port=9222, timeout_s=300, model=APPLY_MODEL) -> AgentResult`
 
-- Writes `data/apply-work/.mcp-apply.json`:
+- Writes `<system temp>/career-agent-apply/.mcp-apply.json` — the agent's work dir lives
+  OUTSIDE the repo on purpose: the session reads untrusted posting text under
+  `bypassPermissions`, and `backend/` is one relative path from `.env`,
+  `candidate_profile.toml` and `career.db`. Transcripts stay in `data/logs` (written by the
+  parent process, not the agent):
   `{"mcpServers": {"playwright": {"command": "npx", "args": ["@playwright/mcp@latest", "--cdp-endpoint=http://localhost:9222", "--viewport-size=1280x800"]}}}`
   (no Gmail MCP — email-code login flows are out of scope; the agent bails with
   `login_issue` instead).
 - Spawns:
-  `claude --model <APPLY_MODEL> -p --mcp-config <path> --permission-mode bypassPermissions --no-session-persistence --output-format stream-json --verbose -`
+  `claude --model <APPLY_MODEL> -p --mcp-config <path> --strict-mcp-config --tools "" --permission-mode bypassPermissions --no-session-persistence --output-format stream-json --verbose -`
   with the prompt on stdin, `CLAUDECODE`/`CLAUDE_CODE_ENTRYPOINT` scrubbed from env, cwd =
-  a per-job wiped `data/apply-work/session/` dir.
+  a per-job wiped `<system temp>/career-agent-apply/session/` dir. `--tools ""` disables
+  every built-in tool (Bash/Read/Write/WebFetch) and ignores the user/project/local
+  settings files that carry the operator's hooks and plugins; `--strict-mcp-config` keeps
+  the operator's other MCP servers out. Both govern built-ins only — the Playwright
+  server's `browser_*` tools are a separate namespace.
 - Streams stdout line-by-line: `assistant` text and humanized `tool_use` lines append to a
   per-job transcript `data/logs/apply_<ts>_job<id>.txt`; the final `result` message yields
   `cost_usd`. Wall-clock timeout 300 s → process-tree kill → `AgentResult("failed", "timeout")`.
-- `shutil.which("claude")` / `which("npx")` checked up front with a clear error message.
+- `shutil.which("claude")` / `which("npx")` checked up front (raising `PreconditionError`)
+  as a backstop; `ats.preflight()` — claude + npx + Chrome — is the real check and runs in
+  `submit()` before any application row is written, so a missing binary records nothing at
+  all rather than a `held_unknown` row per queued job.
 - `APPLY_MODEL = "sonnet"` module constant. `# ponytail: constant, promote to the setting
   table when someone actually wants to change it`.
 - Runs the blocking subprocess via `asyncio.to_thread` so the FastAPI event loop (dashboard

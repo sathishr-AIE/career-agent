@@ -8,6 +8,7 @@ import os
 import re
 import shutil as _shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,8 +19,24 @@ log = logging.getLogger(__name__)
 APPLY_MODEL = "sonnet"  # ponytail: constant; promote to the setting table
                         # when someone actually wants to change it
 
-WORK_DIR = Path("data/apply-work")
+# The agent's cwd (and its .mcp-apply.json) deliberately lives OUTSIDE the
+# repo: the session runs bypassPermissions over job-posting text, which is
+# an untrusted prompt-injection channel, and backend/ is one relative path
+# away from .env (CLAUDE_CODE_OAUTH_TOKEN, APIFY_TOKEN),
+# candidate_profile.toml (PII) and career.db. A stable per-user temp dir
+# rather than a fresh mkdtemp per run, so leftover state is inspectable
+# after a failure; the session subdir is still wiped per run.
+WORK_DIR = Path(tempfile.gettempdir()) / "career-agent-apply"
+# Transcripts are the audit trail: written by THIS process (never by the
+# agent) and recorded by absolute path in application.transcript_path.
+# They stay in the repo.
 LOG_DIR = Path("data/logs")
+
+
+class PreconditionError(RuntimeError):
+    """A binary the run needs is missing. Distinct from a mid-run crash on
+    purpose: nothing launched, so nothing could have been submitted, and
+    the caller must not record it as an unknown-state failure."""
 
 
 @dataclass
@@ -406,10 +423,48 @@ def _mcp_config(cdp_port: int) -> dict:
                  "--viewport-size=1280x800"]}}}
 
 
-def _run_agent_blocking(prompt, job_id, cdp_port, timeout_s, model) -> AgentResult:
+def require_binaries() -> None:
+    """The binaries a session needs. Called by apply/ats.py's preflight()
+    before any row is written, and again here as a backstop."""
     if not (_shutil.which("claude") and _shutil.which("npx")):
-        raise RuntimeError("agentic apply needs the `claude` CLI and `npx` on"
-                           " PATH -- see docs/lld-apply-button-v2.md")
+        raise PreconditionError("agentic apply needs the `claude` CLI and `npx`"
+                                " on PATH -- see docs/lld-apply-button-v2.md")
+
+
+def build_cmd(model: str, mcp_path) -> list[str]:
+    """The argv for one sandboxed `claude -p` session.
+
+    The session reads job-posting text, which is an untrusted
+    prompt-injection channel, under --permission-mode bypassPermissions, so
+    two flags do the containing (both quoted from `claude --help`):
+      --tools ""        "Specify the list of available tools from the
+                        built-in set. Use "" to disable all tools" -- no
+                        Bash/Read/Write/WebFetch. It also "ignores user,
+                        project and local settings files", which is what
+                        keeps the operator's own hooks and plugins out.
+      --strict-mcp-config
+                        "Only use MCP servers from --mcp-config, ignoring
+                        all other MCP configurations" -- --mcp-config alone
+                        does not exclude the operator's servers.
+    Together with WORK_DIR being outside the repo, an injected "run
+    `cat ../../.env`" has no tool to run it with and nothing to read.
+
+    CAVEAT: --tools governs the BUILT-IN tool set only; the Playwright
+    server's browser_* tools are a separate (MCP) namespace and should be
+    unaffected. Not verified empirically -- that costs real API credits --
+    so the first live draft run must confirm browser_* tool calls still
+    appear in the transcript before this is trusted.
+    """
+    return ["claude", "--model", model, "-p",
+            "--mcp-config", str(mcp_path), "--strict-mcp-config",
+            "--tools", "",
+            "--permission-mode", "bypassPermissions",
+            "--no-session-persistence",
+            "--output-format", "stream-json", "--verbose", "-"]
+
+
+def _run_agent_blocking(prompt, job_id, cdp_port, timeout_s, model) -> AgentResult:
+    require_binaries()  # backstop; ats.submit() checks this before any write
     # Popen below runs with cwd=session_dir, so every path handed to the
     # child (the --mcp-config value especially) must be absolute -- a
     # relative one resolves against the child's cwd, not ours, and the MCP
@@ -429,11 +484,7 @@ def _run_agent_blocking(prompt, job_id, cdp_port, timeout_s, model) -> AgentResu
     env.pop("CLAUDECODE", None)
     env.pop("CLAUDE_CODE_ENTRYPOINT", None)
 
-    cmd = ["claude", "--model", model, "-p",
-           "--mcp-config", str(mcp_path),
-           "--permission-mode", "bypassPermissions",
-           "--no-session-persistence",
-           "--output-format", "stream-json", "--verbose", "-"]
+    cmd = build_cmd(model, mcp_path)
 
     start = time.time()
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

@@ -1,8 +1,10 @@
 # backend/tests/test_apply_agent.py
 import json as _json
+from pathlib import Path
 
 import pytest
 
+from career_agent.apply import agent as agent_mod
 from career_agent.apply.agent import AgentResult, build_prompt, consume_stream, parse_result
 from career_agent.config import CandidateProfile, CareerBrief
 from career_agent.models import Job
@@ -203,3 +205,40 @@ def test_consume_stream_null_total_cost_usd_is_zero():
                         "result": "RESULT:APPLIED"})
     _, cost = consume_stream([line])
     assert cost == 0.0
+
+
+# -- sandbox (the spawned session reads untrusted posting text) ------------
+
+def test_the_spawned_session_gets_no_builtin_tools_and_no_other_mcp_config():
+    """The agent runs bypassPermissions over job-posting text, which is a
+    prompt-injection channel. --tools "" drops Bash/Read/Write/WebFetch and
+    (per `claude --help`) the user/project/local settings files that carry
+    the operator's hooks and plugins; --strict-mcp-config keeps every MCP
+    server but ours out."""
+    mcp_path = Path("C:/nowhere/.mcp-apply.json")
+    cmd = agent_mod.build_cmd("sonnet", mcp_path)
+    assert "--strict-mcp-config" in cmd
+    assert "--tools" in cmd
+    # the empty string must survive as its own argv element
+    assert cmd[cmd.index("--tools") + 1] == ""
+    # the flags the run still depends on
+    assert cmd[cmd.index("--mcp-config") + 1] == str(mcp_path)
+    assert cmd[cmd.index("--model") + 1] == "sonnet"
+    assert cmd[-1] == "-" and "-p" in cmd
+
+
+def test_the_agent_workdir_is_outside_the_repo():
+    """One relative path from backend/.env (CLAUDE_CODE_OAUTH_TOKEN,
+    APIFY_TOKEN), candidate_profile.toml and career.db is not a cwd for an
+    injectable agent."""
+    repo_root = Path(agent_mod.__file__).resolve().parents[4]
+    assert (repo_root / "backend" / "src").is_dir()   # the root really is the root
+    for p in (agent_mod.WORK_DIR, agent_mod.WORK_DIR / "session"):
+        assert not p.resolve().is_relative_to(repo_root), p
+
+
+def test_transcripts_stay_in_the_repos_data_logs():
+    """The audit trail: written by this process, not the agent, and
+    recorded by absolute path in application.transcript_path."""
+    assert agent_mod.LOG_DIR == Path("data/logs")
+    assert not agent_mod.LOG_DIR.is_absolute()

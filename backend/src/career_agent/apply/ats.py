@@ -84,6 +84,22 @@ def sweep_stale_in_flight(conn: sqlite3.Connection, minutes: int = 15) -> int:
     return cur.rowcount
 
 
+def preflight() -> None:
+    """Everything _live_run_agent needs before it can do anything at all
+    (spec 5.1 guards). Raises agent.PreconditionError -- submit() calls
+    this BEFORE the in_flight INSERT, because a missing binary means no
+    browser launched and nothing submitted: recording it as a failure at
+    all (and on the send path as held_unknown, which BLOCKS) would convert
+    the whole queue to a stuck state over a PATH problem."""
+    from career_agent.apply import chrome as chrome_mod
+
+    agent_mod.require_binaries()
+    try:
+        chrome_mod.get_chrome_path()
+    except RuntimeError as exc:   # "Chrome not found -- set CHROME_PATH"
+        raise agent_mod.PreconditionError(str(exc)) from exc
+
+
 async def _live_run_agent(prompt: str, job_id: int):
     """Default agent runner: a real Chrome around a real `claude` session.
     Tests inject their own run_agent instead -- nothing in the test suite
@@ -242,9 +258,17 @@ def _record_send_outcome(conn, job_id: int, app_id: int, url: str,
     reason = _reason_of(result)
     status = ("held_unknown" if is_unknown_state(reason)
               else classify_failure(reason, _prior_failures(conn, job_id)))
+    # `AND status = 'in_flight'` closes a double-submit race: timeout_s is
+    # not a wall-clock bound, so a run can outlive sweep_stale_in_flight's
+    # 15 minutes and come back to find its own row already held_unknown.
+    # Overwriting that with 'failed' (not BLOCKING) would re-admit the job
+    # to QUEUE_WHERE and apply a second time to a form this run may
+    # already have submitted. The 'applied' branch above stays
+    # unconditional on purpose -- held_unknown -> submitted is the
+    # truthful upgrade and must never be suppressed.
     conn.execute(
         "UPDATE application SET status = ?, failure_reason = ?,"
-        " transcript_path = ? WHERE id = ?",
+        " transcript_path = ? WHERE id = ? AND status = 'in_flight'",
         (status, reason, result.transcript_path or None, app_id))
     conn.execute("INSERT INTO event (job_id, type, payload) VALUES (?, ?, ?)",
                  (job_id, status, detail or reason))
@@ -263,6 +287,13 @@ async def _run(runner, prompt: str, job_id: int) -> tuple:
     the schema promises (spec section 5.3)."""
     try:
         return await runner(prompt, job_id), ""
+    except agent_mod.PreconditionError as exc:
+        # submit()'s preflight normally catches this first; reaching here
+        # means the backstop inside _run_agent_blocking fired. Nothing
+        # launched, so it is a plain retryable failure -- never
+        # 'agent_error', which would hold the row as possibly-submitted.
+        log.warning("apply preconditions failed for job %s: %s", job_id, exc)
+        return agent_mod.AgentResult("failed", "precondition"), str(exc)
     except Exception as exc:
         log.exception("apply agent crashed for job %s", job_id)
         return agent_mod.AgentResult("failed", "agent_error"), str(exc)
@@ -302,6 +333,23 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
             "candidate_profile.toml not found -- see"
             " candidate_profile.toml.example. The apply agent needs it for"
             " every source.")
+
+    if run_agent is None:
+        # Preconditions describe what _live_run_agent needs, so they are
+        # checked only when it is the runner (an injected one is the test
+        # seam, same rule as the kill switch above). Before any write: a
+        # missing binary records nothing at all.
+        try:
+            preflight()
+        except agent_mod.PreconditionError as exc:
+            # `unsupported` is reused from the kill-switch refusal (the
+            # other "ok: False and no application row" case) precisely
+            # because it is what makes worker.apply_tick pause the run
+            # instead of clearing current_job_id: with no row written,
+            # QUEUE_WHERE re-admits this job and the next tick picks it
+            # again. A missing binary cannot be retried away either, so
+            # pausing once with the reason is the right stop.
+            return {"ok": False, "unsupported": True, "reason": str(exc)}
 
     resume_version = resume_version or RESUME_VERSION
     resume_row = conn.execute(
