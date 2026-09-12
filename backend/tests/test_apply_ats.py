@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import docx
 import pytest
@@ -12,13 +13,19 @@ from career_agent.config import CandidateProfile, CareerBrief
 
 @pytest.fixture
 def conn(tmp_path):
+    # A real file on disk, but not a readable .docx: submit() refuses when
+    # the résumé the agent is told to upload does not exist, while
+    # _resume_text still has to degrade gracefully on one it can't parse.
+    resume = tmp_path / "r.docx"
+    resume.write_text("not a real docx", encoding="utf-8")
     c = db.connect(tmp_path / "t.db")
     db.init_schema(c)
     c.execute("INSERT INTO job (fingerprint, source, external_id, company,"
               " company_normalized, title, title_normalized, url)"
               " VALUES ('fp','ats','1','Acme','acme','AI Engineer',"
               " 'aiengineer','https://x/apply')")
-    c.execute("INSERT INTO resume (version, path) VALUES ('base-v1', 'r.docx')")
+    c.execute("INSERT INTO resume (version, path) VALUES ('base-v1', ?)",
+              (str(resume),))
     c.commit()
     return c
 
@@ -397,9 +404,10 @@ async def test_submit_refuses_when_no_resume_is_on_record(conn):
     assert "résumé" in r["reason"] or "resume" in r["reason"].lower()
 
 
-async def test_draft_stores_the_given_resume_version(conn):
+async def test_draft_stores_the_given_resume_version(conn, tmp_path):
+    (tmp_path / "r1.docx").write_text("x", encoding="utf-8")
     conn.execute("INSERT INTO resume (version, path)"
-                 " VALUES ('tailored-1-r1', 'r1.docx')")
+                 " VALUES ('tailored-1-r1', ?)", (str(tmp_path / "r1.docx"),))
     conn.commit()
     r = await _submit(conn, dry_run=True, resume_version="tailored-1-r1",
                       run_agent=fake_agent(AgentResult("draft_ready", answers={})))
@@ -442,7 +450,9 @@ async def test_prompt_resume_text_comes_from_the_docx_body(conn, tmp_path):
 
 
 async def test_an_unreadable_resume_file_does_not_break_the_draft(conn):
-    """'r.docx' from the fixture does not exist on disk."""
+    """'r.docx' from the fixture exists but is not a parseable .docx --
+    _resume_text degrades rather than raising. (A résumé that is MISSING is
+    a different case: submit() refuses, see below.)"""
     fake = fake_agent(AgentResult("draft_ready", answers={}))
     r = await _submit(conn, dry_run=True, run_agent=fake)
     assert r["ok"]
@@ -573,3 +583,47 @@ async def test_a_late_applied_still_upgrades_a_swept_row(conn):
                       run_agent=_sweeping_agent(conn, AgentResult("applied")))
     assert r["ok"] and r["status"] == "submitted"
     assert _apps(conn)[-1]["status"] == "submitted"
+
+
+# -- the résumé the agent is told to upload --------------------------------
+
+async def test_the_agent_gets_an_absolute_resume_path(conn, tmp_path, monkeypatch):
+    """tailor.py stores resume.path relative to backend/, but the agent's
+    cwd is a temp dir outside the repo -- a relative path there resolves to
+    nothing, and uploading the tailored résumé is the whole point of the
+    run. Same bug class as the relative --mcp-config path."""
+    rel = Path("resume/generated/tailored-1-r1.docx")
+    (tmp_path / rel).parent.mkdir(parents=True)
+    (tmp_path / rel).write_text("x", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)                       # ... so `rel` is live
+    conn.execute("INSERT INTO resume (version, path) VALUES ('tailored-1-r1', ?)",
+                 (str(rel),))
+    conn.commit()
+
+    fake = fake_agent(AgentResult("draft_ready", answers={}))
+    r = await _submit(conn, dry_run=True, resume_version="tailored-1-r1",
+                      run_agent=fake)
+    assert r["ok"]
+    line = next(l for l in fake.prompts[0].splitlines()
+                if "upload this exact file" in l)
+    given = Path(line.rsplit(": ", 1)[1])
+    assert given.is_absolute(), given
+    assert given == (tmp_path / rel).resolve()
+    assert given.exists()
+
+
+async def test_a_missing_resume_file_refuses_and_writes_nothing(conn):
+    """Better to refuse than to start a browser session that can only fail
+    at the upload step -- same spirit as the binary preflight."""
+    conn.execute("INSERT INTO resume (version, path)"
+                 " VALUES ('tailored-1-r1', 'no/such/resume.docx')")
+    conn.commit()
+    r = await _submit(conn, dry_run=True, resume_version="tailored-1-r1",
+                      run_agent=fake_agent(AgentResult("draft_ready", answers={})))
+    assert not r["ok"]
+    assert "résumé" in r["reason"] or "resume" in r["reason"].lower()
+    assert _apps(conn) == []
+    assert _event_types(conn) == []
+    # pauses the worker rather than being re-picked every 0.1s: no row means
+    # QUEUE_WHERE still admits this job (same reason as the preflight above)
+    assert r["unsupported"]

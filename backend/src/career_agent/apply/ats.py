@@ -5,6 +5,7 @@ import datetime as dt
 import json
 import logging
 import sqlite3
+from pathlib import Path
 
 from career_agent.apply import agent as agent_mod
 from career_agent.config import CandidateProfile, CareerBrief
@@ -362,6 +363,23 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
         return {"ok": False,
                 "reason": f"no résumé on record for version {resume_version!r}"}
 
+    # tailor.py stores resume.path relative to backend/, but the agent runs
+    # with a cwd outside the repo, so the path it is told to upload -- and
+    # that the Playwright server opens -- must be absolute or it resolves
+    # to nothing at the one step this whole feature exists for. Same bug
+    # class as the relative --mcp-config path. Only the prompt's copy is
+    # absolutised: _resume_text below reads the stored path from THIS
+    # process, whose cwd is backend/, where it already resolves.
+    resume_path = Path(resume_row["path"]).resolve()
+    if not resume_path.exists():
+        # Refuse rather than start a session that can only fail at the
+        # upload: same spirit as preflight(), same no-row rule, and
+        # `unsupported` for the same worker reason (a refusal that writes
+        # no row would otherwise be re-picked on the next tick, forever).
+        return {"ok": False, "unsupported": True, "reason":
+                f"résumé file for version {resume_version!r} is missing at"
+                f" {resume_path}"}
+
     from career_agent import store  # local: store.py imports this module
                                     # for RESUME_VERSION, so a top-level
                                     # import back would be circular.
@@ -375,7 +393,7 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
         "SELECT weighted_score FROM assessment WHERE job_id = ?"
         " ORDER BY created_at DESC, id DESC LIMIT 1", (job_id,)).fetchone()
     prompt_args = (job, profile, brief, store.qa_all(conn),
-                   _resume_text(resume_row), resume_row["path"])
+                   _resume_text(resume_row), str(resume_path))
     score = score_row["weighted_score"] if score_row else None
     runner = run_agent or _live_run_agent
 
