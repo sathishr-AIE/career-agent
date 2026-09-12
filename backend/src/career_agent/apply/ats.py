@@ -295,7 +295,12 @@ def _record_send_outcome(conn, job_id: int, app_id: int, url: str,
         return {"ok": True, "job_id": job_id, "status": "submitted"}
 
     if code == "captcha":
-        conn.execute("DELETE FROM application WHERE id = ?", (app_id,))
+        # `AND status = 'in_flight'` for the same reason as the failure path
+        # below: a run can outlive sweep_stale_in_flight and come back to
+        # find its own row already held_unknown. Deleting that row would
+        # re-admit a job this run may already have submitted.
+        conn.execute("DELETE FROM application WHERE id = ?"
+                     " AND status = 'in_flight'", (app_id,))
         conn.execute("INSERT INTO event (job_id, type, payload)"
                      " VALUES (?, 'captcha_held', ?)", (job_id, url))
         conn.commit()
@@ -306,7 +311,8 @@ def _record_send_outcome(conn, job_id: int, app_id: int, url: str,
         # Nothing was sent, so the attempt leaves no trace: the worker
         # parks on the question and the job re-enters the queue once it is
         # answered.
-        conn.execute("DELETE FROM application WHERE id = ?", (app_id,))
+        conn.execute("DELETE FROM application WHERE id = ?"
+                     " AND status = 'in_flight'", (app_id,))   # same guard
         conn.commit()
         question = result.reason or "(question not reported)"
         return {"ok": False, "needs_answer": question,

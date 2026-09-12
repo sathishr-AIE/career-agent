@@ -49,6 +49,14 @@ def chrome_command(chrome_exe: str, profile_dir: Path, port: int = 9222,
 def get_chrome_path() -> str:
     override = os.environ.get("CHROME_PATH")
     if override:
+        # Checked, not trusted: an unchecked override passed ats.preflight()
+        # and then failed at launch, which lands as agent_error and (on the
+        # send path) held_unknown -- the failure class preflight exists to
+        # catch before any application row is written.
+        if not Path(override).is_file():
+            raise RuntimeError(f"CHROME_PATH is set to {override!r}, which is"
+                               " not a file -- fix it in .env, or unset it to"
+                               " autodetect Chrome")
         return override
     for c in _CHROME_CANDIDATES:
         if Path(c).exists():

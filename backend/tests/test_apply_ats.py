@@ -906,3 +906,24 @@ async def test_every_run_gets_a_fresh_nonce(conn):
     await _submit(conn, dry_run=True, run_agent=fake)
     await _submit(conn, dry_run=True, run_agent=fake)
     assert fake.nonces[0] != fake.nonces[1]
+
+
+# -- the sweep race on the captcha / needs_answer delete paths -------------
+
+@pytest.mark.parametrize("result,key", [
+    (AgentResult("captcha"), "held"),
+    (AgentResult("needs_answer", "PMP?"), "needs_answer"),
+])
+async def test_a_late_hold_does_not_delete_a_swept_row(conn, result, key):
+    """Same race the failure path already closed: a run can outlive
+    sweep_stale_in_flight and come back to find its own row held_unknown.
+    Deleting it would re-admit a job the first run may already have
+    submitted."""
+    r = await _submit(conn, dry_run=False,
+                      run_agent=_sweeping_agent(conn, result))
+    assert not r["ok"] and r[key]
+    row = _apps(conn)[-1]
+    assert row["status"] == "held_unknown"
+    again = await _submit(conn, dry_run=False,
+                          run_agent=fake_agent(AgentResult("applied")))
+    assert not again["ok"] and "already has" in again["reason"]
