@@ -4,6 +4,8 @@ decides an outcome. See docs/lld-apply-button-v2.md section 5."""
 import datetime as dt
 import json
 import logging
+import re
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -147,6 +149,26 @@ def _resume_text(row) -> str:
             parts.append("Tailored for this job:\n"
                          + "\n".join(f"- {t}" for t in tailored))
     return "\n\n".join(parts)
+
+
+def _stage_resume(resume_path: Path, profile: CandidateProfile) -> Path:
+    """Copy the rendered résumé into the agent's work dir under a clean
+    `<Candidate_Name>_Resume.docx` and return that path -- spec 3.2 FILES.
+
+    The filename is the single most visible artefact of this whole system:
+    handing the agent `tailored-847-r1.docx` tells every recruiter who
+    opens the attachment that it was machine-generated per job. Only the
+    name changes; the bytes are copied verbatim and the stored file is
+    never touched.
+
+    One name per candidate, reused across jobs -- `submit()` serializes
+    agent runs behind `_agent_lock()`, so two runs can never race on it."""
+    safe = re.sub(r'[\\/:*?"<>|\s]+', "_",
+                  profile.candidate_name.strip()).strip("_") or "Candidate"
+    dest = (agent_mod.WORK_DIR / f"{safe}_Resume{resume_path.suffix}").resolve()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(resume_path, dest)
+    return dest
 
 
 def _reason_of(result) -> str:
@@ -393,7 +415,8 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
         "SELECT weighted_score FROM assessment WHERE job_id = ?"
         " ORDER BY created_at DESC, id DESC LIMIT 1", (job_id,)).fetchone()
     prompt_args = (job, profile, brief, store.qa_all(conn),
-                   _resume_text(resume_row), str(resume_path))
+                   _resume_text(resume_row), str(_stage_resume(resume_path,
+                                                               profile)))
     score = score_row["weighted_score"] if score_row else None
     runner = run_agent or _live_run_agent
 

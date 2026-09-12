@@ -11,6 +11,16 @@ from career_agent.apply.agent import AgentResult
 from career_agent.config import CandidateProfile, CareerBrief
 
 
+@pytest.fixture(autouse=True)
+def work_dir(tmp_path, monkeypatch):
+    """submit() stages a clean copy of the résumé in the agent's work dir
+    before handing the path to the prompt. Keep every test's copy inside
+    its own tmp_path rather than scattering files in the real temp dir."""
+    d = tmp_path / "work"
+    monkeypatch.setattr(agent_mod, "WORK_DIR", d)
+    return d
+
+
 @pytest.fixture
 def conn(tmp_path):
     # A real file on disk, but not a readable .docx: submit() refuses when
@@ -446,7 +456,8 @@ async def test_prompt_resume_text_comes_from_the_docx_body(conn, tmp_path):
     assert "Acme Corp, 2021-2024: shipped the thing" in prompt
     assert "Tailored summary here" in prompt
     assert "Bullet one" in prompt
-    assert str(path) in prompt          # the upload path itself
+    # ... and the upload path is the staged clean copy, not the stored file
+    assert _upload_path(prompt).name == "Jane_Doe_Resume.docx"
 
 
 async def test_an_unreadable_resume_file_does_not_break_the_draft(conn):
@@ -604,12 +615,10 @@ async def test_the_agent_gets_an_absolute_resume_path(conn, tmp_path, monkeypatc
     r = await _submit(conn, dry_run=True, resume_version="tailored-1-r1",
                       run_agent=fake)
     assert r["ok"]
-    line = next(l for l in fake.prompts[0].splitlines()
-                if "upload this exact file" in l)
-    given = Path(line.rsplit(": ", 1)[1])
+    given = _upload_path(fake.prompts[0])
     assert given.is_absolute(), given
-    assert given == (tmp_path / rel).resolve()
     assert given.exists()
+    assert given.parent == (tmp_path / "work").resolve()
 
 
 async def test_a_missing_resume_file_refuses_and_writes_nothing(conn):
@@ -627,3 +636,44 @@ async def test_a_missing_resume_file_refuses_and_writes_nothing(conn):
     # pauses the worker rather than being re-picked every 0.1s: no row means
     # QUEUE_WHERE still admits this job (same reason as the preflight above)
     assert r["unsupported"]
+
+
+# -- F1: the filename a recruiter sees --------------------------------------
+
+def _upload_path(prompt: str) -> Path:
+    line = next(l for l in prompt.splitlines() if "upload this exact file" in l)
+    return Path(line.rsplit(": ", 1)[1])
+
+
+async def test_the_resume_is_staged_under_the_candidates_own_name(
+        conn, tmp_path, monkeypatch):
+    """A recruiter opening the attachment must not read
+    'tailored-1-r1.docx' and learn the résumé was machine-generated per
+    job (spec 3.2 FILES). The agent is handed a clean copy instead."""
+    src = tmp_path / "tailored-1-r1.docx"
+    src.write_text("the rendered docx", encoding="utf-8")
+    conn.execute("INSERT INTO resume (version, path)"
+                 " VALUES ('tailored-1-r1', ?)", (str(src),))
+    conn.commit()
+
+    fake = fake_agent(AgentResult("draft_ready", answers={}))
+    r = await _submit(conn, dry_run=True, resume_version="tailored-1-r1",
+                      run_agent=fake)
+    assert r["ok"]
+    given = _upload_path(fake.prompts[0])
+    assert given.name == "Jane_Doe_Resume.docx"     # PROFILE is "Jane Doe"
+    assert given.is_absolute() and given.exists()
+    assert given.read_text(encoding="utf-8") == "the rendered docx"
+    assert given.parent == (tmp_path / "work").resolve()
+    assert src.exists()                             # the original is untouched
+
+
+async def test_a_name_with_path_characters_still_makes_a_legal_filename(
+        conn, tmp_path):
+    profile = CandidateProfile(candidate_name="A/B  C:D",
+                               candidate_email="a@example.com",
+                               candidate_phone="+91-90000-00000")
+    fake = fake_agent(AgentResult("draft_ready", answers={}))
+    r = await _submit(conn, dry_run=True, profile=profile, run_agent=fake)
+    assert r["ok"]
+    assert _upload_path(fake.prompts[0]).name == "A_B_C_D_Resume.docx"
