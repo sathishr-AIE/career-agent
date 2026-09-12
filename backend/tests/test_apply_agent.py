@@ -210,11 +210,13 @@ def test_consume_stream_null_total_cost_usd_is_zero():
 # -- sandbox (the spawned session reads untrusted posting text) ------------
 
 def test_the_spawned_session_gets_no_builtin_tools_and_no_other_mcp_config():
-    """The agent runs bypassPermissions over job-posting text, which is a
-    prompt-injection channel. --tools "" drops Bash/Read/Write/WebFetch and
-    (per `claude --help`) the user/project/local settings files that carry
-    the operator's hooks and plugins; --strict-mcp-config keeps every MCP
-    server but ours out."""
+    """Asserts --tools "" and --strict-mcp-config are both present in the
+    built argv (with "" surviving as its own element), plus the flags the
+    run still depends on (--mcp-config, --model, -p). It does not, and
+    cannot, verify settings-file isolation -- that's --restricted's
+    behavior, not these flags', and --restricted is unusable here (see
+    agent.py's build_cmd docstring and docs/lld-apply-button-v2.md §6 for
+    the residual)."""
     mcp_path = Path("C:/nowhere/.mcp-apply.json")
     cmd = agent_mod.build_cmd("sonnet", mcp_path)
     assert "--strict-mcp-config" in cmd

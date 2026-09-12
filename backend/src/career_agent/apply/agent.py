@@ -439,15 +439,24 @@ def build_cmd(model: str, mcp_path) -> list[str]:
     two flags do the containing (both quoted from `claude --help`):
       --tools ""        "Specify the list of available tools from the
                         built-in set. Use "" to disable all tools" -- no
-                        Bash/Read/Write/WebFetch. It also "ignores user,
-                        project and local settings files", which is what
-                        keeps the operator's own hooks and plugins out.
+                        Bash/Read/Write/WebFetch. That is all it does.
       --strict-mcp-config
                         "Only use MCP servers from --mcp-config, ignoring
-                        all other MCP configurations" -- --mcp-config alone
-                        does not exclude the operator's servers.
+                        all other MCP configurations" -- excludes every MCP
+                        server except the one in --mcp-config.
     Together with WORK_DIR being outside the repo, an injected "run
     `cat ../../.env`" has no tool to run it with and nothing to read.
+
+    NOT covered: the operator's own hooks and plugins from
+    ~/.claude/settings.json (and project/local settings) still load in this
+    session -- neither flag above ignores settings files. `--restricted` is
+    the flag that does ("ignores user, project and local settings files"),
+    but it also refuses --permission-mode bypassPermissions, which this
+    design requires, so it can't be used here. On this machine that means
+    untrusted job-posting text flows through the operator's hook chain
+    (including hooks that run PowerShell scripts) on every apply session --
+    an open residual, not something these flags close. See
+    docs/lld-apply-button-v2.md §6.
 
     CAVEAT: --tools governs the BUILT-IN tool set only; the Playwright
     server's browser_* tools are a separate (MCP) namespace and should be

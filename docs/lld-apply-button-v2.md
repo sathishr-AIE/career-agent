@@ -140,10 +140,13 @@ its source is AGPL):
   `claude --model <APPLY_MODEL> -p --mcp-config <path> --strict-mcp-config --tools "" --permission-mode bypassPermissions --no-session-persistence --output-format stream-json --verbose -`
   with the prompt on stdin, `CLAUDECODE`/`CLAUDE_CODE_ENTRYPOINT` scrubbed from env, cwd =
   a per-job wiped `<system temp>/career-agent-apply/session/` dir. `--tools ""` disables
-  every built-in tool (Bash/Read/Write/WebFetch) and ignores the user/project/local
-  settings files that carry the operator's hooks and plugins; `--strict-mcp-config` keeps
-  the operator's other MCP servers out. Both govern built-ins only — the Playwright
-  server's `browser_*` tools are a separate namespace.
+  every built-in tool (Bash/Read/Write/WebFetch); `--strict-mcp-config` keeps the
+  operator's other MCP servers out. Both govern built-ins/MCP only — the operator's own
+  hooks/plugins from user/project/local settings still load in this session
+  (`--restricted` is the flag that ignores those files, but it refuses
+  `bypassPermissions`, which this design requires, so it's unusable here; open residual,
+  tracked in §6). The Playwright server's `browser_*` tools are a separate namespace,
+  unaffected by either flag.
 - Streams stdout line-by-line: `assistant` text and humanized `tool_use` lines append to a
   per-job transcript `data/logs/apply_<ts>_job<id>.txt`; the final `result` message yields
   `cost_usd`. Wall-clock timeout 300 s → process-tree kill → `AgentResult("failed", "timeout")`.
@@ -298,6 +301,22 @@ card, which pretty-prints the JSON (verify rendering in the plan; no schema chan
    from profile/qa_bank.
 4. **Browser flags** — `--deny-permission-prompts`, fake media UI, notifications off: the
    permission prompts the prompt forbids can't even appear.
+
+**Known residuals (accepted risk for the P0 trial, not closed by the above):**
+
+- The operator's own hooks and plugins from `~/.claude/settings.json` (and
+  project/local settings) still load in the spawned session — `--tools ""` and
+  `--strict-mcp-config` don't touch settings files; `--restricted` does, but it refuses
+  `bypassPermissions` so it can't be used here (see §3.3). Untrusted job-posting text
+  therefore flows through the operator's hook chain, including any hooks that run
+  PowerShell scripts.
+- The Playwright MCP server can navigate to `file://` URLs and upload arbitrary
+  absolute host paths, so it can reach `backend/.env` and `candidate_profile.toml`
+  regardless of the `--tools` restriction. `@playwright/mcp`'s
+  `--allowed-origins`/`--blocked-origins` flags exist but its own `--help` states they
+  do not serve as a security boundary, so they aren't a reliable fix.
+
+To be revisited before any unattended use.
 
 Cost note: every agent run spends real Claude tokens (logged per job via stream-json
 `total_cost_usd` into the transcript). All development happens against the injected
