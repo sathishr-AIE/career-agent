@@ -104,7 +104,7 @@ def preflight() -> None:
         raise agent_mod.PreconditionError(str(exc)) from exc
 
 
-async def _live_run_agent(prompt: str, job_id: int):
+async def _live_run_agent(prompt: str, job_id: int, nonce: str):
     """Default agent runner: a real Chrome around a real `claude` session.
     Tests inject their own run_agent instead -- nothing in the test suite
     ever reaches this, by house convention (no test spawns a browser or a
@@ -113,7 +113,7 @@ async def _live_run_agent(prompt: str, job_id: int):
 
     proc = chrome_mod.launch_chrome()
     try:
-        return await agent_mod.run_agent(prompt, job_id=job_id)
+        return await agent_mod.run_agent(prompt, job_id=job_id, nonce=nonce)
     finally:
         chrome_mod.cleanup(proc)
 
@@ -337,7 +337,7 @@ def _record_send_outcome(conn, job_id: int, app_id: int, url: str,
     return {"ok": False, "reason": f"submission {status}: {detail or reason}"}
 
 
-async def _run(runner, prompt: str, job_id: int) -> tuple:
+async def _run(runner, prompt: str, job_id: int, nonce: str) -> tuple:
     """run_agent does not return an AgentResult on every path -- a broken
     stdin pipe or a missing `claude`/`npx` binary raises out of it. Turn
     that into a recordable result so the caller always has one, and never
@@ -347,7 +347,7 @@ async def _run(runner, prompt: str, job_id: int) -> tuple:
     event payload, so `failure_reason` stays the queryable taxonomy slug
     the schema promises (spec section 5.3)."""
     try:
-        result = await runner(prompt, job_id)
+        result = await runner(prompt, job_id, nonce)
         # The only place the run's price is recorded: AgentResult carries
         # cost_usd/duration_ms, there is no DB column for either (P0), and
         # the transcript footer is the other half of the record.
@@ -375,7 +375,7 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
     """Draft (dry_run=True) or really send (dry_run=False) one application,
     by running one apply-agent session and translating its AgentResult into
     this module's state machine. `run_agent` is the only test seam:
-    `async (prompt: str, job_id: int) -> AgentResult`."""
+    `async (prompt: str, job_id: int, nonce: str) -> AgentResult`."""
     row = conn.execute("SELECT * FROM job WHERE id = ?", (job_id,)).fetchone()
     if row is None:
         return {"ok": False, "reason": f"job {job_id} not found"}
@@ -464,11 +464,17 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
                                                                profile)))
     score = score_row["weighted_score"] if score_row else None
     runner = run_agent or _live_run_agent
+    # One unguessable token per run, stamped into every RESULT line the
+    # prompt teaches and the only one parse_result will accept back -- a
+    # job page cannot guess it, so it cannot forge an outcome. The runner
+    # carries it through to parse_result; nothing else ever sees it.
+    nonce = agent_mod.new_nonce()
 
     if dry_run:
-        prompt = agent_mod.build_prompt(*prompt_args, mode="draft", score=score)
+        prompt = agent_mod.build_prompt(*prompt_args, mode="draft",
+                                        nonce=nonce, score=score)
         async with _agent_lock():
-            result, detail = await _run(runner, prompt, job_id)
+            result, detail = await _run(runner, prompt, job_id, nonce)
         return _record_draft_outcome(conn, job_id, resume_version,
                                      row["url"], result, detail)
 
@@ -492,10 +498,11 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
         # for review is exactly what gets sent" -- by silently sending
         # different answers than what was reviewed. Reuse wins.
         pinned = json.loads(draft["answers"] or "{}")
-        prompt = agent_mod.build_prompt(*prompt_args, mode="send",
+        prompt = agent_mod.build_prompt(*prompt_args, mode="send", nonce=nonce,
                                         pinned_answers=pinned, score=score)
     else:
-        prompt = agent_mod.build_prompt(*prompt_args, mode="auto", score=score)
+        prompt = agent_mod.build_prompt(*prompt_args, mode="auto", nonce=nonce,
+                                        score=score)
 
     # The in_flight row is written INSIDE the lock: started_at is what
     # sweep_stale_in_flight measures, so a run queued behind another would
@@ -507,6 +514,6 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
             (job_id, resume_version))
         app_id = cur.lastrowid
         conn.commit()
-        result, detail = await _run(runner, prompt, job_id)
+        result, detail = await _run(runner, prompt, job_id, nonce)
     return _record_send_outcome(conn, job_id, app_id, row["url"], pinned,
                                 result, detail)

@@ -267,11 +267,38 @@ async def queue_skip(conn: sqlite3.Connection, job_id: int, brief_path: Path,
     return {"ok": True, "message": "ok"}
 
 
-def queue_retry(conn: sqlite3.Connection, job_id: int) -> dict:
+def queue_retry(conn: sqlite3.Connection, job_id: int,
+                confirm_not_submitted: bool = False) -> dict:
+    """Requeue a job whose last attempt did not go through.
+
+    `held_unknown` needs `confirm_not_submitted` because it means exactly
+    "the agent drove a real browser and then stopped reporting": it may
+    already have submitted, so releasing it on a plain retry click would be
+    a double-submit vector. With the human's confirmation the row becomes a
+    plain `failed` -- non-BLOCKING, so QUEUE_WHERE re-admits the job --
+    keeping `failure_reason` so why it was held survives. The other exit,
+    "it WAS submitted", is store.mark_applied, which promotes the same row.
+    Before this, neither worked and raw SQL was the only way out of a state
+    the applications page tells the user to clear."""
     app_row = conn.execute(
-        "SELECT status FROM application WHERE job_id = ?"
+        "SELECT id, status, failure_reason FROM application WHERE job_id = ?"
         " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
-    if app_row is None or app_row["status"] != "failed":
+    status = app_row["status"] if app_row else None
+    if status == "held_unknown":
+        if not confirm_not_submitted:
+            return {"ok": False, "message":
+                    "This one is held because the agent stopped reporting"
+                    " mid-run — it may already have been submitted. Check the"
+                    " employer's site first, then confirm it was not"
+                    " submitted to clear the hold."}
+        conn.execute("UPDATE application SET status = 'failed'"
+                     " WHERE id = ? AND status = 'held_unknown'",
+                     (app_row["id"],))
+        conn.commit()
+        store.log(conn, job_id, "hold_cleared",
+                  app_row["failure_reason"] or "")
+        _unpark(conn, job_id)
+    elif status != "failed":
         return {"ok": False, "message":
                 "Only a failed application can be retried."}
     lowest = conn.execute(

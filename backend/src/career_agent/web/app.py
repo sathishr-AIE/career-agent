@@ -281,9 +281,12 @@ async def queue_skip(job_id: int):
 
 
 @app.post("/queue/{job_id}/retry")
-def queue_retry(job_id: int):
+def queue_retry(job_id: int, confirm: bool = False):
+    """?confirm=1 is the human confirming a held_unknown application was
+    NOT submitted -- the only thing that releases that hold."""
     conn = _conn()
-    return _span(actions.queue_retry(conn, job_id))
+    return _span(actions.queue_retry(conn, job_id,
+                                     confirm_not_submitted=confirm))
 
 
 @app.post("/queue/{job_id}/priority")

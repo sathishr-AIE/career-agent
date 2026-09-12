@@ -100,7 +100,20 @@
       </form>
     </div>
   {% elif j["terminal_status"] == "held_unknown" %}
-    <span class="denied">Held — confirm manually, then clear it</span>
+    {# The agent drove a real browser and then stopped reporting, so this
+       may or may not have been submitted. Both exits are here: neither
+       worked before, and raw SQL was the only way out. #}
+    <span class="denied">Held — the agent may already have submitted this.
+      Check the employer's site, then say which:</span>
+    <form hx-post="/applied/{{ j['id'] }}" hx-swap="outerHTML"
+          class="outcome-form">
+      <input type="date" name="when" value="{{ today }}">
+      <button class="btn" type="submit"
+              title="It did go through. Records it so callbacks can be tracked.">It was submitted</button>
+    </form>
+    <button class="btn" hx-post="/queue/{{ j['id'] }}/retry?confirm=1"
+            hx-confirm="Confirm this application was NOT submitted. Clearing the hold lets the agent apply to this job again."
+            title="It never went through. Clears the hold and requeues the job.">Not submitted — clear hold</button>
   {% elif j["terminal_status"] == "failed_permanent" %}
     <span class="denied">Failed permanently — see the event log</span>
   {% else %}

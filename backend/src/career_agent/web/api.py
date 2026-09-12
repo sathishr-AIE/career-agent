@@ -223,9 +223,10 @@ async def api_queue_skip(job_id: int):
 
 
 @router.post("/queue/{job_id}/retry")
-def api_queue_retry(job_id: int):
+def api_queue_retry(job_id: int, confirm: bool = False):
     m = _app()
-    return _result(actions.queue_retry(m._conn(), job_id))
+    return _result(actions.queue_retry(m._conn(), job_id,
+                                       confirm_not_submitted=confirm))
 
 
 @router.post("/queue/{job_id}/priority")

@@ -189,12 +189,17 @@ def mark_applied(conn, job_id: int, when: str) -> int:
     denominator stays zero and no outcome can be attached to anything.
 
     Promotes an existing draft when there is one so a single application
-    attempt stays a single row. Raises sqlite3.IntegrityError via the
-    one_live_application_per_job index if the job already has a live
-    application.
+    attempt stays a single row. A `held_unknown` row is promoted the same
+    way: it means "the agent may already have submitted", and this is the
+    human resolving that to "yes, it went through" -- inserting a second row
+    instead would hit the one_live_application_per_job index, which is what
+    made Held a dead end the applications page could not clear. Raises
+    sqlite3.IntegrityError via that index if the job already has a
+    submitted / in_flight / failed_permanent application.
     """
     draft = conn.execute(
-        "SELECT id FROM application WHERE job_id = ? AND status = 'draft'"
+        "SELECT id, status FROM application WHERE job_id = ?"
+        " AND status IN ('draft', 'held_unknown')"
         " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
 
     if draft is None:
@@ -207,13 +212,19 @@ def mark_applied(conn, job_id: int, when: str) -> int:
         app_id = cur.lastrowid
     else:
         app_id = draft["id"]
-        # answers is nulled rather than kept: the draft's answers are
-        # precisely what was NOT sent, so carrying the stub filler's
-        # placeholder forward would make the row read as a record of what the
-        # human submitted -- which a future real Send is meant to rely on.
+        if draft["status"] == "draft":
+            # answers is nulled rather than kept: the draft's answers are
+            # precisely what was NOT sent, so carrying them forward would
+            # make the row read as a record of what the human submitted --
+            # which a future real Send is meant to rely on. A held_unknown
+            # row is the opposite case: its answers are what the agent
+            # actually typed into the live form, the only audit trail the
+            # submission has, so they stay.
+            conn.execute("UPDATE application SET answers = NULL WHERE id = ?",
+                         (app_id,))
         conn.execute(
-            "UPDATE application SET status = 'submitted', submitted_at = ?,"
-            " answers = NULL WHERE id = ?", (when, app_id))
+            "UPDATE application SET status = 'submitted', submitted_at = ?"
+            " WHERE id = ?", (when, app_id))
 
     conn.commit()
     log(conn, job_id, "human_marked_applied", when)

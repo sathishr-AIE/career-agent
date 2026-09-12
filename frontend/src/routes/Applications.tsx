@@ -181,7 +181,7 @@ function ActionCell({
       {tracked ? (
         <OutcomeCell tracked={tracked} ctx={ctx} onChanged={onChanged} />
       ) : job.terminal_status === 'held_unknown' ? (
-        <span className="denied">Held — confirm manually, then clear it</span>
+        <HeldCell job={job} today={ctx.today} onChanged={onChanged} run={run} />
       ) : job.terminal_status === 'failed_permanent' ? (
         <span className="denied">Failed permanently — see the event log</span>
       ) : (
@@ -246,7 +246,46 @@ function OutcomeCell({
   )
 }
 
-function MarkAppliedForm({ job, today, onChanged }: { job: Job; today: string; onChanged: () => void }) {
+// The agent drove a real browser and then stopped reporting, so this may or
+// may not have been submitted. Both exits live here: neither worked before
+// (queue_retry took only 'failed', Mark applied hit the live-application
+// index), so raw SQL was the only way out of a state the label tells the
+// user to clear.
+function HeldCell({
+  job, today, onChanged, run,
+}: {
+  job: Job
+  today: string
+  onChanged: () => void
+  run: (path: string) => void
+}) {
+  return (
+    <div>
+      <span className="denied">
+        Held — the agent may already have submitted this. Check the employer's site,
+        then say which:
+      </span>
+      <MarkAppliedForm job={job} today={today} onChanged={onChanged} label="It was submitted" />
+      <button
+        className="btn"
+        title="It never went through. Clears the hold and requeues the job."
+        onClick={() => {
+          if (window.confirm(
+            'Confirm this application was NOT submitted. Clearing the hold lets the' +
+            ' agent apply to this job again.')) {
+            run(`/api/queue/${job.id}/retry?confirm=1`)
+          }
+        }}
+      >
+        Not submitted — clear hold
+      </button>
+    </div>
+  )
+}
+
+function MarkAppliedForm({
+  job, today, onChanged, label = 'Mark applied',
+}: { job: Job; today: string; onChanged: () => void; label?: string }) {
   const [when, setWhen] = useState(today)
   return (
     <form
@@ -258,7 +297,7 @@ function MarkAppliedForm({ job, today, onChanged }: { job: Job; today: string; o
     >
       <input type="date" value={when} onChange={(e) => setWhen(e.target.value)} />
       <button className="btn" type="submit" title="You applied on the site yourself.">
-        Mark applied
+        {label}
       </button>
     </form>
   )

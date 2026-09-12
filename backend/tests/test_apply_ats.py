@@ -55,12 +55,14 @@ def fake_agent(result: AgentResult):
     """The one test seam. Nothing in this file may launch Chrome, spawn a
     subprocess, or need the `claude`/`npx` binaries -- every case injects
     this instead of letting submit() reach _live_run_agent."""
-    async def _fake(prompt, job_id):
+    async def _fake(prompt, job_id, nonce):
         _fake.prompts.append(prompt)
         _fake.job_ids.append(job_id)
+        _fake.nonces.append(nonce)
         return result
     _fake.prompts = []
     _fake.job_ids = []
+    _fake.nonces = []
     return _fake
 
 
@@ -314,7 +316,7 @@ async def test_an_unknown_state_send_holds_instead_of_retrying(conn, reason):
     have clicked Submit before it died. Retrying would be a double-submit
     the moment SUBMISSION_IMPLEMENTED flips, so the row must BLOCK."""
     if reason == "agent_error":
-        async def runner(prompt, job_id):
+        async def runner(prompt, job_id, nonce):
             raise RuntimeError("claude CLI not on PATH")
     else:
         runner = fake_agent(AgentResult("failed", reason))
@@ -334,7 +336,7 @@ async def test_an_unknown_state_send_holds_instead_of_retrying(conn, reason):
 async def test_the_same_reasons_stay_retryable_on_a_draft(conn, reason):
     """A draft submits nothing, so re-drafting is free and correct."""
     if reason == "agent_error":
-        async def runner(prompt, job_id):
+        async def runner(prompt, job_id, nonce):
             raise RuntimeError("nope")
     else:
         runner = fake_agent(AgentResult("failed", reason))
@@ -349,7 +351,7 @@ async def test_the_same_reasons_stay_retryable_on_a_draft(conn, reason):
 async def test_an_agent_crash_keeps_the_slug_and_logs_the_detail(conn):
     """failure_reason stays a queryable taxonomy slug (spec 5.3); the
     exception text lands in the event payload instead."""
-    async def boom(prompt, job_id):
+    async def boom(prompt, job_id, nonce):
         raise RuntimeError("claude CLI not on PATH")
 
     r = await _submit(conn, dry_run=False, run_agent=boom)
@@ -508,7 +510,7 @@ def no_live_runner(monkeypatch):
     """Belt and braces for the tests below, which are the only ones that
     reach submit() with run_agent=None on a path that could otherwise
     launch Chrome."""
-    async def _never(prompt, job_id):
+    async def _never(prompt, job_id, nonce):
         raise AssertionError("the live runner must never run in a test")
     monkeypatch.setattr(ats_apply, "_live_run_agent", _never)
 
@@ -549,7 +551,7 @@ async def test_preflight_is_skipped_when_a_runner_is_injected(conn, monkeypatch)
 async def test_a_precondition_escaping_mid_run_is_not_unknown_state(conn):
     """The backstop check inside _run_agent_blocking: nothing launched, so
     the send path must not hold it as 'possibly submitted'."""
-    async def boom(prompt, job_id):
+    async def boom(prompt, job_id, nonce):
         raise agent_mod.PreconditionError("Chrome not found -- set CHROME_PATH")
 
     r = await _submit(conn, dry_run=False, run_agent=boom)
@@ -565,7 +567,7 @@ def _sweeping_agent(conn, result):
     """A run that outlives sweep_stale_in_flight's 15-minute window:
     timeout_s is not a wall-clock bound, so the sweep flips the row to
     held_unknown while the agent is still driving the browser."""
-    async def _fake(prompt, job_id):
+    async def _fake(prompt, job_id, nonce):
         conn.execute("UPDATE application SET started_at ="
                      " datetime('now', '-30 minutes') WHERE status = 'in_flight'")
         conn.commit()
@@ -756,7 +758,7 @@ async def test_two_agent_runs_never_overlap(conn):
     live = 0
     peak = 0
 
-    async def runner(prompt, job_id):
+    async def runner(prompt, job_id, nonce):
         nonlocal live, peak
         live += 1
         peak = max(peak, live)
@@ -781,7 +783,7 @@ async def test_a_queued_send_does_not_age_its_own_in_flight_row(conn):
     job2 = _second_job(conn)
     started = []
 
-    async def runner(prompt, job_id):
+    async def runner(prompt, job_id, nonce):
         row = conn.execute("SELECT COUNT(*) n FROM application"
                            " WHERE status = 'in_flight'").fetchone()
         started.append(row["n"])
@@ -794,3 +796,113 @@ async def test_a_queued_send_does_not_age_its_own_in_flight_row(conn):
         ats_apply.submit(conn, job2, dry_run=False, brief=BRIEF, profile=PROFILE,
                          run_agent=runner))
     assert started == [1, 1], f"in_flight rows seen per run: {started}"
+
+
+# -- F7: clearing a held_unknown (web/actions.queue_retry) -----------------
+# Imported inside each test: this file must stay collectable even if the web
+# package's import chain breaks on a given machine.
+
+def _held(conn, reason="agent_error"):
+    conn.execute("INSERT INTO application (job_id, resume_version, status,"
+                 " failure_reason) VALUES (1, 'base-v1', 'held_unknown', ?)",
+                 (reason,))
+    conn.commit()
+
+
+def test_a_held_application_is_not_cleared_without_confirmation(conn):
+    """Held means 'the agent may already have submitted'. Releasing it on a
+    plain retry click would re-admit the job and apply a second time."""
+    from career_agent.web import actions
+
+    _held(conn)
+    r = actions.queue_retry(conn, 1)
+    assert not r["ok"]
+    assert "held" in r["message"].lower() or "confirm" in r["message"].lower()
+    assert _apps(conn)[-1]["status"] == "held_unknown"
+
+
+def test_confirming_it_was_not_submitted_clears_the_hold(conn):
+    """The applications page says 'Held -- confirm manually, then clear it'
+    and no control did: queue_retry took only 'failed', and mark_applied hit
+    the one_live_application_per_job index. Raw SQL was the only exit."""
+    from career_agent.web import actions
+
+    _held(conn)
+    r = actions.queue_retry(conn, 1, confirm_not_submitted=True)
+    assert r["ok"]
+    row = _apps(conn)[-1]
+    assert row["status"] == "failed"               # retryable, not BLOCKING
+    assert row["status"] not in ats_apply.BLOCKING
+    assert row["failure_reason"] == "agent_error"  # why it was held is kept
+    assert "hold_cleared" in _event_types(conn)
+
+
+async def test_clearing_a_hold_lets_the_job_be_attempted_again(conn):
+    from career_agent.web import actions
+
+    _held(conn)
+    actions.queue_retry(conn, 1, confirm_not_submitted=True)
+    r = await _submit(conn, dry_run=True,
+                      run_agent=fake_agent(AgentResult("draft_ready", answers={})))
+    assert r["ok"], r
+
+
+def test_confirmation_does_nothing_for_any_other_status(conn):
+    """The flag is an escape hatch for held_unknown only -- it must not turn
+    a 'submitted' row back into a retry."""
+    from career_agent.web import actions
+
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'base-v1', 'submitted')")
+    conn.commit()
+    r = actions.queue_retry(conn, 1, confirm_not_submitted=True)
+    assert not r["ok"]
+    assert _apps(conn)[-1]["status"] == "submitted"
+
+
+def test_a_failed_application_still_retries_without_the_flag(conn):
+    from career_agent.web import actions
+
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'base-v1', 'failed')")
+    conn.commit()
+    assert actions.queue_retry(conn, 1)["ok"]
+
+
+def test_the_human_can_say_it_WAS_submitted(conn):
+    """The other exit the page promises: confirm on the employer's site that
+    it went through. mark_applied promotes the held row rather than hitting
+    the one_live_application_per_job index."""
+    from career_agent import store as store_mod
+
+    _held(conn)
+    conn.execute("UPDATE application SET answers = '{\"q\": \"a\"}'")
+    conn.commit()
+    app_id = store_mod.mark_applied(conn, 1, "2026-09-01")
+    rows = _apps(conn)
+    assert len(rows) == 1 and rows[0]["id"] == app_id
+    assert rows[0]["status"] == "submitted"
+    assert rows[0]["submitted_at"] == "2026-09-01"
+    assert json.loads(rows[0]["answers"]) == {"q": "a"}, (
+        "unlike a draft, a held row's answers are what the agent actually"
+        " typed into the live form -- the only audit trail there is")
+
+
+# -- F8: submit() is what keeps the two sides of the contract together -----
+
+async def test_the_runner_is_handed_the_prompts_own_nonce(conn):
+    """build_prompt stamps it and parse_result demands it -- submit() is the
+    only place both are chosen, so they cannot drift apart at runtime."""
+    fake = fake_agent(AgentResult("draft_ready", answers={}))
+    await _submit(conn, dry_run=True, run_agent=fake)
+    nonce = fake.nonces[0]
+    assert nonce
+    assert f"RESULT:{nonce}:APPLIED" in fake.prompts[0]
+    assert "RESULT:" not in fake.prompts[0].replace(f"RESULT:{nonce}:", "")
+
+
+async def test_every_run_gets_a_fresh_nonce(conn):
+    fake = fake_agent(AgentResult("failed", "stuck"))
+    await _submit(conn, dry_run=True, run_agent=fake)
+    await _submit(conn, dry_run=True, run_agent=fake)
+    assert fake.nonces[0] != fake.nonces[1]
