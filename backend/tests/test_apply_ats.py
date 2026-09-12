@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -731,3 +732,65 @@ async def test_a_send_falling_back_to_pinned_answers_is_not_flagged(conn):
     row = _apps(conn)[-1]
     assert row["failure_reason"] is None
     assert json.loads(row["answers"]) == {"Visa?": "Citizen"}
+
+
+# -- F6: agent runs are serialized -----------------------------------------
+
+def _second_job(conn):
+    conn.execute("INSERT INTO job (fingerprint, source, external_id, company,"
+                 " company_normalized, title, title_normalized, url)"
+                 " VALUES ('fp2','ats','2','Beta','beta','AI Engineer',"
+                 " 'aiengineer','https://y/apply')")
+    conn.commit()
+    return conn.execute("SELECT id FROM job WHERE fingerprint = 'fp2'"
+                        ).fetchone()["id"]
+
+
+async def test_two_agent_runs_never_overlap(conn):
+    """chrome.launch_chrome _kill_port(9222)s before every launch, and
+    _run_agent_blocking wipes the shared session dir and rewrites the shared
+    .mcp-apply.json -- one port, one profile, one session dir. A dashboard
+    click during an auto-worker run would taskkill the in-flight Chrome
+    mid-submission."""
+    job2 = _second_job(conn)
+    live = 0
+    peak = 0
+
+    async def runner(prompt, job_id):
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        await asyncio.sleep(0.02)          # the browser session
+        live -= 1
+        return AgentResult("draft_ready", answers={})
+
+    await asyncio.gather(
+        ats_apply.submit(conn, 1, dry_run=True, brief=BRIEF, profile=PROFILE,
+                         run_agent=runner),
+        ats_apply.submit(conn, job2, dry_run=True, brief=BRIEF, profile=PROFILE,
+                         run_agent=runner))
+    assert peak == 1, f"{peak} agent runs were in flight at once"
+    assert {a["status"] for a in conn.execute(
+        "SELECT status FROM application").fetchall()} == {"draft"}
+
+
+async def test_a_queued_send_does_not_age_its_own_in_flight_row(conn):
+    """The in_flight row is written inside the lock, not before it: a run
+    waiting its turn would otherwise have started_at ticking toward
+    sweep_stale_in_flight's 15 minutes while it had not begun."""
+    job2 = _second_job(conn)
+    started = []
+
+    async def runner(prompt, job_id):
+        row = conn.execute("SELECT COUNT(*) n FROM application"
+                           " WHERE status = 'in_flight'").fetchone()
+        started.append(row["n"])
+        await asyncio.sleep(0.02)
+        return AgentResult("applied", answers={"q": "a"})
+
+    await asyncio.gather(
+        ats_apply.submit(conn, 1, dry_run=False, brief=BRIEF, profile=PROFILE,
+                         run_agent=runner),
+        ats_apply.submit(conn, job2, dry_run=False, brief=BRIEF, profile=PROFILE,
+                         run_agent=runner))
+    assert started == [1, 1], f"in_flight rows seen per run: {started}"

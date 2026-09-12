@@ -1,6 +1,7 @@
 """The apply engine's DB half: `submit()` owns the application state
 machine and every write; `apply/agent.py` owns the browser session that
 decides an outcome. See docs/lld-apply-button-v2.md section 5."""
+import asyncio
 import datetime as dt
 import json
 import logging
@@ -149,6 +150,31 @@ def _resume_text(row) -> str:
             parts.append("Tailored for this job:\n"
                          + "\n".join(f"- {t}" for t in tailored))
     return "\n\n".join(parts)
+
+
+# ponytail: one global lock; per-port locks when P2 adds parallel workers.
+# chrome.py is a single-worker design -- one CDP port (9222), one profile
+# dir, and _run_agent_blocking wipes the shared session dir and rewrites the
+# shared .mcp-apply.json per run -- and launch_chrome _kill_port()s 9222
+# before every launch. Without this, a dashboard Apply click during an
+# auto-worker run taskkills the in-flight Chrome mid-submission. The design
+# doc already says "single worker in P0"; this makes it true.
+_AGENT_LOCK: asyncio.Lock | None = None
+_AGENT_LOCK_LOOP = None
+
+
+def _agent_lock() -> asyncio.Lock:
+    """The one in-flight agent run. Rebound when the running event loop
+    changes: asyncio.Lock binds itself to the first loop that awaits it and
+    refuses any other, and the test suite gives every test its own loop.
+    Production has exactly one loop (the FastAPI server's -- web/pipeline.py
+    is the only code that runs a second one, and it never calls submit()),
+    so the rebind never fires there."""
+    global _AGENT_LOCK, _AGENT_LOCK_LOOP
+    loop = asyncio.get_running_loop()
+    if _AGENT_LOCK is None or _AGENT_LOCK_LOOP is not loop:
+        _AGENT_LOCK, _AGENT_LOCK_LOOP = asyncio.Lock(), loop
+    return _AGENT_LOCK
 
 
 def _stage_resume(resume_path: Path, profile: CandidateProfile) -> Path:
@@ -441,7 +467,8 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
 
     if dry_run:
         prompt = agent_mod.build_prompt(*prompt_args, mode="draft", score=score)
-        result, detail = await _run(runner, prompt, job_id)
+        async with _agent_lock():
+            result, detail = await _run(runner, prompt, job_id)
         return _record_draft_outcome(conn, job_id, resume_version,
                                      row["url"], result, detail)
 
@@ -470,12 +497,16 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
     else:
         prompt = agent_mod.build_prompt(*prompt_args, mode="auto", score=score)
 
-    cur = conn.execute(
-        "INSERT INTO application (job_id, resume_version, status, started_at)"
-        " VALUES (?, ?, 'in_flight', datetime('now'))", (job_id, resume_version))
-    app_id = cur.lastrowid
-    conn.commit()
-
-    result, detail = await _run(runner, prompt, job_id)
+    # The in_flight row is written INSIDE the lock: started_at is what
+    # sweep_stale_in_flight measures, so a run queued behind another would
+    # otherwise age toward the 15-minute window while it had not begun.
+    async with _agent_lock():
+        cur = conn.execute(
+            "INSERT INTO application (job_id, resume_version, status, started_at)"
+            " VALUES (?, ?, 'in_flight', datetime('now'))",
+            (job_id, resume_version))
+        app_id = cur.lastrowid
+        conn.commit()
+        result, detail = await _run(runner, prompt, job_id)
     return _record_send_outcome(conn, job_id, app_id, row["url"], pinned,
                                 result, detail)
