@@ -246,13 +246,25 @@ def _record_send_outcome(conn, job_id: int, app_id: int, url: str,
         # ANSWERS_JSON included. The review invariant says the recorded
         # answers are what was reviewed, so `{}` must not overwrite them.
         answers = result.answers or pinned or {}
+        # ... but when BOTH are empty there is no audit trail at all for a
+        # real submission: parse_result only demands ANSWERS_JSON for
+        # DRAFT_READY, so auto mode's bare RESULT:APPLIED lands here with
+        # `{}`. Record the send regardless -- it happened, and that is the
+        # irreversible truth -- but never silently: failure_reason on a
+        # 'submitted' row is the gap marker, not a failure.
+        gap = "answers_json_missing" if not answers else None
         conn.execute(
             "UPDATE application SET status = 'submitted', answers = ?,"
-            " submitted_at = datetime('now'), transcript_path = ?"
-            " WHERE id = ?",
-            (json.dumps(answers), result.transcript_path or None, app_id))
+            " submitted_at = datetime('now'), transcript_path = ?,"
+            " failure_reason = ? WHERE id = ?",
+            (json.dumps(answers), result.transcript_path or None, gap, app_id))
         conn.execute("INSERT INTO event (job_id, type, payload)"
                      " VALUES (?, 'submitted', ?)", (job_id, url))
+        if gap:
+            conn.execute("INSERT INTO event (job_id, type, payload)"
+                         " VALUES (?, ?, ?)",
+                         (job_id, gap, "submitted with no answers recorded:"
+                          f" {result.transcript_path or url}"))
         conn.commit()
         return {"ok": True, "job_id": job_id, "status": "submitted"}
 

@@ -693,3 +693,41 @@ async def test_the_run_cost_and_duration_are_logged(conn, caplog):
     assert "0.0421" in caplog.text
     assert "12345" in caplog.text
     assert "job 1" in caplog.text
+
+
+# -- F4: a real submission with an empty audit trail -----------------------
+
+async def test_an_auto_submit_with_no_answers_is_recorded_and_flagged(conn):
+    """parse_result only demands ANSWERS_JSON for DRAFT_READY, so in auto
+    mode (pinned is None) a bare RESULT:APPLIED records a REAL submission
+    with answers = '{}' -- silently. The send happened and must still be
+    recorded; the gap has to be visible."""
+    r = await _submit(conn, dry_run=False,
+                      run_agent=fake_agent(AgentResult("applied")))
+    assert r["ok"] and r["status"] == "submitted"
+    row = _apps(conn)[-1]
+    assert row["status"] == "submitted"          # never lose the send itself
+    assert row["submitted_at"] is not None
+    assert row["failure_reason"] == "answers_json_missing"
+    assert "answers_json_missing" in _event_types(conn)
+
+
+async def test_a_submit_that_reported_answers_is_not_flagged(conn):
+    await _submit(conn, dry_run=False,
+                  run_agent=fake_agent(AgentResult("applied", answers={"q": "a"})))
+    row = _apps(conn)[-1]
+    assert row["status"] == "submitted"
+    assert row["failure_reason"] is None
+    assert "answers_json_missing" not in _event_types(conn)
+
+
+async def test_a_send_falling_back_to_pinned_answers_is_not_flagged(conn):
+    """The pinned answers ARE the audit trail -- nothing is missing."""
+    await _submit(conn, dry_run=True,
+                  run_agent=fake_agent(AgentResult("draft_ready",
+                                                   answers={"Visa?": "Citizen"})))
+    await _submit(conn, dry_run=False,
+                  run_agent=fake_agent(AgentResult("applied")))
+    row = _apps(conn)[-1]
+    assert row["failure_reason"] is None
+    assert json.loads(row["answers"]) == {"Visa?": "Citizen"}

@@ -345,3 +345,27 @@ def test_the_transcript_foots_the_run_cost_and_duration(sandboxed, monkeypatch):
     assert r.cost_usd == 0.0421 and r.duration_ms >= 0
     footer = Path(r.transcript_path).read_text(encoding="utf-8").strip().splitlines()[-1]
     assert "job 7" in footer and "$0.0421" in footer and "ms" in footer
+
+
+# -- F5: "what was reviewed is what gets sent", prompt-enforced ------------
+
+def _steps(prompt: str) -> str:
+    return prompt.split("== STEP BY STEP ==")[1].split("== BROWSER EFFICIENCY ==")[0]
+
+
+def test_send_mode_forbids_improvising_an_unpinned_field():
+    """A field the draft's ANSWERS_JSON omitted would otherwise be invented
+    fresh at send time and submitted without a human ever seeing it."""
+    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx",
+                     mode="send", pinned_answers={"Visa status?": "Citizen"})
+    steps = _steps(p)
+    assert "not covered by the PINNED ANSWERS" in steps
+    assert "NEEDS_ANSWER" in steps
+    assert "improvise" in steps
+
+
+def test_auto_mode_carries_no_pinned_answer_rule():
+    """Nothing was reviewed in auto mode -- deciding a field IS the job."""
+    steps = _steps(build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx",
+                                mode="auto"))
+    assert "PINNED ANSWERS" not in steps

@@ -192,7 +192,12 @@ _MODE_ENDING = {
     ),
     "send": (
         "9. Fill using the PINNED ANSWERS, verify every field against them, click "
-        "Submit, confirm the thank-you/received page, then output RESULT:APPLIED."
+        "Submit, confirm the thank-you/received page, then output RESULT:APPLIED.\n"
+        "10. A human reviewed the PINNED ANSWERS and nothing else. If the form asks "
+        "something that is not covered by the PINNED ANSWERS and not answerable from "
+        "the APPLICANT PROFILE, do NOT improvise an answer and do NOT submit -- stop "
+        "and output RESULT:NEEDS_ANSWER:<the exact question text>. Anything you invent "
+        "here would be sent without anyone having seen it."
     ),
     "auto": (
         "9. Verify every field, output the `ANSWERS_JSON:` line, click Submit, confirm "

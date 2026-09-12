@@ -18,7 +18,13 @@ route to it; failures are classified, not fatal.
 
 **Preserved, by design** (these are Career Agent's advantages over ApplyPilot):
 
-- The two-phase invariant: *what was shown for review is exactly what gets sent* (manual mode).
+- The two-phase invariant: *what was shown for review is exactly what gets sent* (manual
+  mode) — **but now prompt-enforced, not structurally enforced.** The deleted deterministic
+  filler could only write the answers it was handed; an agent can type whatever it likes.
+  `submit()` still pins the reviewed draft's answers verbatim and the send-mode prompt
+  forbids improvising a field the PINNED ANSWERS do not cover (it must stop with
+  `RESULT:NEEDS_ANSWER` instead) — but that is an instruction the model follows, not a
+  guarantee the code makes. The reviewed answers are the floor, not a ceiling.
 - `SUBMISSION_IMPLEMENTED = False` as the hand-flipped outermost kill switch — now gating
   real sends for **all** sources.
 - The `application` state machine, its CHECK constraint, the `one_live_application_per_job`
@@ -110,7 +116,7 @@ its source is AGPL):
 | Section | Content / source |
 |---|---|
 | JOB | url, title, company, score from the `job` + latest `assessment` rows |
-| FILES | absolute resume path, copied to `data/apply-work/<Candidate_Name>_Resume.docx` (clean filename — recruiters see it) |
+| FILES | absolute resume path, copied to `<agent WORK_DIR>/<Candidate_Name>_Resume.docx` (clean filename — recruiters see it; the work dir is outside the repo, see §3.3) |
 | RESUME TEXT | tailored resume content (from the `resume` row's rendered text; used for text fields) |
 | APPLICANT PROFILE | `CandidateProfile` fields (name split, email, phone, linkedin, portfolio) + standard defaults (18+, background check yes, how-heard, EEO decline-to-answer) |
 | KNOWN ANSWERS | every `qa_bank` row as "Q → A", with volatile rows past the 30-day window marked *stale — reconfirm before using*; the agent prefers these verbatim when a form question matches |
@@ -120,7 +126,7 @@ its source is AGPL):
 | PLATFORM RULES | LinkedIn listing → follow Apply to the employer's own site; in-platform Easy Apply → `RESULT:FAILED:easy_apply`; Naukri in-platform apply → `RESULT:FAILED:naukri_platform`; SSO login pages (accounts.google.com, login.microsoftonline.com, okta, auth0) → `RESULT:FAILED:sso_required` |
 | SCREENING STRATEGY | hard facts: profile/known-answers only; skills in-domain: answer confidently; open-ended: 2–3 job-specific sentences grounded in the resume; EEO: decline |
 | STEP-BY-STEP | navigate → snapshot → location check → find Apply → login-wall protocol → upload resume (delete pre-parsed one first) → audit ATS pre-fills against PROFILE → screening → mode-specific ending (below) |
-| MODE ENDING | `draft`: fill everything, screenshot the completed form to `data/apply-work/draft_job_<id>.png`, output `ANSWERS_JSON: {...}` then `RESULT:DRAFT_READY`; do NOT submit. `send`: PINNED ANSWERS block ("use EXACTLY these answers for these questions"), fill, verify, submit, confirm the thank-you page, `RESULT:APPLIED`. `auto`: fill, output `ANSWERS_JSON`, verify every field, submit, confirm, `RESULT:APPLIED`. |
+| MODE ENDING | `draft`: fill everything, screenshot the completed form to `data/apply-work/draft_job_<id>.png`, output `ANSWERS_JSON: {...}` then `RESULT:DRAFT_READY`; do NOT submit. `send`: PINNED ANSWERS block ("use EXACTLY these answers for these questions"), fill, verify, submit, confirm the thank-you page, `RESULT:APPLIED` — plus: a field the PINNED ANSWERS do not cover and the PROFILE cannot answer is `RESULT:NEEDS_ANSWER`, never an improvised answer. `auto`: fill, output `ANSWERS_JSON`, verify every field, submit, confirm, `RESULT:APPLIED`. |
 | EFFICIENCY | snapshot once per page; `browser_fill_form` all fields in one call; keep thinking short |
 | FORM TRICKS | popup tabs, upload-to-prefill pages, stubborn dropdowns/checkboxes, phone digits, honeypots, placeholder formats |
 | GIVE-UP RULES | 3 attempts same page → `failed:stuck`; closed posting → `EXPIRED`; broken page → `failed:page_error`; any CAPTCHA → `RESULT:CAPTCHA` (no solving in P0). Stop immediately, output the code, never loop. |
