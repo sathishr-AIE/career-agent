@@ -116,3 +116,76 @@ def test_put_trims_whitespace(client, profile_path):
     assert reloaded.address.line1 == "1 Main St"
     assert reloaded.work_history[0].company == "Acme"
     assert reloaded.work_history[0].title == "Engineer"
+
+
+def test_put_current_true_clears_a_stale_end_date(client, profile_path):
+    """I1: current=True with a leftover end date must not reach disk -- the
+    prompt's _profile_section only renders "-present" when end is empty."""
+    payload = {
+        "candidate_name": "Jane Doe", "candidate_email": "jane@example.com",
+        "candidate_phone": "+91-1",
+        "work_history": [{"company": "Acme", "title": "Engineer", "start": "2022-01",
+                          "end": "2023-01", "current": True, "description": ""}],
+        "education": [],
+    }
+    r = client.put("/api/profile", json=payload)
+    assert r.status_code == 200
+
+    reloaded = load_candidate_profile(profile_path)
+    assert reloaded.work_history[0].current is True
+    assert reloaded.work_history[0].end == ""
+
+
+def test_put_partially_blank_work_row_returns_422_and_leaves_file_unchanged(
+        client, profile_path):
+    """I2: a row with a title but no company must not silently save -- it
+    would render as a garbled '-  (Engineer)' line in every future prompt."""
+    original = CandidateProfile(candidate_name="Jane", candidate_email="jane@example.com",
+                                candidate_phone="+91-1")
+    save_candidate_profile(profile_path, original)
+    before = profile_path.read_text(encoding="utf-8")
+
+    payload = {
+        "candidate_name": "Jane Doe", "candidate_email": "jane@example.com",
+        "candidate_phone": "+91-1",
+        "work_history": [{"company": "", "title": "Engineer", "start": "", "end": "",
+                          "current": False, "description": ""}],
+        "education": [],
+    }
+    r = client.put("/api/profile", json=payload)
+    assert r.status_code == 422
+    body = r.json()
+    assert body["errors"]["work_history.0.company"] == "Company is required"
+    assert "work_history.0.title" not in body["errors"]
+    assert profile_path.read_text(encoding="utf-8") == before
+
+
+def test_put_fully_blank_work_row_returns_422(client, profile_path):
+    """Covers the UI-filter's intent from the backend, since the frontend
+    drop-before-send has no test harness: even if a fully blank row does
+    reach the API, it must not validate."""
+    payload = {
+        "candidate_name": "Jane Doe", "candidate_email": "jane@example.com",
+        "candidate_phone": "+91-1",
+        "work_history": [{"company": "", "title": "", "start": "", "end": "",
+                          "current": False, "description": ""}],
+        "education": [],
+    }
+    r = client.put("/api/profile", json=payload)
+    assert r.status_code == 422
+    body = r.json()
+    assert "work_history.0.company" in body["errors"]
+    assert "work_history.0.title" in body["errors"]
+
+
+def test_put_blank_education_institution_returns_422(client, profile_path):
+    payload = {
+        "candidate_name": "Jane Doe", "candidate_email": "jane@example.com",
+        "candidate_phone": "+91-1",
+        "work_history": [],
+        "education": [{"institution": "", "degree": "B.Tech", "field": "CS",
+                       "start": "2016", "end": "2020"}],
+    }
+    r = client.put("/api/profile", json=payload)
+    assert r.status_code == 422
+    assert "education.0.institution" in r.json()["errors"]
