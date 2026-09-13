@@ -478,6 +478,14 @@ def _result_codes_section() -> str:
     )
 
 
+def pinned_section(answers: dict) -> str:
+    """PREVIOUSLY ANSWERED: in a fresh prompt, and after a resume's CONTINUE line."""
+    pinned = "\n".join(f"- {q} -> {a}" for q, a in answers.items()) or "(none recorded)"
+    return ("== PREVIOUSLY ANSWERED (use verbatim) ==\nA human already "
+            "answered these for this application; use each answer exactly "
+            "as written for its question:\n" + pinned)
+
+
 def build_prompt(job, profile, brief, qa_rows, resume_text, resume_path, *,
                  mode, can_submit, nonce, pinned_answers=None, score=None) -> str:
     """Build the full playbook prompt for one job's apply agent session. Pure
@@ -522,11 +530,7 @@ def build_prompt(job, profile, brief, qa_rows, resume_text, resume_path, *,
         f"== KNOWN ANSWERS (prefer these verbatim) ==\n{known_answers}",
     ]
     if pinned_answers is not None:
-        pinned = ("\n".join(f"- {q} -> {a}" for q, a in pinned_answers.items())
-                  or "(none recorded)")
-        data.append("== PREVIOUSLY ANSWERED (use verbatim) ==\nA human already "
-                    "answered these for this application; use each answer exactly "
-                    "as written for its question:\n" + pinned)
+        data.append(pinned_section(pinned_answers))
     rules = [
         _hard_rules_section(),
         _never_do_section(),
@@ -806,7 +810,7 @@ RUNS: "dict[int, AgentRun]" = {}   # job_id -> its live run; the answer API send
 def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events,
                 cdp_port: int = 9222, timeout_s: float = 1200,
                 answer_wait_s: float = 1800, model: str = APPLY_MODEL, resume: bool = False,
-                popen=None) -> AgentResult:
+                resume_output_s: float = 30, popen=None) -> AgentResult:
     """One apply session on apply/runner.py's AgentRun, stdin kept open so
     the human's answers reach the same session. `events` (a RunEvents) fire
     on AgentRun's reader thread. `popen` is the test seam for the child.
@@ -832,7 +836,12 @@ def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events
     run is by definition not a crashed one, and this watchdog still ends it.
 
     `nonce` must be the one build_prompt stamped into `prompt`; it is the
-    only thing parse_result will accept a result line under."""
+    only thing parse_result will accept a result line under.
+
+    `resume=True` (`--resume <session_id>`): a session that says nothing
+    within resume_output_s is killed as `resume_failed` and ats.submit falls
+    back to a fresh run -- the CLI's behavior on a missing session was never
+    verified live, so neither an error exit nor a hang is assumed."""
     from career_agent.apply.runner import AgentRun   # runner imports this module
 
     require_binaries()  # backstop; ats.submit() checks this before any write
@@ -875,7 +884,9 @@ def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events
         while not run.done.wait(step):
             now = time.monotonic()
             elapsed, last = now - last, now
-            if run.waiting.is_set():
+            if resume and not run.spoke and time.time() - start > resume_output_s:
+                killed_for = "resume_failed"
+            elif run.waiting.is_set():
                 waited += elapsed
                 if waited > answer_wait_s:
                     killed_for = "answer_timeout"

@@ -999,3 +999,14 @@ def test_profile_section_empty_sections():
                    for ln in p.splitlines())
     assert "Work history:\n(none recorded)" in s
     assert "Education:\n(none recorded)" in s
+
+
+def test_a_resume_that_never_speaks_is_killed_as_resume_failed(child):
+    """--resume on a session the CLI cannot find: no assistant output, so the
+    run is ended quickly and ats.submit falls back to a fresh session."""
+    started = time.monotonic()
+    r = agent_mod.run_session("CONTINUE", job_id=7, nonce=N, session_id="s-1",
+                              events=RunEvents(), timeout_s=30, resume=True,
+                              resume_output_s=0.3, popen=lambda *a, **kw: child)
+    assert time.monotonic() - started < 5
+    assert (r.code, r.reason) == ("failed", "resume_failed")

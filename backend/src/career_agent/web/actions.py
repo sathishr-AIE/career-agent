@@ -9,6 +9,7 @@ render time (app.py's _span), so a message never gets double-escaped and
 the JSON side gets clean text."""
 import datetime as dt
 import json
+import logging
 import os
 import sqlite3
 import tomllib
@@ -20,10 +21,13 @@ from pydantic import ValidationError
 from career_agent import chat, outcomes, store, tailor
 from career_agent.apply import agent as agent_mod
 from career_agent.apply import ats as ats_apply
+from career_agent.apply import checkpoint
 from career_agent.config import (SCORING_MODELS, CandidateProfile,
                                  CareerBrief, load_brief, save_brief,
                                  save_candidate_profile)
 from career_agent.web import context, worker
+
+log = logging.getLogger(__name__)
 
 
 def _unpark(conn: sqlite3.Connection, job_id: int) -> None:
@@ -208,6 +212,21 @@ def _refuse(code: int, message: str) -> dict:
     return {"ok": False, "code": code, "message": message}
 
 
+def _checkpoint_answer(conn, job_id: int, prompt_id: int, kind: str, payload: dict,
+                       body: dict) -> None:
+    """What the run was told, for a resume's PREVIOUSLY ANSWERED. A sensitive
+    answer is never written down; a CONFIRM pins only the human's changes.
+    Never fails the answer: it already reached the agent."""
+    if kind == "confirm":
+        answers = body.get("changes", {})
+    else:
+        answers = {} if payload.get("sensitive") else {payload.get("question", kind): body["answer"]}
+    try:
+        checkpoint.mark_running(conn, job_id, f"answered {prompt_id}", answers)
+    except Exception:
+        log.warning("could not checkpoint answer %s for job %s", prompt_id, job_id, exc_info=True)
+
+
 def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
                   conn_factory=None) -> dict:
     """Answer one open ASK/CONFIRM card: validate it against the prompt's
@@ -284,6 +303,7 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
     if not run.send(agent_mod.answer_line(run.nonce, kind, body)):
         chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
         return _refuse(409, _NO_RUN)
+    _checkpoint_answer(conn, row["job_id"], prompt_id, kind, payload, body)
     chat.post_message(conn, row["conversation_id"], "user", summary)
     return {"ok": True, "message": "Answer sent"}
 

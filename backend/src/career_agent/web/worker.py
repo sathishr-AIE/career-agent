@@ -7,7 +7,9 @@ from pathlib import Path
 from career_agent import chat
 from career_agent import run as run_module
 from career_agent import store, tailor
+from career_agent.apply import agent as agent_mod
 from career_agent.apply import ats as ats_apply
+from career_agent.apply import checkpoint
 from career_agent.config import load_brief, load_candidate_profile
 
 log = logging.getLogger(__name__)
@@ -52,6 +54,12 @@ QUEUE_WHERE = """
    )
    AND (SELECT ap.status FROM application ap WHERE ap.job_id = j.id
         ORDER BY ap.id DESC LIMIT 1) IS NOT 'draft'
+   -- A resumable stop leaves no application row (it consumes no attempt);
+   -- this keeps it from being re-picked as a fresh job. Resume it instead.
+   AND NOT EXISTS (
+       SELECT 1 FROM apply_checkpoint cp
+        WHERE cp.job_id = j.id AND cp.status = 'resumable'
+   )
 """
 
 CANDIDATE_SQL = f"""
@@ -238,6 +246,9 @@ async def apply_worker_loop(conn_factory, brief_path, profile_path,
     fresh connection, matching the rest of the app's per-call pattern.
     chat_conn_factory (default: conn_factory) is the lighter one handed to
     submit() for the agent's narration (see ats._chat_events)."""
+    # A checkpoint left running/waiting by a crashed server is resumable.
+    checkpoint.sweep_orphans(conn_factory(), {jid for jid, run in agent_mod.RUNS.items()
+                                              if not run.done.is_set()})
     while True:
         conn = conn_factory()
         state = get_run_state(conn, "apply")

@@ -745,3 +745,27 @@ async def test_a_chat_write_failure_does_not_change_the_tick(
     await worker.apply_tick(conn, brief_path, profile_path, broken_factory)
     state = worker.get_run_state(conn, "apply")
     assert state["status"] == "running" and state["current_job_id"] == job_id
+
+
+async def test_the_loop_sweeps_orphaned_checkpoints_on_start(conn, brief_path, profile_path, monkeypatch):
+    """A running checkpoint with no live run (a crashed server) becomes resumable;
+    one a live run is still driving is left alone."""
+    from career_agent.apply import agent as agent_mod
+    from career_agent.apply import checkpoint
+
+    a, b = _job(conn, "orphan"), _job(conn, "live")
+    checkpoint.start(conn, a, "s1", "n")
+    checkpoint.start(conn, b, "s2", "n")
+
+    class Live:
+        done = asyncio.Event()      # has .is_set() -> False
+    monkeypatch.setattr(agent_mod, "RUNS", {b: Live()})
+    task = asyncio.create_task(worker.apply_worker_loop(lambda: conn, brief_path, profile_path))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert checkpoint.get(conn, a)["status"] == "resumable"
+    assert checkpoint.get(conn, b)["status"] == "running"

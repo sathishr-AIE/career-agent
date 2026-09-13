@@ -8,10 +8,13 @@ import logging
 import re
 import shutil
 import sqlite3
+import threading
+import uuid
 from pathlib import Path
 
 from career_agent import chat
 from career_agent.apply import agent as agent_mod
+from career_agent.apply import checkpoint
 from career_agent.apply.runner import RunEvents
 from career_agent.config import CandidateProfile, CareerBrief
 from career_agent.models import Job
@@ -60,6 +63,14 @@ PERMANENT_REASONS = {
 UNKNOWN_STATE_REASONS = {"agent_error", "timeout", "no_result_line",
                          "unrecognized_result"}
 
+# Stops that interrupt a run which can pick up where it left off (Task 10):
+# the checkpoint becomes `resumable`, the in_flight row is removed, and NO
+# attempt is consumed (worker.QUEUE_WHERE keeps a resumable job out of the
+# queue instead). A crash/kill (asyncio cancellation) is handled the same way
+# in submit(). Never resumable when the run might have sent -- see
+# _might_have_sent.
+RESUMABLE_REASONS = {"timeout", "answer_timeout", "agent_error"}
+
 QA_VOLATILE_WINDOW_DAYS = 30
 
 
@@ -81,6 +92,10 @@ def _blocking_status(conn, job_id: int):
         f"({','.join('?' * len(BLOCKING))})", (job_id, *BLOCKING)).fetchone()
 
 
+def _not_resumable(job_id: int) -> dict:
+    return {"ok": False, "reason": f"job {job_id} has no resumable checkpoint"}
+
+
 def _blocked(job_id: int, live) -> dict:
     return {"ok": False,
             "reason": f"job {job_id} already has a {live['status']} attempt"}
@@ -94,6 +109,14 @@ def classify_failure(reason: str, prior_failures: int) -> str:
 
 def is_unknown_state(reason: str) -> bool:
     return reason.split(":", 1)[0].strip() in UNKNOWN_STATE_REASONS
+
+
+def _might_have_sent(can_submit: bool, mode: str, approved_any: bool, reason: str) -> bool:
+    """Whether an interrupted run could have clicked Submit (narrowed I4).
+    A DECISION approve went out; or an auto run -- pre-approved, and its
+    CONFIRM and Submit can share the turn the stop cut short -- died mid-turn
+    (answer_timeout is a wait at an ASK, not mid-turn)."""
+    return can_submit and (approved_any or (mode == "auto" and is_unknown_state(reason)))
 
 
 def sweep_stale_in_flight(conn: sqlite3.Connection, minutes: int = 30) -> int:
@@ -138,7 +161,8 @@ def preflight() -> None:
 
 
 async def _live_run_agent(prompt: str, job_id: int, nonce: str,
-                          events: RunEvents):
+                          events: RunEvents, session_id: str | None = None,
+                          resume: bool = False):
     """Default agent runner: a real Chrome around a real `claude` session.
     Tests inject their own run_agent instead -- nothing in the test suite
     ever reaches this, by house convention (no test spawns a browser or a
@@ -148,7 +172,8 @@ async def _live_run_agent(prompt: str, job_id: int, nonce: str,
     proc = chrome_mod.launch_chrome()
     try:
         return await agent_mod.run_agent(prompt, job_id=job_id, nonce=nonce,
-                                         events=events)
+                                         events=events, session_id=session_id,
+                                         resume=resume)
     except asyncio.CancelledError:
         _kill_live(job_id, events)   # before cleanup: never leave claude driving a dead Chrome
         raise
@@ -209,14 +234,23 @@ def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual",
         with_conn(lambda c: chat.post_message(
             c, chat.conversation_for_job(c, job_id), role, content), f"a {role} message")
 
+    # Any sign of life from the session: a resume that shows none fell back.
+    heard = threading.Event()
+
     def on_ask(payload: dict) -> None:
-        with_conn(lambda c: chat.open_prompt(c, job_id, payload["kind"], payload), "an ASK")
+        heard.set()
+        with_conn(lambda c: checkpoint.mark_waiting(
+            c, job_id, chat.open_prompt(c, job_id, payload["kind"], payload)), "an ASK")
 
     def on_confirm(payload: dict) -> None:
+        heard.set()
+
         def record(c):
             pid = chat.open_prompt(c, job_id, "confirm", payload)
+            checkpoint.mark_waiting(c, job_id, pid)
             if mode != "auto" or chat.answer_prompt_row(c, pid, {"decision": "approve"}) is None:
                 return False
+            checkpoint.mark_running(c, job_id, f"approved {pid}", {})
             chat.post_message(c, chat.conversation_for_job(c, job_id), "system",
                               "Auto mode: application summary approved without review")
             return True
@@ -226,6 +260,7 @@ def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual",
                 run.send(agent_mod.answer_line(nonce, "confirm", {"decision": "approve"}))
 
     def on_tool(name: str, summary: str) -> None:
+        heard.set()
         if name in _NARRATED_TOOLS:
             post("system", f"{name} {summary}")
 
@@ -233,13 +268,17 @@ def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual",
                 agent_mod.confirm_prefix(nonce))
 
     def on_text(text: str) -> None:
+        heard.set()
         kept = "\n".join(l for l in text.splitlines()
                          if not agent_mod.strip_decoration(l).startswith(protocol)).strip()
         if kept:
             post("agent", kept)
 
-    return RunEvents(on_text=on_text, on_tool=on_tool, on_ask=on_ask, on_confirm=on_confirm,
-                     prompt_baseline=prompt_baseline)
+    events = RunEvents(on_text=on_text, on_tool=on_tool, on_ask=on_ask, on_confirm=on_confirm,
+                       on_turn_end=lambda cost, usage: heard.set(),
+                       prompt_baseline=prompt_baseline)
+    events.heard = heard
+    return events
 
 
 def _resume_text(row) -> str:
@@ -360,7 +399,8 @@ def _confirm_outcome(conn, job_id: int, baseline: int) -> tuple[dict, str | None
 
 
 def _record_outcome(conn, job_id: int, app_id: int, url: str, result,
-                    detail: str, can_submit: bool, confirm: tuple) -> dict:
+                    detail: str, can_submit: bool, confirm: tuple,
+                    mode: str = "manual") -> dict:
     """The one outcome recorder: turns this run's in_flight row into what
     happened. Every non-submitted UPDATE/DELETE is guarded on
     `status = 'in_flight'`: a run can outlive sweep_stale_in_flight and come
@@ -421,6 +461,11 @@ def _record_outcome(conn, job_id: int, app_id: int, url: str, result,
         status, reason = "held_unknown", "applied_during_draft"
     else:
         reason = _reason_of(result)
+        if (reason in RESUMABLE_REASONS
+                and not _might_have_sent(can_submit, mode, approved_any, reason)
+                and _drop_in_flight(conn, job_id, app_id, f"{reason} {detail or result.transcript_path}")):
+            return {"ok": False, "resumable": True,
+                    "reason": f"stopped ({detail or reason}); resumable"}
         # Unknown-state reasons hold only when a submit was possible at all.
         # answer_timeout is retryable unless a DECISION approve went out in a
         # run that could submit: a post-submit questionnaire can ASK after the
@@ -439,8 +484,29 @@ def _record_outcome(conn, job_id: int, app_id: int, url: str, result,
     return {"ok": False, "reason": f"{status}: {detail or reason}"}
 
 
+def _drop_in_flight(conn, job_id: int, app_id: int, payload: str) -> bool:
+    """A resumable stop: no attempt row, a `resumable` event. False when the
+    row is no longer in_flight (swept to held_unknown): that hold stands."""
+    gone = conn.execute("DELETE FROM application WHERE id = ? AND status = 'in_flight'",
+                        (app_id,)).rowcount
+    if gone:
+        conn.execute("INSERT INTO event (job_id, type, payload) VALUES (?, 'resumable', ?)",
+                     (job_id, payload.strip()))
+    conn.commit()
+    return bool(gone)
+
+
+def _checkpoint(fn, *args) -> None:
+    """A checkpoint write failure is logged, never allowed to alter the run."""
+    try:
+        fn(*args)
+    except Exception:
+        log.warning("checkpoint %s failed for job %s", fn.__name__, args[1], exc_info=True)
+
+
 async def _run(runner, prompt: str, job_id: int, nonce: str,
-               events: RunEvents) -> tuple:
+               events: RunEvents, session_id: str | None = None,
+               resume: bool = False) -> tuple:
     """run_agent does not return an AgentResult on every path -- a broken
     stdin pipe or a missing `claude`/`npx` binary raises out of it. Turn
     that into a recordable result so the caller always has one, and never
@@ -450,7 +516,7 @@ async def _run(runner, prompt: str, job_id: int, nonce: str,
     event payload, so `failure_reason` stays the queryable taxonomy slug
     the schema promises (spec section 5.3)."""
     try:
-        result = await runner(prompt, job_id, nonce, events)
+        result = await runner(prompt, job_id, nonce, events, session_id=session_id, resume=resume)
         # The only place the run's price is recorded: AgentResult carries
         # cost_usd/duration_ms, there is no DB column for either (P0), and
         # the transcript footer is the other half of the record.
@@ -479,7 +545,7 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
                  brief: CareerBrief,
                  profile: CandidateProfile | None = None,
                  resume_version: str | None = None,
-                 run_agent=None, conn_factory=None) -> dict:
+                 run_agent=None, conn_factory=None, resume: bool = False) -> dict:
     """Run one apply-agent session for a job and translate its AgentResult
     into this module's state machine. `mode` is "manual" (every CONFIRM
     waits for the human's DECISION in the job chat) or "auto" (CONFIRMs are
@@ -488,10 +554,16 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
     seam); without it the run still fills and CONFIRMs, never clicks Submit,
     and ends DRAFT_READY.
 
-    `run_agent`: `async (prompt, job_id, nonce, events: RunEvents) ->
-    AgentResult`. `conn_factory` is a zero-arg callable returning a NEW
-    connection; with it narration, ASK and CONFIRM cards reach the job's
-    conversation (see _chat_events), without it they are no-ops."""
+    `run_agent`: `async (prompt, job_id, nonce, events: RunEvents,
+    session_id=None, resume=False) -> AgentResult`. `conn_factory` is a
+    zero-arg callable returning a NEW connection; with it narration, ASK and
+    CONFIRM cards reach the job's conversation (see _chat_events), without it
+    they are no-ops.
+
+    `resume=True` continues the job's `resumable` checkpoint: the same
+    session (`--resume`) and nonce, a CONTINUE message plus PREVIOUSLY
+    ANSWERED as the first message. A resume the session never answers falls
+    back to a fresh session with the full prompt and the same pinned answers."""
     if mode not in ("manual", "auto"):
         raise ValueError(f"unknown mode {mode!r}")
     row = conn.execute("SELECT * FROM job WHERE id = ?", (job_id,)).fetchone()
@@ -501,6 +573,9 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
     live = _blocking_status(conn, job_id)
     if live:
         return _blocked(job_id, live)
+    cp = checkpoint.get(conn, job_id) if resume else None
+    if resume and (cp is None or cp["status"] != "resumable"):
+        return _not_resumable(job_id)
 
     if profile is None:
         raise RuntimeError(
@@ -574,9 +649,15 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
     # One unguessable token per run, stamped into every protocol line the
     # prompt teaches and the only one the parsers accept back -- a job page
     # cannot guess it, so it cannot forge an outcome, a CONFIRM, or an ASK.
-    nonce = agent_mod.new_nonce()
+    # A resume keeps the nonce: the resumed session already knows it.
+    nonce = cp["nonce"] if resume else agent_mod.new_nonce()
+    pinned = cp["answers"] if resume else None
     prompt = agent_mod.build_prompt(*prompt_args, mode=mode, can_submit=can_submit,
-                                    nonce=nonce, score=score)
+                                    nonce=nonce, pinned_answers=pinned, score=score)
+    session_id = cp["session_id"] if resume else str(uuid.uuid4())
+    # The resumed session already has the prompt: only what is new since.
+    first = (checkpoint.continue_message(cp, nonce) + "\n\n" + agent_mod.pinned_section(pinned)
+             if resume else prompt)
 
     # The in_flight row is written INSIDE the lock, for every run: started_at
     # is what sweep_stale_in_flight measures, so a run queued behind another
@@ -590,6 +671,8 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
         live = _blocking_status(conn, job_id)
         if live:
             return _blocked(job_id, live)
+        if resume and (checkpoint.get(conn, job_id) or {}).get("status") != "resumable":
+            return _not_resumable(job_id)       # resumed (or restarted) while queued
         # A crashed run's cards can never be answered; this run's cards are
         # the ones created after `baseline` (the answer API refuses older).
         chat.expire_open_prompts(conn, job_id)
@@ -601,11 +684,38 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
             (job_id, resume_version))
         app_id = cur.lastrowid
         conn.commit()
-        result, detail = await _run(runner, prompt, job_id, nonce, events)
+        if resume:
+            _checkpoint(checkpoint.mark_running, conn, job_id, "resumed", {})
+        else:
+            _checkpoint(checkpoint.start, conn, job_id, session_id, nonce)
+        try:
+            result, detail = await _run(runner, first, job_id, nonce, events,
+                                        session_id=session_id, resume=resume)
+            if resume and result.code == "failed" and not events.heard.is_set():
+                # --resume never verified live: a session that said nothing
+                # did nothing, so a fresh one with the answers pinned is safe.
+                log.info("resume_fallback for job %s (%s)", job_id, _reason_of(result))
+                session_id = str(uuid.uuid4())
+                _checkpoint(checkpoint.start, conn, job_id, session_id, nonce)
+                _checkpoint(checkpoint.mark_running, conn, job_id, "resume_fallback", pinned)
+                result, detail = await _run(runner, prompt, job_id, nonce, events,
+                                            session_id=session_id, resume=False)
+        except asyncio.CancelledError:
+            # A kill mid-run: resumable, unless it might have sent -- then the
+            # in_flight row stays for sweep_stale_in_flight to hold, as before.
+            approved_any = _confirm_outcome(conn, job_id, baseline)[2]
+            if (not _might_have_sent(can_submit, mode, approved_any, "agent_error")
+                    and _drop_in_flight(conn, job_id, app_id, "cancelled mid-run")):
+                _checkpoint(checkpoint.mark_resumable, conn, job_id)
+            else:
+                _checkpoint(checkpoint.finish, conn, job_id)
+            raise
     # Outcome first, cards second: once the in_flight row is gone a refused
     # answer can no longer reopen a card (chat.reopen_prompt_row).
     outcome = _record_outcome(conn, job_id, app_id, row["url"], result, detail,
-                              can_submit, _confirm_outcome(conn, job_id, baseline))
+                              can_submit, _confirm_outcome(conn, job_id, baseline), mode)
+    _checkpoint(checkpoint.mark_resumable if outcome.get("resumable") else checkpoint.finish,
+                conn, job_id)
     chat.expire_open_prompts(conn, job_id)
     if outcome.get("needs_answer"):
         # The worker parks on this; the card is how the human unparks it

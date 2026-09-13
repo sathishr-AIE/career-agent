@@ -56,7 +56,7 @@ def fake_agent(result: AgentResult):
     """The one test seam. Nothing in this file may launch Chrome, spawn a
     subprocess, or need the `claude`/`npx` binaries -- every case injects
     this instead of letting submit() reach _live_run_agent."""
-    async def _fake(prompt, job_id, nonce, events):
+    async def _fake(prompt, job_id, nonce, events, session_id=None, resume=False):
         _fake.prompts.append(prompt)
         _fake.job_ids.append(job_id)
         _fake.nonces.append(nonce)
@@ -288,7 +288,7 @@ async def test_an_unknown_state_send_holds_instead_of_retrying(conn, reason):
     have clicked Submit before it died. Retrying would be a double-submit
     the moment SUBMISSION_IMPLEMENTED flips, so the row must BLOCK."""
     if reason == "agent_error":
-        async def runner(prompt, job_id, nonce, events):
+        async def runner(prompt, job_id, nonce, events, session_id=None, resume=False):
             raise RuntimeError("claude CLI not on PATH")
     else:
         runner = fake_agent(AgentResult("failed", reason))
@@ -304,17 +304,13 @@ async def test_an_unknown_state_send_holds_instead_of_retrying(conn, reason):
     assert not again["ok"] and "already has" in again["reason"]
 
 
-@pytest.mark.parametrize("reason", UNKNOWN_STATE)
+@pytest.mark.parametrize("reason", ("no_result_line", "unrecognized_result:BLAH"))
 async def test_the_same_reasons_stay_retryable_when_submission_is_off(conn, monkeypatch, reason):
     """With the kill switch off nothing could have been submitted, so
-    re-running is free and correct."""
+    re-running is free and correct. (timeout and agent_error are resumable
+    stops since Task 10 -- see the S3 tests.)"""
     monkeypatch.setattr(ats_apply, "preflight", lambda: None)
-    if reason == "agent_error":
-        async def runner(prompt, job_id, nonce, events):
-            raise RuntimeError("nope")
-        monkeypatch.setattr(ats_apply, "_live_run_agent", runner)
-    else:
-        _use_live_fake(monkeypatch, AgentResult("failed", reason))
+    _use_live_fake(monkeypatch, AgentResult("failed", reason))
 
     r = await _submit(conn, mode="manual")
     assert not r["ok"]
@@ -326,7 +322,7 @@ async def test_the_same_reasons_stay_retryable_when_submission_is_off(conn, monk
 async def test_an_agent_crash_keeps_the_slug_and_logs_the_detail(conn):
     """failure_reason stays a queryable taxonomy slug (spec 5.3); the
     exception text lands in the event payload instead."""
-    async def boom(prompt, job_id, nonce, events):
+    async def boom(prompt, job_id, nonce, events, session_id=None, resume=False):
         raise RuntimeError("claude CLI not on PATH")
 
     r = await _submit(conn, mode="auto", run_agent=boom)
@@ -476,7 +472,7 @@ def no_live_runner(monkeypatch):
     """Belt and braces for the tests below, which are the only ones that
     reach submit() with run_agent=None on a path that could otherwise
     launch Chrome."""
-    async def _never(prompt, job_id, nonce, events):
+    async def _never(prompt, job_id, nonce, events, session_id=None, resume=False):
         raise AssertionError("the live runner must never run in a test")
     monkeypatch.setattr(ats_apply, "_live_run_agent", _never)
 
@@ -517,7 +513,7 @@ async def test_preflight_is_skipped_when_a_runner_is_injected(conn, monkeypatch)
 async def test_a_precondition_escaping_mid_run_is_not_unknown_state(conn):
     """The backstop check inside run_session: nothing launched, so
     the send path must not hold it as 'possibly submitted'."""
-    async def boom(prompt, job_id, nonce, events):
+    async def boom(prompt, job_id, nonce, events, session_id=None, resume=False):
         raise agent_mod.PreconditionError("Chrome not found -- set CHROME_PATH")
 
     r = await _submit(conn, mode="auto", run_agent=boom)
@@ -533,7 +529,7 @@ def _sweeping_agent(conn, result):
     """A run that outlives sweep_stale_in_flight's window:
     if the deadline's kill fails to land, the sweep flips the row to
     held_unknown while the agent is still driving the browser."""
-    async def _fake(prompt, job_id, nonce, events):
+    async def _fake(prompt, job_id, nonce, events, session_id=None, resume=False):
         conn.execute("UPDATE application SET started_at ="
                      " datetime('now', '-45 minutes') WHERE status = 'in_flight'")
         conn.commit()
@@ -683,7 +679,7 @@ async def test_an_auto_submit_with_no_answers_is_recorded_and_flagged(conn):
 async def test_a_submit_with_an_approved_confirm_is_not_flagged(conn, tmp_path):
     factory = lambda: db.connect(tmp_path / "t.db")
 
-    async def fake(prompt, job_id, nonce, events):
+    async def fake(prompt, job_id, nonce, events, session_id=None, resume=False):
         events.on_confirm({"fields": [{"label": "q", "value": "a"}], "files": [],
                            "account_actions": [], "memory_used": [], "notes": ""})
         return AgentResult("applied")
@@ -716,7 +712,7 @@ async def test_two_agent_runs_never_overlap(conn):
     live = 0
     peak = 0
 
-    async def runner(prompt, job_id, nonce, events):
+    async def runner(prompt, job_id, nonce, events, session_id=None, resume=False):
         nonlocal live, peak
         live += 1
         peak = max(peak, live)
@@ -741,7 +737,7 @@ async def test_a_queued_send_does_not_age_its_own_in_flight_row(conn):
     job2 = _second_job(conn)
     started = []
 
-    async def runner(prompt, job_id, nonce, events):
+    async def runner(prompt, job_id, nonce, events, session_id=None, resume=False):
         row = conn.execute("SELECT COUNT(*) n FROM application"
                            " WHERE status = 'in_flight'").fetchone()
         started.append(row["n"])
@@ -767,12 +763,12 @@ async def test_two_same_job_sends_produce_one_row_and_one_refusal(conn):
     job2 = _second_job(conn)
     holding = asyncio.Event()
 
-    async def holder(prompt, job_id, nonce, events):
+    async def holder(prompt, job_id, nonce, events, session_id=None, resume=False):
         holding.set()
         await asyncio.sleep(0.05)
         return AgentResult("draft_ready", answers={})
 
-    async def runner(prompt, job_id, nonce, events):
+    async def runner(prompt, job_id, nonce, events, session_id=None, resume=False):
         await asyncio.sleep(0.01)
         return AgentResult("applied", answers={"q": "a"})
 
@@ -961,7 +957,7 @@ async def test_two_jobs_do_not_share_one_staged_resume(conn, tmp_path):
 
     staged = {}
 
-    async def runner(prompt, job_id, nonce, events):
+    async def runner(prompt, job_id, nonce, events, session_id=None, resume=False):
         staged[job_id] = _upload_path(prompt)
         await asyncio.sleep(0.01)
         return AgentResult("draft_ready", answers={})
@@ -1007,7 +1003,7 @@ async def test_live_events_post_agent_messages(conn, tmp_path):
     connection gets the messages in."""
     factory = lambda: db.connect(tmp_path / "t.db")   # the conn fixture's file
 
-    async def fake(prompt, job_id, nonce, events):
+    async def fake(prompt, job_id, nonce, events, session_id=None, resume=False):
         def narrate():
             events.on_text("Navigating to the posting")
             events.on_tool("browser_navigate", '{"url":"https://x"}')
@@ -1030,7 +1026,7 @@ async def test_protocol_lines_are_kept_out_of_the_chat(conn, tmp_path):
     shows the narration around them, never the lines themselves."""
     factory = lambda: db.connect(tmp_path / "t.db")
 
-    async def fake(prompt, job_id, nonce, events):
+    async def fake(prompt, job_id, nonce, events, session_id=None, resume=False):
         events.on_text(f'Filling the form\nASK:{nonce}:{{"id":"q1","kind":"text","question":"x"}}')
         events.on_text(f'  CONFIRM:{nonce}:{{"fields":[]}}')
         events.on_text(f"RESULT:{nonce}:DRAFT_READY")
@@ -1054,7 +1050,7 @@ async def test_a_failing_chat_write_does_not_change_the_outcome(conn, tmp_path):
         c.close()
         return c
 
-    async def fake(prompt, job_id, nonce, events):
+    async def fake(prompt, job_id, nonce, events, session_id=None, resume=False):
         events.on_text("Navigating")
         events.on_tool("browser_click", "{}")
         return AgentResult("draft_ready", answers={})
@@ -1066,7 +1062,7 @@ async def test_a_failing_chat_write_does_not_change_the_outcome(conn, tmp_path):
 async def test_without_a_conn_factory_the_runner_still_gets_events(conn):
     got = []
 
-    async def fake(prompt, job_id, nonce, events):
+    async def fake(prompt, job_id, nonce, events, session_id=None, resume=False):
         events.on_text("hi")          # a no-op, not a crash
         got.append(events)
         return AgentResult("draft_ready", answers={})
@@ -1137,7 +1133,7 @@ def _waiting_on(run, events, kind, payload):
 async def test_ask_opens_a_prompt_and_answer_reaches_the_run(conn, runs, factory):
     from career_agent.web import actions
 
-    async def fake(prompt, jid, nonce, events):
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
         run = runs[jid] = FakeRun(nonce, events)
         _waiting_on(run, events, "ask", {
             "id": "q1", "kind": "choice", "question": "Notice?", "options": ["30", "60"],
@@ -1157,7 +1153,7 @@ async def test_ask_opens_a_prompt_and_answer_reaches_the_run(conn, runs, factory
 
 
 async def test_confirm_in_auto_mode_is_auto_approved_and_recorded(conn, runs, factory):
-    async def fake(prompt, jid, nonce, events):
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
         run = runs[jid] = FakeRun(nonce, events)
         _waiting_on(run, events, "confirm", _confirm(Name="Asha"))
         assert run.sent == [f'DECISION:{nonce}:{{"decision": "approve"}}']
@@ -1175,7 +1171,7 @@ async def test_confirm_in_auto_mode_is_auto_approved_and_recorded(conn, runs, fa
 async def test_auto_approval_of_a_confirm_in_the_result_turn_still_records(conn, runs, factory):
     """The pre-approved agent CONFIRMs and submits without ending its turn:
     the run is not waiting, nothing is sent, and the CONFIRM still counts."""
-    async def fake(prompt, jid, nonce, events):
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
         run = runs[jid] = FakeRun(nonce, events)
         events.on_confirm(_confirm(Name="Asha"))          # not waiting
         assert run.sent == []
@@ -1188,7 +1184,7 @@ async def test_auto_approval_of_a_confirm_in_the_result_turn_still_records(conn,
 async def test_confirm_in_manual_mode_waits_for_a_decision(conn, runs, factory):
     from career_agent.web import actions
 
-    async def fake(prompt, jid, nonce, events):
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
         run = runs[jid] = FakeRun(nonce, events)
         _waiting_on(run, events, "confirm", _confirm(Name="Asha", Phone="+1"))
         await asyncio.sleep(0.05)
@@ -1212,7 +1208,7 @@ async def test_confirm_in_manual_mode_waits_for_a_decision(conn, runs, factory):
 
 
 async def test_a_manual_run_with_no_approved_confirm_records_no_answers(conn, runs, factory):
-    async def fake(prompt, jid, nonce, events):
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
         run = runs[jid] = FakeRun(nonce, events)
         _waiting_on(run, events, "confirm", _confirm(Name="Asha"))   # never approved
         return AgentResult("draft_ready")
@@ -1368,7 +1364,7 @@ async def test_a_stale_card_after_a_requeue_never_reaches_the_new_run(conn, runs
     from career_agent.web import actions
     stale = _open(conn, "confirm", _confirm(Name="old"))
 
-    async def fake(prompt, jid, nonce, events):
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
         run = runs[jid] = FakeRun(nonce, events)
         assert _prompt_status(factory(), stale)["status"] == "expired"
         _waiting_on(run, events, "ask", {"id": "q", "kind": "text", "question": "Notice?",
@@ -1392,7 +1388,7 @@ async def test_a_later_unapproved_confirm_is_not_recorded_as_approved(
     and nobody approved them -- #1 must not be recorded as their review."""
     from career_agent.web import actions
 
-    async def fake(prompt, jid, nonce, events):
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
         run = runs[jid] = FakeRun(nonce, events)
         _waiting_on(run, events, "confirm", _confirm(Name="Asha", Phone="+1"))
         first = chat.open_prompt_for_job(factory(), jid)["id"]
@@ -1425,7 +1421,7 @@ async def test_auto_approval_never_overrides_a_human_decision(conn, runs, factor
         return pid
     monkeypatch.setattr(ats_apply.chat, "open_prompt", human_cancels_first)
 
-    async def fake(prompt, jid, nonce, events):
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
         run = runs[jid] = FakeRun(nonce, events)
         _waiting_on(run, events, "confirm", _confirm(Name="Asha"))
         assert run.sent == [], "auto-approve overrode the human's cancel"
@@ -1436,14 +1432,14 @@ async def test_auto_approval_never_overrides_a_human_decision(conn, runs, factor
     assert not any("approved without review" in t for t in texts)
 
 
-@pytest.mark.parametrize("can_submit,expected", [(True, "held_unknown"), (False, "failed")])
+@pytest.mark.parametrize("can_submit,expected", [(True, "held_unknown"), (False, None)])
 async def test_answer_timeout_after_an_approve_holds_when_it_could_have_submitted(
         conn, runs, factory, monkeypatch, can_submit, expected):
     """I4: approve -> Submit -> a post-submit questionnaire ASKs -> silence.
     That run may have submitted; requeueing it would apply twice."""
     from career_agent.web import actions
 
-    async def fake(prompt, jid, nonce, events):
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
         run = runs[jid] = FakeRun(nonce, events)
         _waiting_on(run, events, "confirm", _confirm(Name="Asha"))
         pid = chat.open_prompt_for_job(factory(), jid)["id"]
@@ -1456,6 +1452,9 @@ async def test_answer_timeout_after_an_approve_holds_when_it_could_have_submitte
         monkeypatch.setattr(ats_apply, "_live_run_agent", fake)
         monkeypatch.setattr(ats_apply, "preflight", lambda: None)
         await _submit(conn, mode="manual", conn_factory=factory)
+    if expected is None:        # nothing could have been sent: a resumable stop
+        assert _apps(conn) == [] and checkpoint.get(conn, 1)["status"] == "resumable"
+        return
     row = _apps(conn)[-1]
     assert (row["status"], row["failure_reason"]) == (expected, "answer_timeout")
 
@@ -1466,7 +1465,7 @@ async def test_a_cancel_before_the_run_registers_marks_it_cancelled(conn, runs):
     got = {}
     started = asyncio.Event()
 
-    async def hangs(prompt, jid, nonce, events):
+    async def hangs(prompt, jid, nonce, events, session_id=None, resume=False):
         got["events"] = events
         started.set()
         await asyncio.sleep(30)
@@ -1482,7 +1481,7 @@ async def test_a_cancel_before_the_run_registers_marks_it_cancelled(conn, runs):
 # -- outcomes by can_submit ------------------------------------------------
 
 async def test_unknown_state_holds_only_when_submission_was_possible(conn, monkeypatch, no_live_runner):
-    r = await _submit(conn, mode="manual", run_agent=fake_agent(AgentResult("failed", "timeout")))
+    r = await _submit(conn, mode="manual", run_agent=fake_agent(AgentResult("failed", "no_result_line")))
     assert _apps(conn)[-1]["status"] == "held_unknown"
 
 
@@ -1493,16 +1492,16 @@ async def test_cancelled_is_a_human_decision_not_a_retry(conn):
 
 
 @pytest.mark.parametrize("can_submit", [True, False])
-async def test_answer_timeout_never_holds(conn, monkeypatch, can_submit):
+async def test_answer_timeout_without_an_approve_is_resumable(conn, monkeypatch, can_submit):
     result = AgentResult("failed", "answer_timeout")
     if can_submit:
         runner = fake_agent(result)
     else:
         runner = None
         _use_live_fake(monkeypatch, result)
-    await _submit(conn, mode="manual", run_agent=runner)
-    row = _apps(conn)[-1]
-    assert (row["status"], row["failure_reason"]) == ("failed", "answer_timeout")
+    r = await _submit(conn, mode="manual", run_agent=runner)
+    assert r["resumable"] and _apps(conn) == []
+    assert checkpoint.get(conn, 1)["status"] == "resumable"
 
 
 def _use_live_fake(monkeypatch, result):
@@ -1517,7 +1516,7 @@ def _use_live_fake(monkeypatch, result):
 async def test_cancelling_the_awaiting_task_kills_the_live_run(conn, runs):
     started = asyncio.Event()
 
-    async def hangs(prompt, jid, nonce, events):
+    async def hangs(prompt, jid, nonce, events, session_id=None, resume=False):
         runs[jid] = FakeRun(nonce, events)
         started.set()
         await asyncio.sleep(30)
@@ -1543,3 +1542,210 @@ async def test_needs_answer_opens_a_text_card_in_the_job_chat(conn):
         "why": "The agent stopped to ask this before continuing.",
         "origin": "needs_answer", "memory_key": None, "default": None,
         "options": [], "sensitive": False}
+
+
+# -- S3: checkpoints and resume (Task 10) -----------------------------------
+
+from career_agent.apply import checkpoint  # noqa: E402
+
+
+def _recording(result, calls, on_run=None):
+    """A runner that records the resume kwargs submit() hands it."""
+    async def _fake(prompt, jid, nonce, events, session_id=None, resume=False):
+        calls.append({"prompt": prompt, "nonce": nonce, "session_id": session_id,
+                      "resume": resume, "cp": checkpoint.get(_fake.conn, jid)})
+        if on_run:
+            return on_run(prompt, jid, nonce, events, session_id, resume)
+        return result
+    return _fake
+
+
+def _queue_ready(conn):
+    conn.execute("INSERT INTO assessment (job_id, stage, weighted_score, verdict, rationale,"
+                 " prompt_version, model) VALUES (1, 'scored', 80, 'submit', 'r', 'v', 'm')")
+    conn.commit()
+
+
+async def test_a_fresh_run_starts_a_checkpoint_with_its_session_id(conn):
+    calls = []
+    fake = _recording(AgentResult("draft_ready"), calls)
+    fake.conn = conn
+    await _submit(conn, mode="manual", run_agent=fake)
+    c = calls[0]
+    assert c["resume"] is False and c["session_id"]
+    assert c["cp"]["status"] == "running" and c["cp"]["session_id"] == c["session_id"]
+    assert c["cp"]["nonce"] == c["nonce"]
+    assert checkpoint.get(conn, 1)["status"] == "done"
+
+
+async def test_ask_and_confirm_mark_the_checkpoint_waiting(conn, runs, factory):
+    seen = []
+
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
+        run = runs[jid] = FakeRun(nonce, events)
+
+        def on_thread():      # reader-thread callbacks: the caller's conn is unusable there
+            _waiting_on(run, events, "ask", {"id": "q1", "kind": "text", "question": "Why?",
+                                             "options": [], "sensitive": False})
+        t = threading.Thread(target=on_thread)
+        t.start()
+        t.join()
+        seen.append(checkpoint.get(factory(), jid))
+        return AgentResult("draft_ready")
+
+    await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory)
+    pid = conn.execute("SELECT id FROM agent_prompt").fetchone()["id"]
+    assert (seen[0]["status"], seen[0]["open_prompt_id"]) == ("waiting", pid)
+
+
+@pytest.mark.parametrize("reason", ["timeout", "answer_timeout", "agent_error"])
+async def test_a_resumable_stop_consumes_no_attempt(conn, reason):
+    _queue_ready(conn)
+    if reason == "agent_error":
+        async def runner(prompt, jid, nonce, events, session_id=None, resume=False):
+            raise RuntimeError("claude died")
+    else:
+        runner = fake_agent(AgentResult("failed", reason))
+    for _ in range(ats_apply.MAX_ATTEMPTS + 1):
+        r = await _submit(conn, mode="manual", run_agent=runner)
+        assert not r["ok"] and r["resumable"]
+        assert checkpoint.get(conn, 1)["status"] == "resumable"
+    assert _apps(conn) == []                       # no failed / failed_permanent rows
+    assert _event_types(conn).count("resumable") == ats_apply.MAX_ATTEMPTS + 1
+    from career_agent.web import worker
+    assert worker.next_candidate(conn) is None     # not re-picked as a fresh job
+    checkpoint.finish(conn, 1)
+    assert worker.next_candidate(conn)["job_id"] == 1
+
+
+async def test_a_resumable_stop_holds_after_an_approve_when_it_could_submit(conn, runs, factory):
+    """Narrowed I4: the approve may have been followed by a Submit click."""
+    from career_agent.web import actions
+
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
+        run = runs[jid] = FakeRun(nonce, events)
+        _waiting_on(run, events, "confirm", _confirm(Name="Asha"))
+        pid = chat.open_prompt_for_job(factory(), jid)["id"]
+        assert actions.answer_prompt(factory(), pid, {"decision": "approve"}, factory)["ok"]
+        return AgentResult("failed", "timeout")
+
+    r = await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory)
+    assert not r.get("resumable")
+    assert _apps(conn)[-1]["status"] == "held_unknown"
+    assert checkpoint.get(conn, 1)["status"] == "done"
+
+
+async def test_a_resumable_stop_in_auto_mode_still_holds_when_it_could_submit(conn):
+    """Auto mode is pre-approved from the start and CONFIRM+Submit can share
+    one turn, so no recorded approve does not mean nothing was sent."""
+    r = await _submit(conn, mode="auto", run_agent=fake_agent(AgentResult("failed", "timeout")))
+    assert _apps(conn)[-1]["status"] == "held_unknown" and not r.get("resumable")
+    assert checkpoint.get(conn, 1)["status"] == "done"
+
+
+async def test_a_cancelled_run_is_left_resumable(conn):
+    started = asyncio.Event()
+
+    async def hangs(prompt, jid, nonce, events, session_id=None, resume=False):
+        started.set()
+        await asyncio.sleep(30)
+
+    task = asyncio.create_task(_submit(conn, mode="manual", run_agent=hangs))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _apps(conn) == []
+    assert checkpoint.get(conn, 1)["status"] == "resumable"
+
+
+def _resumable(conn, answers):
+    checkpoint.start(conn, 1, "sess-old", "oldnonce")
+    checkpoint.mark_running(conn, 1, "answered 4", answers)
+    checkpoint.mark_resumable(conn, 1)
+
+
+async def test_resume_reuses_the_session_and_nonce_and_sends_continue(conn):
+    _resumable(conn, {"Notice?": "30 days"})
+    calls = []
+    fake = _recording(AgentResult("draft_ready"), calls)
+    fake.conn = conn
+    r = await _submit(conn, mode="manual", run_agent=fake, resume=True)
+    assert r["ok"]
+    c = calls[0]
+    assert (c["resume"], c["session_id"], c["nonce"]) == (True, "sess-old", "oldnonce")
+    assert c["prompt"].startswith("CONTINUE:oldnonce:")
+    assert "== PREVIOUSLY ANSWERED" in c["prompt"] and "- Notice? -> 30 days" in c["prompt"]
+    assert checkpoint.get(conn, 1)["status"] == "done"
+
+
+async def test_resume_refuses_without_a_resumable_checkpoint(conn):
+    fake = fake_agent(AgentResult("draft_ready"))
+    r = await _submit(conn, mode="manual", run_agent=fake, resume=True)
+    assert not r["ok"] and "resumable" in r["reason"] and fake.prompts == []
+    checkpoint.start(conn, 1, "s", "n")                     # running, not resumable
+    r = await _submit(conn, mode="manual", run_agent=fake, resume=True)
+    assert not r["ok"] and fake.prompts == [] and _apps(conn) == []
+
+
+async def test_a_failed_resume_falls_back_to_a_fresh_pinned_run(conn, caplog):
+    _resumable(conn, {"Notice?": "30 days"})
+    calls = []
+
+    def on_run(prompt, jid, nonce, events, session_id, resume):
+        if resume:
+            return AgentResult("failed", "agent_error")     # no output at all
+        return AgentResult("draft_ready")
+
+    fake = _recording(None, calls, on_run)
+    fake.conn = conn
+    with caplog.at_level(logging.INFO):
+        r = await _submit(conn, mode="manual", run_agent=fake, resume=True)
+    assert r["ok"] and r["status"] == "draft"
+    assert [c["resume"] for c in calls] == [True, False]
+    fresh = calls[1]
+    assert fresh["session_id"] not in (None, "sess-old")
+    assert not fresh["prompt"].startswith("CONTINUE:")
+    assert "- Notice? -> 30 days" in fresh["prompt"] and "== JOB" in fresh["prompt"]
+    assert fresh["cp"]["session_id"] == fresh["session_id"]
+    assert fresh["cp"]["answers"] == {"Notice?": "30 days"}
+    assert "resume_fallback" in caplog.text
+    assert [a["status"] for a in _apps(conn)] == ["draft"]
+
+
+async def test_a_resume_that_produced_output_does_not_fall_back(conn):
+    _resumable(conn, {})
+    calls = []
+
+    def on_run(prompt, jid, nonce, events, session_id, resume):
+        events.on_text("Back on the form")
+        return AgentResult("failed", "stuck")
+
+    fake = _recording(None, calls, on_run)
+    fake.conn = conn
+    await _submit(conn, mode="manual", run_agent=fake, resume=True)
+    assert len(calls) == 1 and _apps(conn)[-1]["status"] == "failed"
+
+
+async def test_answer_prompt_records_the_answer_into_the_checkpoint(conn, runs, factory):
+    from career_agent.web import actions
+
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
+        run = runs[jid] = FakeRun(nonce, events)
+        _waiting_on(run, events, "ask", {"id": "q1", "kind": "text", "question": "Notice?",
+                                         "options": [], "sensitive": False})
+        pid = chat.open_prompt_for_job(factory(), jid)["id"]
+        assert actions.answer_prompt(factory(), pid, {"answer": "30"}, factory)["ok"]
+        cp = checkpoint.get(factory(), jid)
+        assert (cp["status"], cp["step"], cp["answers"]) == ("running", f"answered {pid}",
+                                                              {"Notice?": "30"})
+        # a refused send (the run is no longer waiting) records nothing
+        _waiting_on(run, events, "ask", {"id": "q2", "kind": "text", "question": "Visa?",
+                                         "options": [], "sensitive": False})
+        run.waiting.clear()
+        pid2 = chat.open_prompt_for_job(factory(), jid)["id"]
+        assert not actions.answer_prompt(factory(), pid2, {"answer": "no"}, factory)["ok"]
+        assert checkpoint.get(factory(), jid)["answers"] == {"Notice?": "30"}
+        return AgentResult("draft_ready")
+
+    assert (await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory))["ok"]

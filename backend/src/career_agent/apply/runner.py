@@ -54,6 +54,7 @@ class AgentRun:
         self.cost_total: float | None = None
         self.usage_total: dict = {}
         self.result_line: str | None = None
+        self.spoke = False                 # any assistant/result message yet (resume watchdog)
         self.done = threading.Event()
         self.waiting = threading.Event()   # ASK/CONFIRM emitted, turn ended
         self.nudges = 0
@@ -148,6 +149,8 @@ class AgentRun:
                     self._append(raw)
                     continue
                 t = msg.get("type")
+                if t in ("assistant", "result"):
+                    self.spoke = True
                 if t == "assistant":
                     self._add_usage(msg.get("message", {}))
                     for block in msg.get("message", {}).get("content", []):
