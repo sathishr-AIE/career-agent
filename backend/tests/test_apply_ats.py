@@ -1119,3 +1119,17 @@ async def test_without_a_conn_factory_the_runner_still_gets_events(conn):
 
     r = await _submit(conn, dry_run=True, run_agent=fake)
     assert r["ok"] and got
+
+
+def test_the_sweep_skips_a_job_whose_run_is_still_live(conn, monkeypatch):
+    """The work clock pauses while a human reads a card, so a healthy run can
+    outlive the 30-min window -- and web/app.py sweeps on every request."""
+    conn.execute("INSERT INTO application (job_id, resume_version, status,"
+                 " started_at) VALUES (1, 'v1', 'in_flight',"
+                 " datetime('now', '-45 minutes'))")
+    conn.commit()
+    monkeypatch.setattr(agent_mod, "RUNS", {1: object()})
+    assert ats_apply.sweep_stale_in_flight(conn) == 0
+    assert _apps(conn)[0]["status"] == "in_flight"
+    monkeypatch.setattr(agent_mod, "RUNS", {})
+    assert ats_apply.sweep_stale_in_flight(conn) == 1

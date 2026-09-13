@@ -10,7 +10,6 @@ import secrets
 import shutil as _shutil
 import subprocess
 import tempfile
-import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -728,7 +727,7 @@ RUNS: "dict[int, AgentRun]" = {}   # job_id -> its live run; the answer API send
 
 def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events,
                 cdp_port: int = 9222, timeout_s: float = 1200,
-                model: str = APPLY_MODEL, resume: bool = False,
+                answer_wait_s: float = 1800, model: str = APPLY_MODEL, resume: bool = False,
                 popen=None) -> AgentResult:
     """One apply session on apply/runner.py's AgentRun, stdin kept open so
     the human's answers reach the same session. `events` (a RunEvents) fire
@@ -745,6 +744,14 @@ def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events
     run past ten minutes -- a live SuccessFactors draft did -- and killing a
     healthy run costs a `failed:timeout` toward MAX_ATTEMPTS on the draft
     path and a `held_unknown` on the send path.
+
+    timeout_s is WORK time: the clock is paused while the agent waits on the
+    human (run.waiting), since a person reading a CONFIRM card is not a hung
+    session. Each wait gets answer_wait_s (30 min) of its own; past it the
+    run is killed as `answer_timeout`. A waiting run can therefore outlive
+    the 30-min sweep window (web/app.py sweeps on every request), so the
+    sweep skips any job with a live run registered in RUNS -- a registered
+    run is by definition not a crashed one, and this watchdog still ends it.
 
     `nonce` must be the one build_prompt stamped into `prompt`; it is the
     only thing parse_result will accept a result line under."""
@@ -771,26 +778,35 @@ def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events
 
     run = AgentRun(build_cmd(model, mcp_path, session_id, resume=resume),
                    session_dir, env, nonce, events, popen=popen)
-    # A wall-clock watchdog, not a wait timeout: a session that hangs with
-    # stdout open would otherwise hold the to_thread worker forever and
-    # orphan Chrome on port 9222. Killing the tree closes stdout, so the
-    # transcript collected so far survives.
-    timed_out = threading.Event()
-
-    def _watchdog():
-        timed_out.set()
-        run.kill()
-
-    alarm = threading.Timer(timeout_s, _watchdog)
-    alarm.daemon = True
+    # A watchdog, not a wait timeout: a session that hangs with stdout open
+    # would otherwise hold the to_thread worker forever and orphan Chrome on
+    # port 9222. Killing the tree closes stdout, so the transcript collected
+    # so far survives.
+    killed_for = None
+    step = min(1.0, timeout_s / 4, answer_wait_s / 4)
     RUNS[job_id] = run
     start = time.time()
-    alarm.start()
     try:
         run.start(prompt)
+        worked = waited = 0.0
+        last = time.monotonic()
+        while not run.done.wait(step):
+            now = time.monotonic()
+            elapsed, last = now - last, now
+            if run.waiting.is_set():
+                waited += elapsed
+                if waited > answer_wait_s:
+                    killed_for = "answer_timeout"
+            else:
+                waited = 0.0
+                worked += elapsed
+                if worked > timeout_s:
+                    killed_for = "timeout"
+            if killed_for:
+                run.kill()
+                break
         run.wait(None)
     finally:
-        alarm.cancel()
         RUNS.pop(job_id, None)
         if run.proc is not None:
             if run.proc.poll() is None:
@@ -807,10 +823,10 @@ def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events
     duration_ms = int((time.time() - start) * 1000)
     transcript = _write_transcript(log_dir, job_id, run.transcript, run.cost_total,
                                    duration_ms, run.usage_total)
-    # A deadline landing after the RESULT turn (before alarm.cancel) must
-    # not turn a real APPLIED into failed/timeout -> held_unknown.
-    if timed_out.is_set() and run.result_line is None:
-        result = AgentResult("failed", "timeout")
+    # A deadline landing just as the RESULT turn arrives must not turn a
+    # real APPLIED into failed/timeout -> held_unknown.
+    if killed_for and run.result_line is None:
+        result = AgentResult("failed", killed_for)
     else:
         result = parse_result(run.transcript, nonce)
     result.transcript_path = str(transcript)

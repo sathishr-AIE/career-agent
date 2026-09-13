@@ -102,11 +102,18 @@ def sweep_stale_in_flight(conn: sqlite3.Connection, minutes: int = 30) -> int:
     timing-out run always resolves its own row before this sweep can touch
     it, and the sweep-vs-returning-run race never opens. Raise one of the
     two and you must raise the other (tests/test_apply_ats.py
-    ::test_the_agent_deadline_fires_before_the_sweep_window enforces it)."""
+    ::test_the_agent_deadline_fires_before_the_sweep_window enforces it).
+
+    ...except that the work clock pauses while the agent waits on a human
+    (run_session's answer_wait_s), so a healthy run can pass this window.
+    Jobs with a live run in agent.RUNS are skipped: this process is still
+    driving them, and their own watchdog resolves the row."""
+    live = list(agent_mod.RUNS)
     cur = conn.execute(
         "UPDATE application SET status = 'held_unknown'"
         " WHERE status = 'in_flight'"
-        f"  AND started_at < datetime('now', '-{int(minutes)} minutes')")
+        f"  AND started_at < datetime('now', '-{int(minutes)} minutes')"
+        f"  AND job_id NOT IN ({','.join('?' * len(live))})", live)
     conn.commit()
     return cur.rowcount
 

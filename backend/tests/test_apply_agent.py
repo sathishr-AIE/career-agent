@@ -524,24 +524,59 @@ def test_output_after_the_result_still_lands_in_the_transcript(child):
 
 
 def test_a_deadline_landing_after_the_result_does_not_override_it(child, monkeypatch):
-    """The watchdog can fire between the RESULT turn setting `done` and
-    alarm.cancel(): an APPLIED run must not become failed/timeout (which the
-    send path holds as held_unknown)."""
-    class _LateTimer:
-        def __init__(self, interval, fn):
-            self.fn, self.daemon = fn, False
-        def start(self):
-            pass
-        def cancel(self):
-            self.fn()                  # fires just before the cancel lands
+    """The watchdog can decide to kill in the instant the RESULT turn lands:
+    an APPLIED run must not become failed/timeout (which the send path holds
+    as held_unknown)."""
+    real_kill = runner_mod.AgentRun.kill
 
-    monkeypatch.setattr(agent_mod.threading, "Timer", _LateTimer)
-    child.emit(_asst("m2", f"{R}APPLIED"))
+    def late(self):
+        self.result_line = f"{R}APPLIED"          # the RESULT turn, just in time
+        self.transcript += f"{R}APPLIED\n"
+        real_kill(self)
+
+    monkeypatch.setattr(runner_mod.AgentRun, "kill", late)
+    r = _session(child, timeout_s=0.2)
+    assert (r.code, r.reason) == ("applied", "")
+
+
+def _ask(qid="q1"):
+    return _asst("a1", f'ASK:{N}:{{"id":"{qid}","kind":"text","question":"Notice?"}}')
+
+
+def test_the_work_clock_is_paused_while_waiting_on_the_human(child):
+    """A person reading a card is not a hung session: waiting longer than
+    timeout_s (but under answer_wait_s) must still finish normally."""
+    child.emit(_ask())
     child.emit(_result_msg(0.01))
 
-    r = _session(child)
-
+    def human():
+        deadline = time.time() + 5
+        while not (7 in agent_mod.RUNS and agent_mod.RUNS[7].waiting.is_set()):
+            assert time.time() < deadline
+            time.sleep(0.01)
+        time.sleep(0.8)                          # 4x the work deadline
+        assert agent_mod.RUNS[7].send(f'ANSWER:{N}:{{"id":"q1","answer":"30"}}')
+        child.emit(_asst("m9", f"{R}APPLIED"))
+        child.emit(_result_msg(0.01))
+    t = threading.Thread(target=human, daemon=True)
+    t.start()
+    r = agent_mod.run_session("prompt", job_id=7, nonce=N, session_id="s-1",
+                              events=RunEvents(), timeout_s=0.2, answer_wait_s=5,
+                              popen=lambda *a, **kw: child)
+    t.join(5)
     assert (r.code, r.reason) == ("applied", "")
+
+
+def test_an_unanswered_prompt_times_out_as_answer_timeout(child):
+    child.emit(_ask())
+    child.emit(_result_msg(0.01))
+    started = time.monotonic()
+    r = agent_mod.run_session("prompt", job_id=7, nonce=N, session_id="s-1",
+                              events=RunEvents(), timeout_s=30, answer_wait_s=0.3,
+                              popen=lambda *a, **kw: child)
+    assert time.monotonic() - started < 5
+    assert (r.code, r.reason) == ("failed", "answer_timeout")
+    assert child.returncode == -9 and 7 not in agent_mod.RUNS
 
 
 async def test_run_agent_names_a_fresh_session_per_run(monkeypatch):
