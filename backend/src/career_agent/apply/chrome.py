@@ -80,11 +80,11 @@ def ensure_profile() -> Path:
     fingerprint). Chrome must be closed during the first clone or files
     are locked -- the copy skips what it can't read."""
     if (PROFILE_DIR / "Default").exists():
-        return PROFILE_DIR
+        return PROFILE_DIR.resolve()  # relative makes Chrome join a running session
     src = _user_profile_source()
     if not src.exists():
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)  # fresh profile fallback
-        return PROFILE_DIR
+        return PROFILE_DIR.resolve()  # relative makes Chrome join a running session
     log.info("Cloning Chrome profile from %s (first run)...", src)
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     for item in src.iterdir():
@@ -98,7 +98,7 @@ def ensure_profile() -> Path:
                 shutil.copy2(item, PROFILE_DIR / item.name)
         except (PermissionError, OSError):
             pass  # locked file; skip
-    return PROFILE_DIR
+    return PROFILE_DIR.resolve()  # relative makes Chrome join a running session
 
 
 def _patch_prefs(profile_dir: Path) -> None:

@@ -45,3 +45,14 @@ def test_preflight_reports_a_bad_override_as_a_precondition(monkeypatch, tmp_pat
     monkeypatch.setattr(agent_mod, "require_binaries", lambda: None)
     with pytest.raises(agent_mod.PreconditionError, match="CHROME_PATH"):
         ats_apply.preflight()
+
+
+def test_ensure_profile_returns_an_absolute_path(tmp_path, monkeypatch):
+    """A relative --user-data-dir makes Chrome hand the launch to an already
+    running session ("Opening in existing browser session") and drop the CDP
+    port, so the agent gets no browser. Seen live on 2026-09-13."""
+    from career_agent.apply import chrome
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "prof" / "Default").mkdir(parents=True)  # already cloned: no copy
+    monkeypatch.setattr(chrome, "PROFILE_DIR", Path("prof"))
+    assert chrome.ensure_profile().is_absolute()
