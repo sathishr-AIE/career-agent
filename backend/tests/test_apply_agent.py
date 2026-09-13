@@ -227,7 +227,7 @@ def test_the_spawned_session_gets_no_builtin_tools_and_no_other_mcp_config():
     agent.py's build_cmd docstring and docs/lld-apply-button-v2.md §6 for
     the residual)."""
     mcp_path = Path("C:/nowhere/.mcp-apply.json")
-    cmd = agent_mod.build_cmd("sonnet", mcp_path)
+    cmd = agent_mod.build_cmd("sonnet", mcp_path, session_id="11111111-1111-4111-8111-111111111111")
     assert "--strict-mcp-config" in cmd
     assert "--tools" in cmd
     # the empty string must survive as its own argv element
@@ -235,7 +235,23 @@ def test_the_spawned_session_gets_no_builtin_tools_and_no_other_mcp_config():
     # the flags the run still depends on
     assert cmd[cmd.index("--mcp-config") + 1] == str(mcp_path)
     assert cmd[cmd.index("--model") + 1] == "sonnet"
-    assert cmd[-1] == "-" and "-p" in cmd
+    assert "-p" in cmd
+    # the prompt arrives as the first stream-json user message, not argv/"-"
+    assert cmd[-1] != "-"
+
+
+def test_build_cmd_streams_input_and_keeps_the_session():
+    from career_agent.apply.agent import build_cmd
+    cmd = build_cmd("sonnet", "C:/m.json", session_id="11111111-1111-4111-8111-111111111111")
+    assert "--input-format" in cmd and cmd[cmd.index("--input-format") + 1] == "stream-json"
+    assert cmd[cmd.index("--session-id") + 1].startswith("11111111")
+    assert "--no-session-persistence" not in cmd
+    for flag in ("--strict-mcp-config", "--tools", "--disallowedTools"): assert flag in cmd
+    assert cmd[cmd.index("--tools") + 1] == ""
+    assert cmd[cmd.index("--permission-mode") + 1] == "bypassPermissions"
+    r = build_cmd("sonnet", "C:/m.json", session_id="11111111-1111-4111-8111-111111111111", resume=True)
+    assert "--resume" in r and "--session-id" not in r
+    assert r[r.index("--resume") + 1].startswith("11111111")
 
 
 def test_the_agent_workdir_is_outside_the_repo():
@@ -344,12 +360,49 @@ def test_the_transcript_foots_the_run_cost_and_duration(sandboxed, monkeypatch):
     ])
     _install(monkeypatch, proc)
 
+    class _KeptStdin(io.StringIO):
+        def close(self): pass
+    proc.stdin = _KeptStdin()
     r = agent_mod._run_agent_blocking("prompt", 7, 9222, 30, "sonnet", N)
 
+    # stdin is stream-json now: the prompt goes in as one user message line
+    msg = _json.loads(proc.stdin.getvalue())
+    assert msg == {"type": "user", "message": {"role": "user",
+                   "content": [{"type": "text", "text": "prompt"}]}}
     assert r.code == "applied"
     assert r.cost_usd == 0.0421 and r.duration_ms >= 0
     footer = Path(r.transcript_path).read_text(encoding="utf-8").strip().splitlines()[-1]
     assert "job 7" in footer and "$0.0421" in footer and "ms" in footer
+
+
+def test_the_prompt_write_cannot_deadlock_against_a_chatty_child(sandboxed, monkeypatch):
+    """Under --input-format stream-json the real CLI emits its (large)
+    --verbose init line before it reads stdin. Writing the whole prompt on
+    the thread that later reads stdout leaves both processes blocked on
+    full pipes -- it hung a web test at proc.stdin.write."""
+    reading = threading.Event()
+
+    class _WaitsForReader(io.StringIO):
+        def write(self, s):
+            assert reading.wait(5), "prompt written before stdout was read"
+            return super().write(s)
+
+        def close(self):
+            pass
+
+    def stdout():
+        reading.set()
+        yield _json.dumps({"type": "result", "total_cost_usd": 0.01,
+                           "result": f"{R}APPLIED"})
+
+    proc = _FakeProc([])
+    proc.stdout, proc.returncode, proc.stdin = stdout(), 0, _WaitsForReader()
+    _install(monkeypatch, proc)
+
+    r = agent_mod._run_agent_blocking("prompt", 7, 9222, 30, "sonnet", N)
+
+    assert r.code == "applied"
+    assert '"text": "prompt"' in proc.stdin.getvalue()
 
 
 # -- F5: "what was reviewed is what gets sent", prompt-enforced ------------
@@ -504,7 +557,8 @@ def test_browser_run_code_unsafe_is_disallowed_at_the_cli():
     """It runs code in Playwright's own Node process, outside the page
     sandbox; the live draft run called it 32 times. browser_evaluate (page
     sandbox) stays allowed."""
-    cmd = agent_mod.build_cmd("sonnet", Path("C:/nowhere/.mcp-apply.json"))
+    cmd = agent_mod.build_cmd("sonnet", Path("C:/nowhere/.mcp-apply.json"),
+                              session_id="11111111-1111-4111-8111-111111111111")
     i = cmd.index("--disallowedTools")
     assert cmd[i + 1] == "mcp__playwright__browser_run_code_unsafe"
     # variadic flag: the next element must be another flag, never a value

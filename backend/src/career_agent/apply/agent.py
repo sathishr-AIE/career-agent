@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -549,8 +550,28 @@ def require_binaries() -> None:
                                 " on PATH -- see docs/lld-apply-button-v2.md")
 
 
-def build_cmd(model: str, mcp_path) -> list[str]:
+def user_message(text: str) -> str:
+    """One stream-json user message line, the only thing ever written to a
+    session's stdin (--input-format stream-json): the first one carries the
+    prompt, later ones the human's answers and nudges."""
+    return json.dumps({"type": "user", "message": {
+        "role": "user", "content": [{"type": "text", "text": text}]}}) + "\n"
+
+
+def build_cmd(model: str, mcp_path, session_id: str,
+              resume: bool = False) -> list[str]:
     """The argv for one sandboxed `claude -p` session.
+
+    Input is stream-json and stdin stays open (apply/runner.py's AgentRun),
+    so the human's answers reach the SAME session mid-form. That is why two
+    flags from the one-shot days are gone:
+      --no-session-persistence
+                        dropped deliberately: `--resume <session_id>` needs
+                        the session kept on disk to pick a run back up.
+      the trailing `-`  the prompt no longer arrives as a stdin blob; it is
+                        the first stream-json user message (user_message).
+    `--session-id` names a new session; `resume=True` swaps it for
+    `--resume` on the same id.
 
     The session reads job-posting text, which is an untrusted
     prompt-injection channel, under --permission-mode bypassPermissions, so
@@ -593,8 +614,9 @@ def build_cmd(model: str, mcp_path) -> list[str]:
             "--tools", "",
             "--disallowedTools", "mcp__playwright__browser_run_code_unsafe",
             "--permission-mode", "bypassPermissions",
-            "--no-session-persistence",
-            "--output-format", "stream-json", "--verbose", "-"]
+            "--input-format", "stream-json",
+            "--output-format", "stream-json", "--verbose",
+            "--resume" if resume else "--session-id", session_id]
 
 
 def _run_agent_blocking(prompt, job_id, cdp_port, timeout_s, model,
@@ -619,7 +641,7 @@ def _run_agent_blocking(prompt, job_id, cdp_port, timeout_s, model,
     env.pop("CLAUDECODE", None)
     env.pop("CLAUDE_CODE_ENTRYPOINT", None)
 
-    cmd = build_cmd(model, mcp_path)
+    cmd = build_cmd(model, mcp_path, session_id=str(uuid.uuid4()))
 
     start = time.time()
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -645,9 +667,21 @@ def _run_agent_blocking(prompt, job_id, cdp_port, timeout_s, model,
     alarm.daemon = True
     alarm.start()
     try:
-        proc.stdin.write(prompt)
-        proc.stdin.close()
+        # stdin is stream-json now (build_cmd): one user message, then EOF
+        # ends the session after its turn -- still a one-shot run. Fed from
+        # its own thread: the CLI writes a large --verbose init line before
+        # it reads stdin, so writing here, before consume_stream drains
+        # stdout, deadlocked both processes on full pipes.
+        def _feed():
+            try:
+                proc.stdin.write(user_message(prompt))
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass    # the child died or was killed; stdout shows why
+        feeder = threading.Thread(target=_feed, daemon=True)
+        feeder.start()
         text, cost, usage = consume_stream(proc.stdout)
+        feeder.join(timeout=10)
         try:
             proc.wait(timeout=10)   # stdout is at EOF; this only reaps
         except subprocess.TimeoutExpired:

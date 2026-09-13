@@ -1,0 +1,174 @@
+"""AgentRun: one live `claude -p` session, stdin kept open (stream-json in
+and out) so the human's answers reach the SAME session mid-form. The reader
+thread turns the stream into events; turn boundaries (`result` messages)
+decide whether the agent is waiting on us, finished, or needs a nudge."""
+import json
+import subprocess
+import threading
+from dataclasses import dataclass
+from typing import Callable
+
+from career_agent.apply.agent import (_USAGE_KEYS, _kill_tree,
+                                      summarize_tool_input, user_message)
+
+NUDGE = ("Continue. If you need something from the human, emit an ASK line; "
+         "when finished, emit your RESULT line.")
+MAX_NUDGES = 3
+
+
+@dataclass
+class RunEvents:
+    on_text: Callable[[str], None] = lambda s: None
+    on_tool: Callable[[str, str], None] = lambda n, s: None
+    on_turn_end: Callable[[float | None, dict], None] = lambda c, u: None
+    on_ask: Callable[[dict], None] = lambda p: None
+    on_confirm: Callable[[dict], None] = lambda p: None
+
+
+def _parse_payload(line: str, prefix: str) -> dict:
+    # ponytail: placeholder until Task 6's parse_ask/parse_confirm
+    try:
+        return json.loads(line[len(prefix):])
+    except json.JSONDecodeError:
+        return {"raw": line}
+
+
+class AgentRun:
+    def __init__(self, cmd, cwd, env, nonce: str, events: RunEvents,
+                 popen=subprocess.Popen):
+        self.cmd, self.cwd, self.env, self.nonce, self.events = cmd, cwd, env, nonce, events
+        self._popen = popen
+        self.proc = None
+        self.transcript = ""
+        self._turn_buf: list[str] = []
+        self._per_msg: dict = {}
+        self.cost_total: float | None = None
+        self.usage_total: dict = {}
+        self.result_line: str | None = None
+        self.done = threading.Event()
+        self.waiting = threading.Event()   # ASK/CONFIRM emitted, turn ended
+        self.nudges = 0
+        self._lock = threading.Lock()
+
+    # -- process ------------------------------------------------------------
+    def start(self, first_message: str) -> None:
+        self.proc = self._popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                                errors="replace", env=self.env, cwd=str(self.cwd), shell=False)
+        # Reader FIRST: the CLI writes a large --verbose init line before it
+        # reads stdin, so a write that waits on it with nobody draining
+        # stdout deadlocks both processes on full pipes.
+        threading.Thread(target=self._reader, daemon=True).start()
+        self._write_user(first_message)
+
+    def _write_user(self, text: str) -> None:
+        with self._lock:
+            self.proc.stdin.write(user_message(text))
+            self.proc.stdin.flush()
+
+    def send(self, text: str) -> None:
+        # Clear BEFORE writing: the reader may see the next turn's ASK the
+        # instant the answer lands, and its set() must not be undone.
+        self.waiting.clear()
+        self._write_user(text)
+
+    def _close_stdin(self) -> None:
+        with self._lock:
+            try:
+                self.proc.stdin.close()
+            except Exception:
+                pass
+
+    def kill(self) -> None:
+        """Idempotent; a no-op kill for a process that already exited."""
+        if self.proc is not None and self.proc.poll() is None:
+            _kill_tree(self.proc.pid)
+        self.done.set()
+
+    def wait(self, timeout_s: float | None) -> bool:
+        return self.done.wait(timeout_s)
+
+    # -- stream (same parsing rules as agent.consume_stream) ----------------
+    def _append(self, line: str) -> None:
+        self.transcript += line + "\n"
+        self._turn_buf.append(line)
+
+    def _reader(self) -> None:
+        try:
+            for raw in self.proc.stdout:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    self._append(raw)
+                    continue
+                t = msg.get("type")
+                if t == "assistant":
+                    self._add_usage(msg.get("message", {}))
+                    for block in msg.get("message", {}).get("content", []):
+                        if block.get("type") == "text":
+                            self._append(block["text"])
+                            self.events.on_text(block["text"])
+                        elif block.get("type") == "tool_use":
+                            name = block.get("name", "").replace("mcp__playwright__", "")
+                            summary = summarize_tool_input(block.get("input", {}))
+                            self._append(f"  >> {name} {summary}")
+                            self.events.on_tool(name, summary)
+                elif t == "result":
+                    cost = msg.get("total_cost_usd")
+                    if cost is not None:
+                        self.cost_total = (self.cost_total or 0.0) + cost
+                    if msg.get("result"):
+                        self._append(msg["result"])
+                    self.events.on_turn_end(cost, dict(self.usage_total))
+                    self._end_of_turn()
+        finally:
+            self.done.set()
+
+    def _add_usage(self, message: dict) -> None:
+        # stream-json repeats a message's usage per content block: take the
+        # largest per message id, as consume_stream does.
+        usage = message.get("usage")
+        if not usage:
+            return
+        seen = self._per_msg.setdefault(message.get("id") or object(), {})
+        for k in _USAGE_KEYS:
+            seen[k] = max(seen.get(k, 0), usage.get(k) or 0)
+        self.usage_total = {k: sum(m.get(k, 0) for m in self._per_msg.values())
+                            for k in _USAGE_KEYS}
+
+    def _end_of_turn(self) -> None:
+        """RESULT beats CONFIRM beats ASK within a turn; the last line of a
+        kind wins. Only nonce-stamped lines count (see agent.result_prefix)."""
+        turn, self._turn_buf = self._turn_buf, []
+        lines = [l.strip() for t in turn for l in t.splitlines()]
+
+        def last(kind):
+            prefix = f"{kind}:{self.nonce}:"
+            hits = [l for l in lines if l.startswith(prefix)]
+            return (hits[-1], prefix) if hits else (None, prefix)
+
+        res, _ = last("RESULT")
+        if res:
+            self.result_line = res
+            self._close_stdin()
+            self.done.set()
+            return
+        confirm, prefix = last("CONFIRM")
+        if confirm:
+            self.waiting.set()
+            self.events.on_confirm(_parse_payload(confirm, prefix))
+            return
+        ask, prefix = last("ASK")
+        if ask:
+            self.waiting.set()
+            self.events.on_ask(_parse_payload(ask, prefix))
+            return
+        if self.nudges < MAX_NUDGES:
+            self.nudges += 1
+            self._write_user(NUDGE)
+            return
+        self._close_stdin()
+        self.done.set()
