@@ -10,7 +10,7 @@ export function Glass({
 }: {
   children: ReactNode
   className?: string
-  as?: 'div' | 'nav' | 'footer'
+  as?: 'div' | 'nav' | 'footer' | 'aside'
 }) {
   return <Tag className={`glass ${className}`}>{children}</Tag>
 }

@@ -96,3 +96,29 @@ export interface ActionResult {
   message: string
   changes?: string[]
 }
+
+// -- chat (career_agent/chat.py + web/api_chat.py) --
+
+export interface Conversation {
+  id: number
+  kind: 'home' | 'job'
+  job_id: number | null
+  title: string
+  updated_at: string
+  last_message: string | null
+}
+
+export interface ChatMessage {
+  id: number
+  role: 'user' | 'agent' | 'system' | 'prompt'
+  content: string
+  payload: Record<string, unknown> | null
+  created_at: string
+}
+
+export interface OpenPrompt {
+  id: number
+  kind: string
+  payload: Record<string, unknown>
+  created_at: string
+}

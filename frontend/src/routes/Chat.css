@@ -1,0 +1,221 @@
+/* The chat wants the whole plane, not the 960px reading column the other
+   routes sit in -- so it opts its own container out instead of App.css
+   carving an exception for it. */
+.plane__content:has(.chat) {
+  overflow: hidden;
+}
+.plane__inner:has(> .chat) {
+  max-width: none;
+  height: 100%;
+  padding: var(--space-4);
+}
+
+.chat {
+  display: grid;
+  grid-template-columns: 240px 1fr 56px;
+  gap: var(--space-4);
+  height: 100%;
+  min-height: 0;
+}
+
+/* -- conversation list -- */
+.chat__list {
+  border-radius: var(--radius-lg);
+  padding: var(--space-2);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+}
+
+.conv {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  color: var(--graphite-text-dim);
+}
+
+.conv:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.conv.active {
+  background: var(--signal);
+  color: #fff;
+}
+
+.conv__title {
+  font-weight: 600;
+  font-size: 0.875rem;
+  color: var(--graphite-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conv.active .conv__title {
+  color: #fff;
+}
+
+.conv__last {
+  font-size: 0.75rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.8;
+}
+
+/* -- transcript + composer -- */
+.chat__main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--paper);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--paper-line);
+}
+
+.msgs {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.msg__body {
+  white-space: pre-wrap;
+  border-radius: var(--radius-lg);
+  padding: var(--space-2) var(--space-4);
+  font-size: 0.9375rem;
+  max-width: 70ch;
+}
+
+.msg--user {
+  align-self: flex-end;
+}
+.msg--user .msg__body {
+  background: var(--signal);
+  color: #fff;
+}
+
+.msg--agent .msg__body,
+.msg--prompt .msg__body {
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-line);
+}
+
+.msg--prompt .msg__body {
+  border-color: var(--hold);
+  background: var(--hold-dim);
+}
+
+.msg--system .msg__body {
+  color: var(--ink-dim);
+  font-size: 0.8125rem;
+  padding-left: 0;
+}
+
+.msg__pending {
+  font-size: 0.75rem;
+  color: var(--ink-dim);
+  padding: var(--space-1) var(--space-4);
+}
+
+.composer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: flex-end;
+  padding: var(--space-3);
+  border-top: 1px solid var(--paper-line);
+}
+
+.composer textarea {
+  flex: 1;
+  resize: none;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--paper-line);
+  border-radius: var(--radius);
+  background: var(--paper-raised);
+  font-size: 0.9375rem;
+}
+
+.composer__error {
+  flex-basis: 100%;
+  color: var(--skip);
+  font-size: 0.8125rem;
+}
+
+/* -- rail + drawer -- */
+.chat__rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.chat__rail button {
+  background: var(--graphite-raised);
+  color: var(--graphite-text-dim);
+  border: 1px solid var(--graphite-line);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-1);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  writing-mode: vertical-rl;
+}
+
+.chat__rail button.active {
+  background: var(--signal);
+  border-color: var(--signal);
+  color: #fff;
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(640px, 90vw);
+  z-index: 30;
+  background: var(--paper);
+  border-left: 1px solid var(--paper-line);
+  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.28);
+  display: flex;
+  flex-direction: column;
+  animation: drawer-in 200ms ease-out;
+}
+
+@keyframes drawer-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+}
+
+.drawer__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-6);
+  border-bottom: 1px solid var(--paper-line);
+}
+
+.drawer__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-6);
+}
+
+@media (max-width: 900px) {
+  .chat {
+    grid-template-columns: 180px 1fr 44px;
+  }
+}

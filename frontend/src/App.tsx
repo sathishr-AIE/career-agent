@@ -4,7 +4,8 @@ import { Glass } from './components/Glass'
 import './App.css'
 
 const NAV = [
-  { to: '/', label: 'Dashboard', end: true },
+  { to: '/', label: 'Chat', end: true },
+  { to: '/dashboard', label: 'Dashboard' },
   { to: '/applications', label: 'Applications' },
   { to: '/resumes', label: 'Resumes' },
   { to: '/settings', label: 'Settings' },

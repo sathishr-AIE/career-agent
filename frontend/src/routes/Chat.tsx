@@ -1,0 +1,119 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { get, post, type ChatMessage, type Conversation, type OpenPrompt } from '../api'
+import { Glass } from '../components/Glass'
+import { Composer } from '../components/chat/Composer'
+import { Drawer, PANEL_KEYS, panelTitle } from '../components/chat/Drawer'
+import { MessageList } from '../components/chat/MessageList'
+import '../components/ui.css'
+import './Chat.css'
+
+const POLL_MS = 3000
+
+/** The chat shell: conversation list, transcript, composer, and a rail that
+ * slides the pre-chat pages in from the right. Both lists poll on the same
+ * 3s beat the status bar already uses; messages use an exclusive `after`
+ * cursor so a poll only ever appends. */
+export function Chat() {
+  const { id } = useParams()
+  const nav = useNavigate()
+  const [params, setParams] = useSearchParams()
+  const [convs, setConvs] = useState<Conversation[]>([])
+  const [homeId, setHomeId] = useState<number | null>(null)
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [openPrompt, setOpenPrompt] = useState<OpenPrompt | null>(null)
+  const lastId = useRef(0)
+  // Which conversation the pane currently belongs to. A fetch that was
+  // already in flight when you switched conversations must not append its
+  // messages (or move the cursor) into the new one.
+  const shown = useRef<number | null>(null)
+  const cid = id ? Number(id) : homeId
+
+  const loadConvs = useCallback(() => {
+    get<{ conversations: Conversation[]; home_id: number }>('/api/chat/conversations')
+      .then((r) => {
+        setConvs(r.conversations)
+        setHomeId(r.home_id)
+      })
+      .catch(() => {
+        /* transient poll failure -- keep the last known list */
+      })
+  }, [])
+
+  const loadMessages = useCallback(() => {
+    if (!cid) return Promise.resolve()
+    return get<{ messages: ChatMessage[]; open_prompt: OpenPrompt | null }>(
+      `/api/chat/${cid}/messages?after=${lastId.current}`,
+    )
+      .then((r) => {
+        if (shown.current !== cid) return
+        if (r.messages.length) {
+          lastId.current = r.messages[r.messages.length - 1].id
+          setMessages((m) => [...m, ...r.messages])
+        }
+        setOpenPrompt(r.open_prompt)
+      })
+      .catch(() => {
+        /* transient poll failure -- the next tick re-asks from the same cursor */
+      })
+  }, [cid])
+
+  useEffect(() => {
+    loadConvs()
+    const t = setInterval(loadConvs, POLL_MS)
+    return () => clearInterval(t)
+  }, [loadConvs])
+
+  // Keyed on loadMessages, i.e. on cid: switching conversations rewinds the
+  // cursor and empties the pane so the other transcript can't bleed in.
+  useEffect(() => {
+    shown.current = cid
+    lastId.current = 0
+    setMessages([])
+    setOpenPrompt(null)
+    loadMessages()
+    const t = setInterval(loadMessages, POLL_MS)
+    return () => clearInterval(t)
+  }, [loadMessages])
+
+  const send = (text: string) =>
+    cid ? post(`/api/chat/${cid}/messages`, { text }).then(loadMessages) : Promise.resolve()
+
+  const panel = params.get('panel')
+
+  return (
+    <div className="chat">
+      <Glass as="aside" className="chat__list">
+        {convs.map((c) => (
+          <button
+            key={c.id}
+            type="button"
+            className={c.id === cid ? 'conv active' : 'conv'}
+            onClick={() => nav(c.kind === 'home' ? '/' : `/chat/${c.id}`)}
+          >
+            <div className="conv__title">{c.title}</div>
+            <div className="conv__last">{c.last_message ?? ''}</div>
+          </button>
+        ))}
+      </Glass>
+      <main className="chat__main">
+        <MessageList messages={messages} openPrompt={openPrompt} onAnswered={loadMessages} />
+        <Composer onSend={send} disabled={!cid} />
+      </main>
+      <nav className="chat__rail" aria-label="Panels">
+        {PANEL_KEYS.map((p) => (
+          <button
+            key={p}
+            type="button"
+            className={panel === p ? 'active' : undefined}
+            aria-pressed={panel === p}
+            onClick={() => setParams(panel === p ? {} : { panel: p })}
+          >
+            {panelTitle(p)}
+          </button>
+        ))}
+      </nav>
+      {panel && <Drawer panel={panel} onClose={() => setParams({})} />}
+    </div>
+  )
+}
