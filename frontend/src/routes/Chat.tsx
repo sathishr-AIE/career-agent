@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { get, post, type ChatMessage, type Conversation, type OpenPrompt } from '../api'
+import { errorText, get, post, type ChatMessage, type Conversation, type OpenPrompt } from '../api'
 import { Glass } from '../components/Glass'
 import { Composer } from '../components/chat/Composer'
 import { Drawer, PANEL_KEYS, panelTitle } from '../components/chat/Drawer'
@@ -22,6 +22,9 @@ export function Chat() {
   const [homeId, setHomeId] = useState<number | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [openPrompt, setOpenPrompt] = useState<OpenPrompt | null>(null)
+  const [resumable, setResumable] = useState(false)
+  const [resuming, setResuming] = useState(false)
+  const [resumeError, setResumeError] = useState<string | null>(null)
   const lastId = useRef(0)
   // Which conversation the pane currently belongs to. A fetch that was
   // already in flight when you switched conversations must not append its
@@ -46,7 +49,7 @@ export function Chat() {
     // otherwise read the same cursor and append the same messages twice.
     if (!cid || inFlight.current) return Promise.resolve()
     inFlight.current = true
-    return get<{ messages: ChatMessage[]; open_prompt: OpenPrompt | null }>(
+    return get<{ messages: ChatMessage[]; open_prompt: OpenPrompt | null; resumable: boolean }>(
       `/api/chat/${cid}/messages?after=${lastId.current}`,
     )
       .then((r) => {
@@ -59,6 +62,7 @@ export function Chat() {
           })
         }
         setOpenPrompt(r.open_prompt)
+        setResumable(r.resumable)
       })
       .catch(() => {
         /* transient poll failure -- the next tick re-asks from the same cursor */
@@ -82,6 +86,8 @@ export function Chat() {
     lastId.current = 0
     setMessages([])
     setOpenPrompt(null)
+    setResumable(false)
+    setResumeError(null)
     loadMessages()
     const t = setInterval(loadMessages, POLL_MS)
     return () => clearInterval(t)
@@ -89,6 +95,19 @@ export function Chat() {
 
   const send = (text: string) =>
     cid ? post(`/api/chat/${cid}/messages`, { text }).then(loadMessages) : Promise.resolve()
+
+  // An interrupted session (checkpoint `resumable`): continue it in the same
+  // session. A refusal (a live run, a held attempt, ...) is shown under the button.
+  const jobId = convs.find((c) => c.id === cid)?.job_id
+  const continueRun = () => {
+    if (!jobId) return
+    setResuming(true)
+    setResumeError(null)
+    post(`/api/chat/jobs/${jobId}/resume`)
+      .then(loadMessages)
+      .catch((e) => setResumeError(errorText(e)))
+      .finally(() => setResuming(false))
+  }
 
   const panel = params.get('panel')
 
@@ -109,6 +128,14 @@ export function Chat() {
       </Glass>
       <main className="chat__main">
         <MessageList messages={messages} openPrompt={openPrompt} onAnswered={loadMessages} />
+        {resumable && (
+          <div className="chat__resume">
+            <button type="button" className="btn primary" disabled={resuming || !jobId} onClick={continueRun}>
+              Continue where it left off
+            </button>
+            {resumeError && <div className="qcard__error" role="alert">{resumeError}</div>}
+          </div>
+        )}
         <Composer onSend={send} disabled={!cid} />
       </main>
       <nav className="chat__rail" aria-label="Panels">

@@ -23,6 +23,9 @@ log = logging.getLogger(__name__)
 
 RESUME_VERSION = "base-v1"
 MAX_ATTEMPTS = 3
+# A resumable stop consumes no attempt, so without a cap an always-slow form
+# would resume forever. Past it the job is recorded as an ordinary failure.
+MAX_RESUMES = 3
 BLOCKING = ("in_flight", "submitted", "held_unknown", "failed_permanent")
 
 # The outermost kill switch: a real send is refused unless this is flipped
@@ -252,6 +255,8 @@ def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual",
             _checkpoint(checkpoint.mark_waiting, c, job_id, pid)
             if mode != "auto" or chat.answer_prompt_row(c, pid, {"decision": "approve"}) is None:
                 return None
+            # Before the send: a crash just after it must never leave this session resumable.
+            _checkpoint(checkpoint.mark_approve_sent, c, job_id)
             return pid
         pid = with_conn(record, "a CONFIRM")
         if pid is None:
@@ -510,6 +515,27 @@ def _checkpoint(fn, *args) -> None:
         log.warning("checkpoint %s failed for job %s", fn.__name__, args[1], exc_info=True)
 
 
+def _say(conn, job_id: int, text: str) -> None:
+    """A system line in the job's chat; never allowed to alter the run."""
+    try:
+        chat.post_message(conn, chat.conversation_for_job(conn, job_id), "system", text)
+    except Exception:
+        log.warning("could not post %r for job %s", text, job_id, exc_info=True)
+
+
+def _resume_limit(conn, job_id: int, resume_version: str) -> dict:
+    """Past MAX_RESUMES: end the session and count it as a normal retryable failure."""
+    _checkpoint(checkpoint.finish, conn, job_id)
+    status = classify_failure("resume_limit", _prior_failures(conn, job_id))
+    conn.execute("INSERT INTO application (job_id, resume_version, status, failure_reason, started_at)"
+                 " VALUES (?, ?, ?, 'resume_limit', datetime('now'))", (job_id, resume_version, status))
+    conn.execute("INSERT INTO event (job_id, type, payload) VALUES (?, ?, 'resume_limit')",
+                 (job_id, status))
+    conn.commit()
+    _say(conn, job_id, f"Stopped: hit the resume limit ({MAX_RESUMES}); recorded as {status}.")
+    return {"ok": False, "reason": f"{status}: resume_limit"}
+
+
 async def _run(runner, prompt: str, job_id: int, nonce: str,
                events: RunEvents, session_id: str | None = None,
                resume: bool = False) -> tuple:
@@ -652,6 +678,19 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
     score = score_row["weighted_score"] if score_row else None
     runner = run_agent or _live_run_agent
     can_submit = SUBMISSION_IMPLEMENTED or run_agent is not None
+    if resume and (cp["mode"], cp["can_submit"]) != (mode, int(can_submit)):
+        # Never continue a session under other rules: an auto session resumed
+        # as manual could submit without a DECISION; the reverse would wait on one.
+        _checkpoint(checkpoint.finish, conn, job_id)
+        _say(conn, job_id, f"Starting a fresh session: the interrupted one ran in"
+             f" {cp['mode'] or 'an unknown'} mode (can_submit={cp['can_submit']}), this run is"
+             f" {mode} mode (can_submit={int(can_submit)}).")
+        resume, cp = False, None
+    elif resume and cp["resume_count"] >= MAX_RESUMES:
+        return _resume_limit(conn, job_id, resume_version)
+    elif resume:
+        _say(conn, job_id, f"Resuming the interrupted session"
+             f" (resume {cp['resume_count'] + 1} of {MAX_RESUMES})")
     # One unguessable token per run, stamped into every protocol line the
     # prompt teaches and the only one the parsers accept back -- a job page
     # cannot guess it, so it cannot forge an outcome, a CONFIRM, or an ASK.
@@ -693,7 +732,7 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
         if resume:
             _checkpoint(checkpoint.resume, conn, job_id)
         else:
-            _checkpoint(checkpoint.start, conn, job_id, session_id, nonce)
+            _checkpoint(checkpoint.start, conn, job_id, session_id, nonce, mode, can_submit)
         try:
             result, detail = await _run(runner, first, job_id, nonce, events,
                                         session_id=session_id, resume=resume)
@@ -701,9 +740,14 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
                 # --resume never verified live: a session that said nothing
                 # did nothing, so a fresh one with the answers pinned is safe.
                 log.info("resume_fallback for job %s (%s)", job_id, _reason_of(result))
-                session_id = str(uuid.uuid4())
-                _checkpoint(checkpoint.start, conn, job_id, session_id, nonce)
-                _checkpoint(checkpoint.mark_running, conn, job_id, "resume_fallback", pinned)
+                # A new nonce as well: whatever the old session still prints is
+                # then no protocol line for this run.
+                session_id, nonce = str(uuid.uuid4()), agent_mod.new_nonce()
+                _checkpoint(checkpoint.restart, conn, job_id, session_id, nonce)
+                _say(conn, job_id, "Could not resume the session; starting a fresh one with your answers")
+                events = _chat_events(conn_factory, job_id, nonce, mode, baseline)
+                prompt = agent_mod.build_prompt(*prompt_args, mode=mode, can_submit=can_submit,
+                                                nonce=nonce, pinned_answers=pinned, score=score)
                 result, detail = await _run(runner, prompt, job_id, nonce, events,
                                             session_id=session_id, resume=False)
         except asyncio.CancelledError:

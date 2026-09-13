@@ -7,6 +7,7 @@ can't drift: app.py wraps the dict in a <span>, api.py returns it as-is.
 Messages are plain text, not HTML-escaped -- the Jinja side escapes at
 render time (app.py's _span), so a message never gets double-escaped and
 the JSON side gets clean text."""
+import asyncio
 import datetime as dt
 import json
 import logging
@@ -300,6 +301,12 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
         return _refuse(409, _CLOSED)
     if chat.answer_prompt_row(conn, prompt_id, body) is None:
         return _refuse(409, _CLOSED)            # answered concurrently
+    if kind == "confirm" and decision == "approve":
+        # Before the send: a crash just after it must never leave the session resumable.
+        try:
+            checkpoint.mark_approve_sent(conn, row["job_id"])
+        except Exception:
+            log.warning("could not checkpoint the approve for job %s", row["job_id"], exc_info=True)
     if not run.send(agent_mod.answer_line(run.nonce, kind, body)):
         chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
         return _refuse(409, _NO_RUN)
@@ -330,6 +337,51 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
             log.exception("qa_touch failed for prompt %s -- answer was"
                           " already sent and recorded", prompt_id)
     return {"ok": True, "message": "Answer sent"}
+
+
+def resume_job(conn: sqlite3.Connection, job_id: int, brief_path: Path,
+               candidate_profile_path: Path, conn_factory=None, tasks: set | None = None) -> dict:
+    """The job chat's "Continue where it left off". Refuses like do_apply (a
+    BLOCKING attempt, a live run, the apply lock) and without a resumable
+    checkpoint; otherwise the resumed run goes to the background -- it can wait
+    on cards for many minutes -- tracked in `tasks` (app._background_tasks).
+    The resume cap and a mode mismatch are submit()'s call; both reach the chat.
+    Must be called on the event loop. `code` is the HTTP status for api_chat."""
+    cp = checkpoint.get(conn, job_id)
+    if cp is None or cp["status"] != "resumable":
+        return _refuse(409, "Nothing to continue: this job has no interrupted session")
+    live = ats_apply._blocking_status(conn, job_id)
+    if live:
+        return _refuse(409, ats_apply._blocked(job_id, live)["reason"])
+    run = agent_mod.RUNS.get(job_id)
+    if run is not None and not run.done.is_set():
+        return _refuse(409, f"job {job_id} already has a live agent run")
+    if ats_apply._agent_lock().locked():
+        return _refuse(409, "Another application is running — continue when it ends")
+    checkpoint.set_auto_resumed(conn, job_id, False)    # a human touch re-arms the worker's one
+    worker.say(conn, job_id, "Continuing where it left off")
+    task = asyncio.create_task(_resume_run(conn, job_id, brief_path, candidate_profile_path,
+                                           conn_factory))
+    if tasks is not None:
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+    return {"ok": True, "message": "Continuing where it left off"}
+
+
+async def _resume_run(conn, job_id: int, brief_path: Path, candidate_profile_path: Path,
+                      conn_factory=None) -> None:
+    """Manual mode, like do_apply: an auto session is restarted fresh by submit()."""
+    try:
+        resume_version = await worker.tailor_for_apply(conn, job_id, brief_path)
+        result = await ats_apply.submit(
+            conn, job_id, mode="manual", brief=load_brief(brief_path),
+            profile=context.load_candidate_profile_or_none(candidate_profile_path),
+            resume_version=resume_version, conn_factory=conn_factory, resume=True)
+    except Exception as exc:
+        log.exception("continue failed for job %s", job_id)
+        worker.say(conn, job_id, f"Continue failed: {exc}")
+        return
+    worker.say(conn, job_id, worker._outcome_text(conn, job_id, result))
 
 
 def dismiss(conn: sqlite3.Connection, job_id: int) -> dict:

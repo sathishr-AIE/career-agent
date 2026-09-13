@@ -5,6 +5,7 @@ from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import JSONResponse
 
 from career_agent import chat
+from career_agent.apply import checkpoint
 from career_agent.web import actions
 
 router = APIRouter(prefix="/api/chat")
@@ -28,14 +29,25 @@ def api_conversations():
 def api_messages(cid: int, after: int = 0):
     conn = _app()._conn()
     conv = conn.execute("SELECT job_id FROM conversation WHERE id = ?", (cid,)).fetchone()
-    open_prompt = None
+    open_prompt, resumable = None, False
     if conv and conv["job_id"]:
+        cp = checkpoint.get(conn, conv["job_id"])
+        resumable = bool(cp and cp["status"] == "resumable")
         row = chat.open_prompt_for_job(conn, conv["job_id"])
         if row:
             open_prompt = {"id": row["id"], "kind": row["kind"],
                            "payload": json.loads(row["payload"]), "created_at": row["created_at"]}
     return {"messages": chat.prompt_statuses(conn, chat.messages_after(conn, cid, after)),
-            "open_prompt": open_prompt}
+            "open_prompt": open_prompt, "resumable": resumable}
+
+
+@router.post("/jobs/{job_id}/resume")
+async def api_resume_job(job_id: int):
+    """Continue where it left off. Refusals keep the {ok, message} body with 409."""
+    m = _app()
+    result = actions.resume_job(m._conn(), job_id, m.BRIEF_PATH, m.CANDIDATE_PROFILE_PATH,
+                                m._chat_conn, m._background_tasks)
+    return JSONResponse(status_code=200 if result["ok"] else result["code"], content=result)
 
 
 @router.get("/jobs/{job_id}/conversation")

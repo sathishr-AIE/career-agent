@@ -228,3 +228,95 @@ def test_a_confirm_card_message_reads_review_before_applying(conn):
 def test_job_conversation_lookup(client, conn):
     r = client.get("/api/chat/jobs/1/conversation")
     assert r.status_code == 200 and r.json()["id"] == chat.conversation_for_job(conn, 1)
+
+
+# -- Task 11: Continue where it left off ----------------------------------------
+
+from career_agent.apply import ats as ats_apply        # noqa: E402
+from career_agent.apply import checkpoint              # noqa: E402
+from career_agent.web import actions                   # noqa: E402
+
+
+def _resumable(conn, job_id=1):
+    checkpoint.start(conn, job_id, "sess", "n0nce", mode="manual", can_submit=False)
+    checkpoint.mark_resumable(conn, job_id)
+
+
+def test_messages_report_resumable(client, conn):
+    cid = chat.conversation_for_job(conn, 1)
+    assert client.get(f"/api/chat/{cid}/messages").json()["resumable"] is False
+    _resumable(conn)
+    assert client.get(f"/api/chat/{cid}/messages").json()["resumable"] is True
+    home = client.get("/api/chat/conversations").json()["home_id"]
+    assert client.get(f"/api/chat/{home}/messages").json()["resumable"] is False
+
+
+def test_resume_refuses_without_a_resumable_checkpoint(client, conn, runs):
+    r = client.post("/api/chat/jobs/1/resume")
+    assert r.status_code == 409 and not r.json()["ok"] and r.json()["message"]
+    checkpoint.start(conn, 1, "s", "n")                    # running, not resumable
+    assert client.post("/api/chat/jobs/1/resume").status_code == 409
+
+
+def test_resume_refuses_a_blocking_application(client, conn, runs):
+    _resumable(conn)
+    conn.execute("INSERT INTO application (job_id, resume_version, status) VALUES (1, 'v', 'held_unknown')")
+    conn.commit()
+    r = client.post("/api/chat/jobs/1/resume")
+    assert r.status_code == 409 and "held_unknown" in r.json()["message"]
+
+
+def test_resume_refuses_a_live_run(client, conn, runs):
+    _resumable(conn)
+    runs[1] = _LiveRun()
+    r = client.post("/api/chat/jobs/1/resume")
+    assert r.status_code == 409 and "live" in r.json()["message"]
+
+
+async def test_resume_refuses_while_another_run_holds_the_lock(db_path, runs):
+    c = db.connect(db_path)
+    _resumable(c)
+    async with ats_apply._agent_lock():
+        r = actions.resume_job(c, 1, "brief", "profile", None, set())
+    assert (r["ok"], r["code"]) == (False, 409)
+
+
+async def test_resume_launches_a_resumed_submit_in_the_background(db_path, runs, monkeypatch):
+    import asyncio
+
+    c = db.connect(db_path)
+    _resumable(c)
+    checkpoint.set_auto_resumed(c, 1, True)
+    calls = []
+
+    async def fake_tailor(conn, job_id, brief_path):
+        return "base-v1"
+
+    async def fake_submit(conn, job_id, **kw):
+        calls.append((job_id, kw))
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+    monkeypatch.setattr(actions.worker, "tailor_for_apply", fake_tailor)
+    monkeypatch.setattr(actions.ats_apply, "submit", fake_submit)
+    monkeypatch.setattr(actions, "load_brief", lambda p: "BRIEF")
+    monkeypatch.setattr(actions.context, "load_candidate_profile_or_none", lambda p: "PROFILE")
+    tasks = set()
+    r = actions.resume_job(c, 1, "brief", "profile", "factory", tasks)
+    assert r["ok"] and r["message"]
+    await asyncio.gather(*tasks)
+    job_id, kw = calls[0]
+    assert job_id == 1 and kw["resume"] is True and kw["mode"] == "manual"
+    assert kw["conn_factory"] == "factory" and kw["resume_version"] == "base-v1"
+    assert checkpoint.get(c, 1)["auto_resumed"] == 0            # a human touch re-arms auto-resume
+    texts = [m["content"] for m in chat.messages_after(c, chat.conversation_for_job(c, 1), 0)]
+    assert any("Continuing" in t for t in texts)
+
+
+def test_resume_endpoint_succeeds(client, conn, runs, monkeypatch):
+    _resumable(conn)
+    monkeypatch.setattr(actions, "_resume_run", lambda *a, **kw: _noop())
+    r = client.post("/api/chat/jobs/1/resume")
+    assert r.status_code == 200 and r.json()["ok"]
+
+
+async def _noop():
+    return None

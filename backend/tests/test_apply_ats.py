@@ -1775,7 +1775,8 @@ async def test_a_cancelled_run_is_left_resumable(conn):
 
 
 def _resumable(conn, answers):
-    checkpoint.start(conn, 1, "sess-old", "oldnonce")
+    # an injected runner means can_submit; these tests resume in manual mode
+    checkpoint.start(conn, 1, "sess-old", "oldnonce", mode="manual", can_submit=True)
     checkpoint.mark_running(conn, 1, "answered 4", answers)
     checkpoint.mark_resumable(conn, 1)
 
@@ -1951,3 +1952,100 @@ async def test_what_the_checkpoint_pins_from_answers(conn, runs, factory):
         return AgentResult("draft_ready")
 
     assert (await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory))["ok"]
+
+
+# -- Task 11: resume cap, mode mismatch, approve_sent, fallback nonce ------------
+
+def _resumable_as(conn, mode="manual", can_submit=True, answers=None):
+    checkpoint.start(conn, 1, "sess-old", "oldnonce", mode=mode, can_submit=can_submit)
+    checkpoint.mark_running(conn, 1, "answered 4", answers or {})
+    checkpoint.mark_resumable(conn, 1)
+
+
+async def test_resume_increments_the_resume_count(conn):
+    _resumable_as(conn)
+    await _submit(conn, mode="manual", run_agent=fake_agent(AgentResult("failed", "timeout")),
+                  resume=True)
+    cp = checkpoint.get(conn, 1)
+    assert (cp["status"], cp["resume_count"]) == ("resumable", 1)
+
+
+async def test_resume_past_the_cap_is_a_retryable_failure(conn):
+    _resumable_as(conn)
+    conn.execute("UPDATE apply_checkpoint SET resume_count = ?", (ats_apply.MAX_RESUMES,))
+    conn.commit()
+    fake = fake_agent(AgentResult("draft_ready"))
+    r = await _submit(conn, mode="manual", run_agent=fake, resume=True)
+    assert not r["ok"] and "resume_limit" in r["reason"] and fake.prompts == []
+    assert [(a["status"], a["failure_reason"]) for a in _apps(conn)] == [("failed", "resume_limit")]
+    assert checkpoint.get(conn, 1)["status"] == "done"
+    cid = chat.conversation_for_job(conn, 1)
+    assert any("resume limit" in m["content"] for m in chat.messages_after(conn, cid, 0))
+
+
+@pytest.mark.parametrize("stored", [("auto", True), ("manual", False), (None, None)])
+async def test_a_mode_or_can_submit_mismatch_starts_fresh(conn, stored):
+    """Never resume an auto session as manual (it could submit without a DECISION)."""
+    _resumable_as(conn, *stored)
+    calls = []
+    fake = _recording(AgentResult("draft_ready"), calls)
+    fake.conn = conn
+    r = await _submit(conn, mode="manual", run_agent=fake, resume=True)
+    assert r["ok"] and [c["resume"] for c in calls] == [False]
+    assert calls[0]["session_id"] != "sess-old" and calls[0]["nonce"] != "oldnonce"
+    assert calls[0]["cp"]["mode"] == "manual" and calls[0]["cp"]["can_submit"] == 1
+    cid = chat.conversation_for_job(conn, 1)
+    assert any("fresh session" in m["content"] for m in chat.messages_after(conn, cid, 0))
+
+
+async def test_a_matching_resume_says_so_in_chat(conn):
+    _resumable_as(conn)
+    await _submit(conn, mode="manual", run_agent=fake_agent(AgentResult("draft_ready")), resume=True)
+    cid = chat.conversation_for_job(conn, 1)
+    assert any("Resuming" in m["content"] for m in chat.messages_after(conn, cid, 0))
+
+
+async def test_the_fallback_gets_a_new_nonce_and_ignores_the_old_one(conn):
+    _resumable_as(conn, answers={"Notice?": "30 days"})
+    calls = []
+
+    def on_run(prompt, jid, nonce, events, session_id, resume):
+        if resume:
+            return AgentResult("failed", "agent_error")
+        # a stale line stamped with the old nonce is no protocol line for this run
+        return agent_mod.parse_result("RESULT:oldnonce:DRAFT_READY", nonce)
+
+    fake = _recording(None, calls, on_run)
+    fake.conn = conn
+    r = await _submit(conn, mode="manual", run_agent=fake, resume=True)
+    fresh = calls[1]
+    assert fresh["nonce"] != "oldnonce" and "oldnonce" not in fresh["prompt"]
+    assert f"RESULT:{fresh['nonce']}:" in fresh["prompt"]
+    assert fresh["cp"]["nonce"] == fresh["nonce"] and fresh["cp"]["session_id"] == fresh["session_id"]
+    assert fresh["cp"]["answers"] == {"Notice?": "30 days"}
+    assert not r["ok"] and r.get("status") != "draft"          # the stale RESULT did not count
+
+
+async def test_an_approve_is_recorded_on_the_checkpoint(conn, runs, factory):
+    from career_agent.web import actions
+
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
+        run = runs[jid] = FakeRun(nonce, events)
+        _waiting_on(run, events, "confirm", _confirm(Name="Asha"))
+        pid = chat.open_prompt_for_job(factory(), jid)["id"]
+        assert checkpoint.get(factory(), jid)["approve_sent"] == 0
+        assert actions.answer_prompt(factory(), pid, {"decision": "approve"}, factory)["ok"]
+        assert checkpoint.get(factory(), jid)["approve_sent"] == 1
+        return AgentResult("draft_ready")
+
+    await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory)
+
+
+async def test_an_auto_approve_is_recorded_on_the_checkpoint(conn, runs, factory):
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
+        run = runs[jid] = FakeRun(nonce, events)
+        _waiting_on(run, events, "confirm", _confirm(Name="Asha"))
+        assert checkpoint.get(factory(), jid)["approve_sent"] == 1
+        return AgentResult("applied")
+
+    await _submit(conn, mode="auto", run_agent=fake, conn_factory=factory)
