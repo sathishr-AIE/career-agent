@@ -30,16 +30,18 @@ def api_conversations():
 def api_messages(cid: int, after: int = 0):
     conn = _app()._conn()
     conv = conn.execute("SELECT job_id FROM conversation WHERE id = ?", (cid,)).fetchone()
-    open_prompt, resumable = None, False
+    open_prompt, resumable, row = None, False, None
     if conv and conv["job_id"]:
         cp = checkpoint.get(conn, conv["job_id"])
         # Never offer a Continue that is certain to be refused (a BLOCKING attempt).
         resumable = bool(cp and cp["status"] == "resumable"
                          and not ats_apply._blocking_status(conn, conv["job_id"]))
         row = chat.open_prompt_for_job(conn, conv["job_id"])
-        if row:
-            open_prompt = {"id": row["id"], "kind": row["kind"],
-                           "payload": json.loads(row["payload"]), "created_at": row["created_at"]}
+    elif conv:     # Home: its confirmation cards carry no job
+        row = chat.open_prompt_for_conversation(conn, cid)
+    if row:
+        open_prompt = {"id": row["id"], "kind": row["kind"],
+                       "payload": json.loads(row["payload"]), "created_at": row["created_at"]}
     return {"messages": chat.prompt_statuses(conn, chat.messages_after(conn, cid, after)),
             "open_prompt": open_prompt, "resumable": resumable}
 
@@ -60,25 +62,31 @@ def api_job_conversation(job_id: int):
 
 
 @router.post("/{cid}/messages")
-def api_post_message(cid: int, text: str = Body(..., embed=True)):
-    conn = _app()._conn()
+async def api_post_message(cid: int, text: str = Body(..., embed=True)):
+    """A Home message is routed (off the event loop) and answered there; a
+    job chat message is only recorded."""
+    m = _app()
+    conn = m._conn()
     conv = conn.execute("SELECT kind FROM conversation WHERE id = ?", (cid,)).fetchone()
     if not conv:
         raise HTTPException(status_code=404, detail="conversation not found")
     stripped = text.strip()
     if not stripped:
         raise HTTPException(status_code=422, detail="empty message")
-    mid = chat.post_message(conn, cid, "user", stripped)
     if conv["kind"] == "home":
-        chat.post_message(conn, cid, "system", "Commands arrive in a later slice.")
-    return {"ok": True, "message_id": mid}
+        return await actions.home_message(conn, stripped, m.BRIEF_PATH, m.CANDIDATE_PROFILE_PATH,
+                                          m._chat_conn, tasks=m._background_tasks)
+    return {"ok": True, "message_id": chat.post_message(conn, cid, "user", stripped)}
 
 
 @router.post("/prompts/{prompt_id}/answer")
-def api_answer_prompt(prompt_id: int, answer: dict = Body(...)):
+async def api_answer_prompt(prompt_id: int, answer: dict = Body(...)):
     """Body: {"answer": ..., "remember": bool} for an ASK card,
     {"decision": "approve"|"change"|"cancel", "changes": {...}} for CONFIRM.
     Refusals keep the {ok, message} body with 404/409/422."""
     m = _app()
-    result = actions.answer_prompt(m._conn(), prompt_id, answer, m._chat_conn)
+    # On the loop: an approved Home card starts its work as a background task.
+    result = actions.answer_prompt(m._conn(), prompt_id, answer, m._chat_conn,
+                                   brief_path=m.BRIEF_PATH, profile_path=m.CANDIDATE_PROFILE_PATH,
+                                   db_path=m.DB_PATH, tasks=m._background_tasks)
     return JSONResponse(status_code=200 if result["ok"] else result["code"], content=result)

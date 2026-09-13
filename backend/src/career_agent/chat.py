@@ -116,6 +116,25 @@ def open_prompt(conn, job_id: int, kind: str, payload: dict) -> int:
     return pid
 
 
+def open_home_prompt(conn, kind: str, payload: dict) -> int:
+    """A Home confirmation card (no job). One at a time: a newer request
+    supersedes every older open one, so only the latest ask can be approved."""
+    cid = home_conversation(conn)
+    conn.execute("UPDATE agent_prompt SET status = 'expired'"
+                 " WHERE conversation_id = ? AND status = 'open'", (cid,))
+    cur = conn.execute(
+        "INSERT INTO agent_prompt (job_id, conversation_id, kind, payload) VALUES (NULL, ?, ?, ?)",
+        (cid, kind, json.dumps(payload)))
+    pid = cur.lastrowid
+    post_message(conn, cid, "prompt", prompt_title(kind, payload), {"prompt_id": pid, "kind": kind})
+    return pid
+
+
+def open_prompt_for_conversation(conn, conversation_id: int):
+    return conn.execute("SELECT * FROM agent_prompt WHERE conversation_id = ? AND status = 'open'"
+                        " ORDER BY id DESC LIMIT 1", (conversation_id,)).fetchone()
+
+
 def prompt_title(kind: str, payload: dict) -> str:
     return "Review before applying" if kind == "confirm" else payload.get("question", kind)
 

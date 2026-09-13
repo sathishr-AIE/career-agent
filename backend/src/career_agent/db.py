@@ -143,7 +143,7 @@ CREATE INDEX IF NOT EXISTS message_conv_id ON message(conversation_id, id);
 
 CREATE TABLE IF NOT EXISTS agent_prompt (
     id              INTEGER PRIMARY KEY,
-    job_id          INTEGER NOT NULL REFERENCES job(id),
+    job_id          INTEGER REFERENCES job(id),  -- NULL: a Home confirmation card
     conversation_id INTEGER NOT NULL REFERENCES conversation(id),
     kind            TEXT NOT NULL,
     payload         TEXT NOT NULL,
@@ -229,6 +229,24 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "apply_checkpoint", "can_submit", "INTEGER")
     for col in ("approve_sent", "resume_count", "auto_resumed"):
         _add_column_if_missing(conn, "apply_checkpoint", col, "INTEGER NOT NULL DEFAULT 0")
+    # Task 20: a Home confirmation card has no job. SQLite can't drop NOT NULL
+    # in place, so an older DB's agent_prompt is rebuilt once (nothing references it).
+    if any(r["name"] == "job_id" and r["notnull"]
+           for r in conn.execute("PRAGMA table_info(agent_prompt)")):
+        conn.commit()
+        conn.executescript(
+            "BEGIN IMMEDIATE;"
+            "CREATE TABLE agent_prompt_new (id INTEGER PRIMARY KEY,"
+            " job_id INTEGER REFERENCES job(id),"
+            " conversation_id INTEGER NOT NULL REFERENCES conversation(id),"
+            " kind TEXT NOT NULL, payload TEXT NOT NULL,"
+            " status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','answered','expired')),"
+            " answer TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT);"
+            "INSERT INTO agent_prompt_new SELECT id, job_id, conversation_id, kind, payload,"
+            " status, answer, created_at, answered_at FROM agent_prompt;"
+            "DROP TABLE agent_prompt;"
+            "ALTER TABLE agent_prompt_new RENAME TO agent_prompt;"
+            "COMMIT;")
     conn.commit()
 
 

@@ -26,7 +26,7 @@ from career_agent.apply import checkpoint
 from career_agent.config import (SCORING_MODELS, CandidateProfile,
                                  CareerBrief, load_brief, save_brief,
                                  save_candidate_profile)
-from career_agent.web import context, worker
+from career_agent.web import context, intent, pipeline, worker
 
 log = logging.getLogger(__name__)
 
@@ -110,31 +110,38 @@ async def do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
     return result
 
 
-async def _do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
-                    event: str | None, brief_path: Path,
-                    candidate_profile_path: Path, conn_factory=None) -> dict:
+def _apply_denial(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
+                  brief_path: Path) -> str | None:
+    """Why Apply would refuse this job right now, or None."""
     parked = worker.get_run_state(conn, "apply")["current_job_id"]
     if parked is not None and parked != job_id:
         # Drafting job_id would set current_job_id to it below, silently
         # orphaning whatever's already parked -- its draft would still exist
         # but no card would ever point a Send button at it again.
-        return {"ok": False, "message":
-                "Another job is already parked awaiting review — resolve"
-                " it first."}
+        return "Another job is already parked awaiting review — resolve it first."
 
     denial = worker.guard(conn, job_id, allow_skip=allow_skip, brief_path=brief_path)
     if denial:
-        return {"ok": False, "message": denial}
+        return denial
 
-    # Checked BEFORE the expiry below: a run already live on this job owns
+    # Checked BEFORE _do_apply's expiry: a run already live on this job owns
     # its open cards, and expiring them would strand it waiting on an answer
     # that can no longer be given (submit() would refuse this apply anyway).
     live = ats_apply._blocking_status(conn, job_id)
     if live:
-        return {"ok": False, "message": ats_apply._blocked(job_id, live)["reason"]}
+        return ats_apply._blocked(job_id, live)["reason"]
     run = agent_mod.RUNS.get(job_id)
     if run is not None and not run.done.is_set():
-        return {"ok": False, "message": f"job {job_id} already has a live agent run"}
+        return f"job {job_id} already has a live agent run"
+    return None
+
+
+async def _do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
+                    event: str | None, brief_path: Path,
+                    candidate_profile_path: Path, conn_factory=None) -> dict:
+    denial = _apply_denial(conn, job_id, allow_skip, brief_path)
+    if denial:
+        return {"ok": False, "message": denial}
 
     # Before any await: a stale needs_answer card answered while this job is
     # tailoring would unpark it and let the worker run it a second time.
@@ -206,6 +213,7 @@ async def send(conn: sqlite3.Connection, job_id: int, brief_path: Path,
 
 
 _CLOSED = "That question is no longer open"
+_EXPIRED = "That request expired — ask again"
 _NO_RUN = "No live agent run for this job"
 
 
@@ -229,7 +237,9 @@ def _checkpoint_answer(conn, job_id: int, prompt_id: int, kind: str, payload: di
 
 
 def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
-                  conn_factory=None) -> dict:
+                  conn_factory=None, *, brief_path: Path | None = None,
+                  profile_path: Path | None = None, db_path: Path | None = None,
+                  tasks: set | None = None) -> dict:
     """Answer one open ASK/CONFIRM card: validate it against the prompt's
     kind, record it, and write ANSWER:/DECISION: into the SAME live session.
 
@@ -241,6 +251,10 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
                        (prompt_id,)).fetchone()
     if row is None:
         return _refuse(404, "No such question")
+    if _is_home_request(conn, row):
+        return _answer_home_prompt(conn, row, answer, brief_path=brief_path,
+                                   profile_path=profile_path, db_path=db_path,
+                                   conn_factory=conn_factory, tasks=tasks)
     if row["status"] != "open":
         return _refuse(409, _CLOSED)
     kind, payload = row["kind"], json.loads(row["payload"])
@@ -337,6 +351,213 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
             log.exception("qa_touch failed for prompt %s -- answer was"
                           " already sent and recorded", prompt_id)
     return {"ok": True, "message": "Answer sent"}
+
+
+# -- Home chat commands ---------------------------------------------------------
+
+HELP_TEXT = ("I can find new jobs (\"find jobs\"), show your queue (\"what's my queue?\"),"
+             " apply to a queued job (\"apply to #1639\" or \"apply to Acme\"),"
+             " pause, resume or stop the apply run, and tell you the status.")
+_ROUTER_DOWN = ("I couldn't work out what you meant — the command router may be unavailable"
+                " (is the claude CLI installed and signed in?). Say \"help\" to see the commands. ")
+_HOME_STALE = "-10 minutes"
+
+
+def _background(coro, tasks: set | None) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    if tasks is not None:
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+    return task
+
+
+def pipeline_run_now(conn: sqlite3.Connection, conn_factory, db_path: Path, brief_path: Path,
+                     tasks: set | None = None) -> dict:
+    """Run Now (both frontends, and an approved Home "find jobs"). Must run on the loop."""
+    if worker.get_run_state(conn, "pipeline")["status"] not in ("idle", "error"):
+        return {"ok": False, "message": "A pipeline run is already in progress."}
+    worker.set_run_state(conn, "pipeline", status="running", last_error=None,
+                         stage=None, found=0, duplicates=0, passed=0,
+                         scored=0, shortlisted=0)
+    # Same as run_start()'s equivalent line for the apply kind: set_run_state
+    # never touches started_at itself, and both the elapsed-time display and
+    # the activity feed's run-scoping query (context.pipeline_status_context)
+    # rely on it being real, not NULL.
+    conn.execute("UPDATE run_state SET started_at = datetime('now') WHERE kind = 'pipeline'")
+    conn.commit()
+    store.log(conn, None, "pipeline_started")
+    _background(pipeline.run_background(conn_factory, db_path, brief_path), tasks)
+    return {"ok": True, "message": "ok"}
+
+
+def _queue_text(conn) -> str:
+    rows = conn.execute(
+        "SELECT j.id, j.company, j.title FROM job j JOIN assessment a ON a.job_id = j.id"
+        f" WHERE {worker.QUEUE_WHERE}"
+        " ORDER BY j.priority ASC NULLS LAST, a.weighted_score DESC LIMIT 10").fetchall()
+    if not rows:
+        return "Your queue is empty."
+    total = worker.queue_count(conn)
+    lines = [f"#{r['id']} {r['company']} — {r['title']}" for r in rows]
+    more = f"\n…and {total - len(rows)} more" if total > len(rows) else ""
+    return f"{total} queued:\n" + "\n".join(lines) + more
+
+
+def _status_text(conn) -> str:
+    s = context.run_status_context(conn)
+    state, stats, job = s["run_state"], s["stats"], s["current_job"]
+    working = f", on #{job['job_id']} {job['company']} — {job['title']}" if job else ""
+    return (f"Apply run: {state['status']} ({state['mode']} mode){working}."
+            f" {stats['queued']} queued, {stats['total_applied']} applied,"
+            f" {stats['failed_skipped']} failed or skipped."
+            f" Discovery: {worker.get_run_state(conn, 'pipeline')['status']}.")
+
+
+def _ask_home(conn, action: str, args: dict, question: str) -> None:
+    chat.open_home_prompt(conn, "approve", {"origin": "home", "kind": "approve",
+                                            "action": action, "args": args, "question": question})
+
+
+def _apply_to_reply(conn, job_ref: str | None) -> str | None:
+    job_id = intent.resolve_job(conn, job_ref)
+    if job_id is None:
+        if not (job_ref or "").strip():
+            return "Which job? Give me an id like #1639, or a company or title from your queue."
+        matches = intent.describe_matches(conn, job_ref)
+        if not matches:
+            return f"I couldn't find a queued job matching \"{job_ref}\"."
+        return ("That matches more than one job — which one? "
+                + "; ".join(f"#{m['id']} {m['company']} — {m['title']}" for m in matches))
+    job = conn.execute("SELECT company, title FROM job WHERE id = ?", (job_id,)).fetchone()
+    _ask_home(conn, "apply_to", {"job_id": job_id},
+              f"Start applying to {job['title']} at {job['company']} (#{job_id})?")
+    return None
+
+
+async def home_message(conn: sqlite3.Connection, text: str, brief_path: Path, profile_path: Path,
+                       conn_factory=None, *, runner=None, tasks: set | None = None) -> dict:
+    """One Home chat message: record it, route it (claude, off the loop), and
+    answer. Spend or submit intents only open an approve card; pause/resume/stop
+    act directly (cheap, reversible). Never raises."""
+    home = chat.home_conversation(conn)
+    mid = chat.post_message(conn, home, "user", text)
+    try:
+        routed = await asyncio.to_thread(intent.route, text, runner=runner)
+        name = routed["intent"]
+        reply = None      # run controls narrate in Home themselves (worker.say)
+        if name == "help":
+            reply = HELP_TEXT
+        elif name == "show_queue":
+            reply = _queue_text(conn)
+        elif name == "status":
+            reply = _status_text(conn)
+        elif name == "find_jobs":
+            _ask_home(conn, "find_jobs", {}, "Run discovery now? (uses Apify + scoring credits)")
+        elif name == "apply_to":
+            reply = _apply_to_reply(conn, routed.get("job_ref"))
+        elif name == "pause_apply":
+            run_pause(conn)
+        elif name == "stop_apply":
+            run_stop(conn)
+        elif name == "resume_apply":
+            _background(run_resume(conn, brief_path, profile_path, conn_factory), tasks)
+        elif routed == intent._UNKNOWN:     # the router itself failed
+            reply = _ROUTER_DOWN + HELP_TEXT
+        else:
+            reply = f"{routed['reply']} {HELP_TEXT}"
+    except Exception as exc:
+        log.exception("home message failed")
+        reply = f"Something went wrong handling that ({exc}). {HELP_TEXT}"
+    if reply:
+        chat.post_message(conn, home, "agent", reply)
+    return {"ok": True, "message_id": mid}
+
+
+def _is_home_request(conn, row) -> bool:
+    """Only we open these (chat.open_home_prompt): an agent ASK loses its
+    origin in parse_ask and lives in its job's conversation anyway."""
+    return (json.loads(row["payload"]).get("origin") == "home"
+            and row["conversation_id"] == chat.home_conversation(conn))
+
+
+def _home_says(conn, text: str, payload: dict | None = None) -> None:
+    chat.post_message(conn, chat.home_conversation(conn), "agent", text, payload)
+
+
+def _home_find_jobs(conn, args: dict, *, conn_factory, db_path, brief_path, tasks, **_) -> dict:
+    result = pipeline_run_now(conn, conn_factory, db_path, brief_path, tasks)
+    if not result["ok"]:
+        _home_says(conn, result["message"])
+        return _refuse(409, result["message"])
+    _home_says(conn, "Discovery started — new matches land in your queue when it finishes.")
+    return {"ok": True, "message": "Discovery started"}
+
+
+def _home_apply_to(conn, args: dict, *, brief_path, profile_path, conn_factory, tasks, **_) -> dict:
+    job_id = args.get("job_id")
+    if type(job_id) is not int or not conn.execute("SELECT 1 FROM job WHERE id = ?",
+                                                   (job_id,)).fetchone():
+        text = f"Job #{job_id} no longer exists."
+        _home_says(conn, text)
+        return _refuse(409, text)
+    # A readable refusal now; do_apply re-runs every guard when it starts.
+    denial = _apply_denial(conn, job_id, False, brief_path)
+    if denial:
+        _home_says(conn, f"Apply refused: {denial}")
+        return _refuse(409, denial)
+    cid = chat.conversation_for_job(conn, job_id)
+    _home_says(conn, f"Started — follow along in the job's chat (#{job_id})",
+               {"job_id": job_id, "conversation_id": cid})
+    _background(_home_apply_run(conn, job_id, brief_path, profile_path, conn_factory), tasks)
+    return {"ok": True, "message": "Started", "job_id": job_id, "conversation_id": cid}
+
+
+async def _home_apply_run(conn, job_id: int, brief_path, profile_path, conn_factory) -> None:
+    try:
+        result = await do_apply(conn, job_id, allow_skip=False, event="human_applied",
+                                brief_path=brief_path, candidate_profile_path=profile_path,
+                                conn_factory=conn_factory)
+        text = result["message"]
+    except Exception as exc:
+        log.exception("home apply failed for job %s", job_id)
+        text = f"Apply failed: {exc}"
+    _home_says(conn, f"#{job_id}: {text}")
+
+
+HOME_ACTIONS = {"find_jobs": _home_find_jobs, "apply_to": _home_apply_to}
+
+
+def _answer_home_prompt(conn, row, answer, **ctx) -> dict:
+    """Approve/Reject a Home card: refuse a stale, superseded, or unknown one,
+    claim it atomically, then dispatch its allowlisted action. Must run on the loop."""
+    if row["status"] == "expired":
+        return _refuse(409, _EXPIRED)
+    if row["status"] != "open":
+        return _refuse(409, _CLOSED)
+    payload = json.loads(row["payload"])
+    handler = HOME_ACTIONS.get(payload.get("action"))
+    if row["kind"] != "approve" or handler is None:
+        return _refuse(422, "That isn't something Home can do")
+    decision = answer.get("answer") if isinstance(answer, dict) else None
+    if decision not in ("approve", "reject"):
+        return _refuse(422, "answer must be approve or reject")
+    stale = conn.execute(
+        "SELECT created_at < datetime('now', ?) OR EXISTS (SELECT 1 FROM agent_prompt n"
+        "  WHERE n.conversation_id = p.conversation_id AND n.status = 'open' AND n.id > p.id)"
+        " FROM agent_prompt p WHERE p.id = ?", (_HOME_STALE, row["id"])).fetchone()[0]
+    if stale:
+        conn.execute("UPDATE agent_prompt SET status = 'expired' WHERE id = ? AND status = 'open'",
+                     (row["id"],))
+        conn.commit()
+        return _refuse(409, _EXPIRED)
+    if chat.answer_prompt_row(conn, row["id"], {"answer": decision}) is None:
+        return _refuse(409, _CLOSED)
+    chat.post_message(conn, row["conversation_id"], "user",
+                      f"{payload.get('question', 'Request')} → {decision}")
+    if decision == "reject":
+        _home_says(conn, "Cancelled")
+        return {"ok": True, "message": "Cancelled"}
+    return handler(conn, payload.get("args") or {}, **ctx)
 
 
 def resume_job(conn: sqlite3.Connection, job_id: int, brief_path: Path,

@@ -266,26 +266,9 @@ def run_stop():
 
 @app.post("/pipeline/run-now")
 async def pipeline_run_now():
-    conn = _conn()
-    state = worker.get_run_state(conn, "pipeline")
-    if state["status"] not in ("idle", "error"):
-        return HTMLResponse(
-            '<span class="denied">A pipeline run is already in progress.</span>')
-    worker.set_run_state(conn, "pipeline", status="running", last_error=None,
-                         stage=None, found=0, duplicates=0, passed=0,
-                         scored=0, shortlisted=0)
-    # Same as run_start()'s equivalent line for the apply kind: set_run_state
-    # never touches started_at itself, and both the elapsed-time display and
-    # the activity feed's run-scoping query (context.pipeline_status_context)
-    # rely on it being real, not NULL.
-    conn.execute("UPDATE run_state SET started_at = datetime('now')"
-                 " WHERE kind = 'pipeline'")
-    conn.commit()
-    store.log(conn, None, "pipeline_started")
-    task = asyncio.create_task(
-        pipeline.run_background(_conn, DB_PATH, BRIEF_PATH))
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+    result = actions.pipeline_run_now(_conn(), _conn, DB_PATH, BRIEF_PATH, _background_tasks)
+    if not result["ok"]:
+        return HTMLResponse(f'<span class="denied">{escape(result["message"])}</span>')
     return HTMLResponse("ok")
 
 
