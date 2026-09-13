@@ -857,6 +857,9 @@ def test_profile_section_renders_gender_address_work_and_education():
                             start="2014", end="2018")]))
     s = _profile_section(prof)
     assert "Gender: decline to self-identify" in s
+    assert ("Any EEO / gender / race / veteran / disability self-identification "
+            "question: decline to self-identify") in s
+    assert "Gender question: answer" not in s
     assert "Address: 1 Main St, Chennai, India" in s
     acme = s.index("- Acme — Lead (2018-01–present)")
     mid = s.index("- Mid Co — Dev (2020-02–2022-01): APIs")
@@ -870,6 +873,17 @@ def test_profile_section_empty_sections():
     from career_agent.apply.agent import _profile_section
     s = _profile_section(_profile().model_copy(update={"gender": "male"}))
     assert "Gender: male" in s
+    assert "- Gender question: answer male" in s
+    assert ("race / ethnicity / veteran / disability self-identification "
+            "question: decline to self-identify") in s
+    decline_lines = [ln for ln in s.splitlines() if "decline" in ln.lower()]
+    assert not any("gender" in ln.lower() for ln in decline_lines)
     assert "Address: (not provided)" in s
+    # Whole prompt, not just the section: no other section may decline gender.
+    p = build_prompt(_job(), _profile().model_copy(update={"gender": "male"}),
+                     _brief(), QA, "r", "x.docx", mode="auto", can_submit=True,
+                     nonce=N)
+    assert not any("gender" in ln.lower() and "decline" in ln.lower()
+                   for ln in p.splitlines())
     assert "Work history:\n(none recorded)" in s
     assert "Education:\n(none recorded)" in s

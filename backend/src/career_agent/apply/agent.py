@@ -149,6 +149,17 @@ def _profile_section(profile) -> str:
     edu_lines = "\n".join(
         f"- {e.institution} — {e.degree} in {e.field} ({e.start}–{e.end})"
         for e in profile.education) or "(none recorded)"
+    # One instruction per EEO category: a stated gender is answered, never
+    # also declined.
+    if profile.gender == "decline":
+        eeo = ("- Any EEO / gender / race / veteran / disability self-identification "
+               "question: decline to self-identify, using whichever option the form "
+               "offers for that")
+    else:
+        eeo = (f"- Gender question: answer {profile.gender} (from PROFILE)\n"
+               "- Any race / ethnicity / veteran / disability self-identification "
+               "question: decline to self-identify, using whichever option the form "
+               "offers for that")
     return (
         "== APPLICANT PROFILE ==\n"
         f"Full name: {profile.candidate_name} (first: {first}, last: {last or '(none)'})\n"
@@ -165,8 +176,7 @@ def _profile_section(profile) -> str:
         "- Age 18 or over: Yes\n"
         "- Willing to complete a standard background check: Yes\n"
         "- How did you hear about this job: Online job board\n"
-        "- Any EEO / gender / race / veteran / disability self-identification question: "
-        "decline to self-identify, using whichever option the form offers for that"
+        + eeo
     )
 
 
@@ -264,8 +274,8 @@ def _screening_section() -> str:
         "RESUME TEXT): answer confidently and specifically.\n"
         "- Open-ended questions (\"Why this role?\", \"Tell us about yourself\"): 2-3 "
         "sentences, specific to this job, grounded in RESUME TEXT -- no generic filler.\n"
-        "- EEO / diversity self-identification questions: decline to self-identify, "
-        "using whichever option the form provides for that."
+        "- EEO / diversity self-identification questions: follow the Standard "
+        "defaults in APPLICANT PROFILE, which say per category what to answer."
     )
 
 

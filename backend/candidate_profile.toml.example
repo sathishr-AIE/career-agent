@@ -2,6 +2,9 @@
 # candidate_profile.toml is gitignored -- unlike career_brief.toml, this
 # file holds PII (name, email, phone), not search preferences, so it never
 # gets committed.
+# Saving from the dashboard's Settings page writes the address, work_history
+# and education sections into this file (empty ones too) even if yours
+# predates them.
 
 candidate_name = "Jane Doe"
 candidate_email = "jane@example.com"
