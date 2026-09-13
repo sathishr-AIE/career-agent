@@ -350,7 +350,7 @@ def test_location_check_states_remote_ok_explicitly():
     assert p_ok != p_not_ok
 
 
-# -- known logins / S5 account rules (Task 14: store only, not wired) -----
+# -- known logins / S5 account rules (Task 15: wired) ----------------------
 
 def test_known_logins_section_renders_domain_and_email_never_password():
     logins = [{"domain": "careers.ses.com", "email": "asha@example.com",
@@ -366,12 +366,56 @@ def test_known_logins_section_empty_list_is_empty_string():
     assert agent_mod._known_logins_section([]) == ""
 
 
-def test_account_rules_s5_constant_exists_and_is_not_wired_into_build_prompt():
-    assert "approve_account" in agent_mod.ACCOUNT_RULES_S5
-    assert "password" in agent_mod.ACCOUNT_RULES_S5.lower()
+def test_build_prompt_carries_account_rules_and_known_logins():
+    logins = [{"domain": "careers.ses.com", "email": "asha@example.com",
+               "password": "should-never-appear"}]
     p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual",
-                     can_submit=False, nonce=N)
-    assert agent_mod.ACCOUNT_RULES_S5 not in p
+                     can_submit=False, nonce=N, logins=logins)
+    assert "approve_account" in p and "need_password" in p
+    assert "Never choose a password yourself" in p
+    assert "== KNOWN LOGINS ==" in p and "careers.ses.com (sign in as asha@example.com)" in p
+    assert "should-never-appear" not in p
+    assert "Never create an account" not in p
+    # no logins -> no section
+    assert "== KNOWN LOGINS ==" not in build_prompt(
+        _job(), _profile(), _brief(), [], "r", "x.docx", mode="manual", can_submit=False, nonce=N)
+
+
+def test_parse_ask_account_kinds_are_validated_strictly():
+    from career_agent.apply.agent import parse_ask
+
+    def ask(**kw):
+        return parse_ask("ASK:n1:" + _json.dumps({"id": "a", **kw}), "n1")
+
+    ok = ask(kind="approve_account", domain="https://WWW.Careers.SES.com/join",
+             email="asha@example.com", login_url="https://careers.ses.com/login",
+             origin="needs_answer")
+    assert ok["domain"] == "careers.ses.com" and "origin" not in ok
+    assert "careers.ses.com" in ok["question"]              # defaulted
+    assert ask(kind="approve_account", domain="ses.com", email="a@x.com")   # login_url optional
+    assert ask(kind="approve_account", domain="ses.com") is None            # no email
+    assert ask(kind="approve_account", domain="ses.com", email="nope") is None
+    assert ask(kind="approve_account", email="a@x.com") is None             # no domain
+    assert ask(kind="approve_account", domain="", email="a@x.com") is None
+    for bad in ("javascript:alert(1)", "file:///C:/x", "http://ses.com/login", "ftp://ses.com"):
+        assert ask(kind="approve_account", domain="ses.com", email="a@x.com",
+                   login_url=bad) is None, bad
+    assert ask(kind="approve_account", domain="ses.com", email="a@x.com",
+               login_url="http://localhost:8080/login")
+
+    good = ask(kind="need_password", domain="ses.com", url="https://careers.ses.com/login")
+    assert good["domain"] == "ses.com" and good["question"]
+    assert ask(kind="need_password", domain="ses.com") is None              # page url required
+    assert ask(kind="need_password", url="https://ses.com/") is None        # domain required
+    for bad in ("javascript:alert(1)", "file:///etc/passwd", "http://ses.com/", "ses.com"):
+        assert ask(kind="need_password", domain="ses.com", url=bad) is None, bad
+    assert ask(kind="need_password", domain="localhost", url="http://127.0.0.1:5000/")
+
+
+def test_summarize_tool_input_scrubs_secrets_before_truncating():
+    pw = "Zq9!secretPW_1234abc"
+    s = agent_mod.summarize_tool_input({"v": "x" * 280 + pw}, secrets={pw})
+    assert pw[:5] not in s and "••••••" in s
 
 
 # -- consume_stream -------------------------------------------------------
@@ -837,15 +881,15 @@ def test_the_prompt_forbids_creating_accounts_and_accepting_terms(mode, kw):
     candidate's name and accepted Terms + a data-consent statement, because
     nothing said not to and LOGIN_ISSUE read 'could not sign in or register'."""
     p = _prompt(N, mode=mode, **kw)
-    assert "Never create an account" in p
+    assert 'ASK of kind "approve_account"' in p
     assert "Never accept Terms of Use" in p
     assert f"RESULT:{N}:FAILED:account_required" in p
     login_line = next(l for l in p.splitlines()
                       if l.startswith(f"RESULT:{N}:LOGIN_ISSUE"))
     assert "register" not in login_line.lower()
-    # the login-wall step must route to account_required, not LOGIN_ISSUE
+    # the login-wall step must route through the account protocol, then account_required
     step5 = next(l for l in _steps(p).splitlines() if l.startswith("5."))
-    assert "account_required" in step5
+    assert "account_required" in step5 and "approve_account" in step5
 
 
 # -- live-safety FIX 5: browser_run_code_unsafe is blocked -----------------

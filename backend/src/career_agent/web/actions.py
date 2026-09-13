@@ -18,13 +18,14 @@ from pathlib import Path
 import docx
 from pydantic import ValidationError
 
-from career_agent import chat, outcomes, store, tailor
+from career_agent import chat, credentials, outcomes, store, tailor
 from career_agent.apply import agent as agent_mod
 from career_agent.apply import ats as ats_apply
 from career_agent.apply import checkpoint
 from career_agent.config import (SCORING_MODELS, CandidateProfile,
                                  CareerBrief, load_brief, save_brief,
                                  save_candidate_profile)
+from career_agent.security import CredentialKeyError
 from career_agent.web import context, worker
 
 log = logging.getLogger(__name__)
@@ -220,11 +221,29 @@ def _checkpoint_answer(conn, job_id: int, prompt_id: int, kind: str, payload: di
     if kind == "confirm":
         answers = body.get("changes", {})
     else:
-        answers = {} if payload.get("sensitive") else {payload.get("question", kind): body["answer"]}
+        answers = {} if payload.get("sensitive") or kind == "need_password" else {payload.get("question", kind): body["answer"]}
     try:
         checkpoint.mark_running(conn, job_id, f"answered {prompt_id}", answers)
     except Exception:
         log.warning("could not checkpoint answer %s for job %s", prompt_id, job_id, exc_info=True)
+
+
+def _password_answer(conn, payload: dict) -> tuple[dict, str]:
+    """need_password's ANSWER body and a chat notice. The agent-supplied
+    domain is untrusted: a login is released only when the page the agent
+    reports being on is that domain or a subdomain of it, so an injected page
+    can't ask for another site's password."""
+    domain, url = payload.get("domain") or "", payload.get("url") or ""
+    none = {"id": payload.get("id"), "answer": "none"}
+    if not credentials.host_matches(url, domain):
+        return none, f"Did not send the saved login for {domain}: the agent's page is {url}"
+    try:
+        cred = credentials.get(conn, domain)
+    except (CredentialKeyError, ValueError) as exc:
+        return none, f"Could not read the saved login for {domain}: {exc}"
+    if cred is None:
+        return none, f"No saved login for {domain}"
+    return {"id": payload.get("id"), "password": cred["password"]}, f"Sent the saved login for {domain}"
 
 
 def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
@@ -243,8 +262,6 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
     if row["status"] != "open":
         return _refuse(409, _CLOSED)
     kind, payload = row["kind"], json.loads(row["payload"])
-    if kind in ("need_password", "approve_account"):
-        return _refuse(422, "Account actions arrive in a later slice.")
     answer = answer if isinstance(answer, dict) else {}
 
     if kind == "confirm":
@@ -269,7 +286,7 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
             return _refuse(422, "Pick one of the offered options")
         if kind == "text" and not (isinstance(value, str) and value.strip()):
             return _refuse(422, "The answer can't be empty")
-        if kind == "approve" and value not in ("approve", "reject"):
+        if kind in ("approve", "approve_account") and value not in ("approve", "reject"):
             return _refuse(422, "answer must be approve or reject")
         if kind == "text":
             value = value.strip()
@@ -277,6 +294,10 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
                 "remember": bool(answer.get("remember", True))}
         shown = "(hidden)" if payload.get("sensitive") else value
         summary = f"{payload.get('question', kind)} → {shown}"
+        if kind == "approve_account":
+            body = {"id": payload.get("id"), "answer": value}
+            summary = (f"{'Approved' if value == 'approve' else 'Rejected'} creating an "
+                       f"account at {payload.get('domain')}")
 
     if payload.get("origin") == "needs_answer":
         # A parked job, not a live run: nothing to relay. The answer goes to
@@ -298,16 +319,41 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
     if (prompt_id <= getattr(getattr(run, "events", None), "prompt_baseline", float("inf"))
             or newest is None or newest["id"] != prompt_id):
         return _refuse(409, _CLOSED)
+    sent, notice = body, None   # `sent` may carry a password; `body`, the recorded answer, never
+    if kind == "need_password":
+        sent, notice = _password_answer(conn, payload)
+        body = {"id": payload.get("id"), "answer": "sent" if "password" in sent else "none"}
+        summary = None
     if chat.answer_prompt_row(conn, prompt_id, body) is None:
         return _refuse(409, _CLOSED)            # answered concurrently
-    if not run.send(agent_mod.answer_line(run.nonce, kind, body)):
+    if kind == "approve_account" and value == "approve":
+        pw = credentials.generate_password()
+        try:
+            # After the claim above (a double approve can't store one password
+            # and send another) and BEFORE the ANSWER carries it. If the send
+            # below is refused the row is kept: no account was created with it,
+            # and the next approve overwrites it -- put refuses only a user row.
+            credentials.put(conn, payload["domain"], payload.get("login_url") or "",
+                            payload["email"], pw, "agent")
+        except (credentials.UserLoginExists, CredentialKeyError) as exc:
+            chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
+            if isinstance(exc, CredentialKeyError):
+                return _refuse(503, str(exc))
+            return _refuse(409, f"a login you saved already exists for {payload['domain']}")
+        sent, notice = {**body, "password": pw}, f"Saved login for {payload['domain']}"
+    if "password" in sent:
+        run.secrets.add(sent["password"])       # scrubbed from chat and transcript from now on
+    if not run.send(agent_mod.answer_line(run.nonce, kind, sent)):
         chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
         return _refuse(409, _NO_RUN)
     _checkpoint_answer(conn, row["job_id"], prompt_id, kind, payload, body)
     # The answer is already sent and recorded at this point -- posting the
     # summary first means a memory-store hiccup below can never turn a
     # delivered answer into a failed response (see the two try/excepts).
-    chat.post_message(conn, row["conversation_id"], "user", summary)
+    if summary:
+        chat.post_message(conn, row["conversation_id"], "user", summary)
+    if notice:                                  # never the password itself
+        chat.post_message(conn, row["conversation_id"], "system", notice)
     # Remember a successfully-sent choice/text answer for next time, unless
     # the human opted out or the card was marked sensitive (never store a
     # password/SSN-shaped answer in qa_bank; qa_remember itself also

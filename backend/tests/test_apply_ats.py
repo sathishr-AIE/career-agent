@@ -1093,7 +1093,7 @@ class FakeRun:
     def __init__(self, nonce, events=None):
         from career_agent.apply.runner import RunEvents
         self.events = events or RunEvents()
-        self.nonce, self.sent = nonce, []
+        self.nonce, self.sent, self.secrets = nonce, [], set()
         self.waiting, self.done = threading.Event(), threading.Event()
 
     def send(self, text):
@@ -1249,17 +1249,163 @@ def test_answer_prompt_validates_by_kind_and_refuses_closed(conn, runs):
     assert actions.answer_prompt(conn, 999, {})["code"] == 404
 
 
-@pytest.mark.parametrize("kind", ["need_password", "approve_account"])
-def test_account_prompts_are_not_answerable_yet(conn, runs, kind):
+# -- Task 15: approve_account / need_password --------------------------------
+
+@pytest.fixture
+def key(monkeypatch):
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv("CREDENTIAL_KEY", Fernet.generate_key().decode())
+
+
+def _chat_texts(conn):
+    return [m["content"] for m in chat.messages_after(conn, chat.conversation_for_job(conn, 1))]
+
+
+def _db_dump(conn):
+    return "\n".join(conn.iterdump())
+
+
+def _sent_body(line):
+    return json.loads(line.split(":", 2)[2])
+
+
+_ACCT = {"id": "acct", "kind": "approve_account", "question": "Create an account?",
+         "domain": "careers.ses.com", "email": "asha@example.com",
+         "login_url": "https://careers.ses.com/login"}
+
+
+def test_approve_account_stores_the_credential_before_the_answer_carries_it(conn, runs, key):
+    from career_agent import credentials
+    from career_agent.web import actions
+    run = runs[1] = FakeRun("n")
+    at_send = []
+    real_send = run.send
+    run.send = lambda text: (at_send.append(credentials.get(conn, "careers.ses.com")),
+                             real_send(text))[1]
+    run.waiting.set()
+    pid = _open(conn, "approve_account", _ACCT)
+    assert actions.answer_prompt(conn, pid, {"answer": "approve"})["ok"]
+
+    body = _sent_body(run.sent[0])
+    pw = body["password"]
+    assert body == {"id": "acct", "answer": "approve", "password": pw} and len(pw) == 20
+    assert at_send[0]["password"] == pw and at_send[0]["created_by"] == "agent"
+    assert at_send[0]["email"] == "asha@example.com"
+    assert pw in run.secrets                               # redacted from chat/transcript
+    assert "Saved login for careers.ses.com" in _chat_texts(conn)
+    assert pw not in _db_dump(conn)                        # encrypted; no answer row/chat/checkpoint copy
+    answer = json.loads(conn.execute("SELECT answer FROM agent_prompt WHERE id = ?",
+                                     (pid,)).fetchone()[0])
+    assert answer["answer"] == "approve" and "password" not in answer
+
+
+def test_reject_account_sends_reject_and_stores_nothing(conn, runs, key):
+    from career_agent import credentials
     from career_agent.web import actions
     run = runs[1] = FakeRun("n")
     run.waiting.set()
-    pid = _open(conn, kind, {"id": "p", "question": "Password?"})
-    r = actions.answer_prompt(conn, pid, {"answer": "approve", "password": "hunter2"})
-    assert r["message"] == "Account actions arrive in a later slice." and run.sent == []
-    assert chat.open_prompt_for_job(conn, 1)["status"] == "open"
-    assert not any("hunter2" in m["content"] for m in
-                   chat.messages_after(conn, chat.conversation_for_job(conn, 1)))
+    pid = _open(conn, "approve_account", _ACCT)
+    assert actions.answer_prompt(conn, pid, {"answer": "reject"})["ok"]
+    assert _sent_body(run.sent[0]) == {"id": "acct", "answer": "reject"}
+    assert credentials.list_(conn) == []
+    assert actions.answer_prompt(conn, _open(conn, "approve_account", _ACCT),
+                                 {"answer": "maybe"})["code"] == 422
+
+
+def test_approve_account_never_overwrites_a_login_the_user_saved(conn, runs, key):
+    from career_agent import credentials
+    from career_agent.web import actions
+    credentials.put(conn, "careers.ses.com", "", "me@x.com", "users-own-pw", "user")
+    conn.execute("INSERT INTO application (job_id, resume_version, status, started_at)"
+                 " VALUES (1, 'v1', 'in_flight', datetime('now'))")   # the live run's row
+    conn.commit()
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    pid = _open(conn, "approve_account", _ACCT)
+    r = actions.answer_prompt(conn, pid, {"answer": "approve"})
+    assert r["code"] == 409
+    assert r["message"] == "a login you saved already exists for careers.ses.com"
+    assert run.sent == [] and chat.open_prompt_for_job(conn, 1)["id"] == pid
+    assert credentials.get(conn, "careers.ses.com")["password"] == "users-own-pw"
+
+
+def _need(url):
+    return {"id": "np", "kind": "need_password", "question": "Password for careers.ses.com",
+            "domain": "careers.ses.com", "url": url}
+
+
+def test_need_password_releases_the_login_only_on_the_matching_host(conn, runs, key):
+    from career_agent import credentials
+    from career_agent.web import actions
+    pw = "Stored!Pass_4321abcd"
+    credentials.put(conn, "careers.ses.com", "", "a@x.com", pw, "agent")
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    pid = _open(conn, "need_password", _need("https://jobs.careers.ses.com/login"))
+    assert actions.answer_prompt(conn, pid, {})["ok"]
+    assert _sent_body(run.sent[0]) == {"id": "np", "password": pw}
+    assert pw in run.secrets and pw not in _db_dump(conn)
+    assert not any(pw in t for t in _chat_texts(conn))
+
+
+def test_need_password_on_a_foreign_host_answers_none_and_warns(conn, runs, key):
+    from career_agent import credentials
+    from career_agent.web import actions
+    pw = "Stored!Pass_4321abcd"
+    credentials.put(conn, "careers.ses.com", "", "a@x.com", pw, "agent")
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    pid = _open(conn, "need_password", _need("https://careers.ses.com.evil.com/login"))
+    assert actions.answer_prompt(conn, pid, {})["ok"]
+    assert _sent_body(run.sent[0]) == {"id": "np", "answer": "none"}
+    assert run.secrets == set() and pw not in _db_dump(conn)
+    assert any("careers.ses.com.evil.com" in t for t in _chat_texts(conn))
+
+
+def test_need_password_with_no_saved_login_answers_none(conn, runs, key):
+    from career_agent.web import actions
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    pid = _open(conn, "need_password", _need("https://careers.ses.com/login"))
+    assert actions.answer_prompt(conn, pid, {})["ok"]
+    assert _sent_body(run.sent[0]) == {"id": "np", "answer": "none"}
+
+
+async def test_need_password_is_answered_on_ask_and_logins_reach_the_prompt(conn, runs, factory, key):
+    from career_agent import credentials
+    pw = "Auto!Pass_1234wxyz"
+    credentials.put(conn, "careers.ses.com", "", "a@x.com", pw, "agent")
+    seen = {}
+
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
+        run = runs[jid] = FakeRun(nonce, events)
+        seen["prompt"] = prompt
+        _waiting_on(run, events, "ask", _need("https://careers.ses.com/login"))
+        seen["sent"] = list(run.sent)
+        return AgentResult("draft_ready")
+
+    await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory)
+    assert [_sent_body(s) for s in seen["sent"]] == [{"id": "np", "password": pw}]
+    assert "careers.ses.com (sign in as a@x.com)" in seen["prompt"]
+    assert pw not in seen["prompt"] and pw not in _db_dump(conn)
+
+
+def test_a_tool_call_echoing_a_sent_password_is_redacted_in_chat_and_transcript(conn, factory):
+    from test_runner import FakePopen, _assistant, _result
+    from career_agent.apply.runner import AgentRun
+    pw = "Echo!Pass_9876wxyz"
+    fake = FakePopen()
+    run = AgentRun(["x"], ".", {}, "nn", ats_apply._chat_events(factory, 1, "nn"),
+                   popen=lambda *a, **kw: fake)
+    run.secrets.add(pw)
+    run.start("go")
+    fake.emit(_assistant(f"Signing in with {pw}", ("mcp__playwright__browser_fill_form",
+              {"fields": [{"name": "Account key", "value": pw}]})))
+    fake.emit(_assistant("RESULT:nn:APPLIED")); fake.emit(_result()); fake.close()
+    assert run.wait(5)
+    texts = _chat_texts(conn)
+    assert any("browser_fill_form" in t for t in texts)
+    assert not any(pw in t for t in texts) and pw not in run.transcript
 
 
 def test_a_sensitive_answer_is_hidden_in_the_chat(conn, runs):

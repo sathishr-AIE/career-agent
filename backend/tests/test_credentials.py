@@ -213,3 +213,30 @@ def test_delete_returns_true_then_false(conn):
     assert credentials.delete(conn, cid) is True
     assert credentials.delete(conn, cid) is False
     assert credentials.list_(conn) == []
+
+
+# -- Task 15: host match and the user-row guard ------------------------------
+
+@pytest.mark.parametrize("url,domain,ok", [
+    ("https://careers.ses.com/login", "careers.ses.com", True),
+    ("https://www.careers.ses.com/x", "careers.ses.com", True),
+    ("https://jobs.careers.ses.com/x", "careers.ses.com", True),
+    ("https://evil.com/login", "linkedin.com", False),
+    ("https://notlinkedin.com/", "linkedin.com", False),       # no dot boundary
+    ("https://linkedin.com.evil.com/", "linkedin.com", False),
+    ("https://evil.com\@linkedin.com/", "linkedin.com", False),
+    ("", "linkedin.com", False),
+])
+def test_host_matches_only_on_the_domain_or_a_dot_boundary_subdomain(url, domain, ok):
+    assert credentials.host_matches(url, domain) is ok
+
+
+def test_an_agent_put_never_overwrites_a_user_saved_login(conn):
+    credentials.put(conn, "ses.com", "", "me@x.com", "users-own-pw", "user")
+    with pytest.raises(credentials.UserLoginExists):
+        credentials.put(conn, "ses.com", "", "agent@x.com", "generated", "agent")
+    assert credentials.get(conn, "ses.com")["password"] == "users-own-pw"
+    # an agent row is overwritten by the next agent approve
+    credentials.put(conn, "b.com", "", "a@x.com", "one", "agent")
+    credentials.put(conn, "b.com", "", "a@x.com", "two", "agent")
+    assert credentials.get(conn, "b.com")["password"] == "two"

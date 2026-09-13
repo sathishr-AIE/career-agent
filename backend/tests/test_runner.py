@@ -316,3 +316,18 @@ def test_a_confirm_in_the_result_turn_is_still_reported():
     assert run.wait(5) and run.result_line == f"RESULT:{NONCE}:APPLIED"
     assert [c["fields"] for c in confirmed] == [[{"label": "Name", "value": "Asha"}]]
     assert not run.waiting.is_set()
+
+
+def test_a_registered_secret_never_reaches_events_or_the_transcript():
+    pw = "Zq9!secretPW_1234abc"
+    seen = []
+    run, fake = _run(RunEvents(on_text=seen.append, on_tool=lambda n, s: seen.append(s)))
+    run.secrets.add(pw)
+    # a label _redact does not recognise, and a value long enough to be truncated
+    fake.emit(_assistant(f"typing {pw} now", ("mcp__playwright__browser_fill_form",
+              {"fields": [{"name": "Account key", "value": "x" * 280 + pw}]})))
+    fake.emit(_assistant(f"RESULT:{NONCE}:APPLIED")); fake.emit(_result()); fake.close()
+    assert run.wait(5)
+    assert seen and not any(pw[:6] in s for s in seen)
+    assert "••••••" in seen[0]
+    assert pw[:6] not in run.transcript

@@ -16,6 +16,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
+
+from career_agent import credentials
 
 if TYPE_CHECKING:
     from career_agent.apply.runner import AgentRun   # runner imports this module
@@ -214,20 +217,22 @@ def _hard_rules_section() -> str:
         "THE HUMAN).\n"
         "Use the candidate's name exactly as given in PROFILE on every field asking for "
         "a legal or full name -- do not shorten, expand, or otherwise \"clean up\" it.\n"
-        "Never create an account, register, or sign up on any site. If an application "
-        "requires an account and none is already signed in, stop and output "
-        "RESULT:FAILED:account_required as your final line.\n"
+        f"{ACCOUNT_RULES_S5}\n"
+        "If an application requires an account and none is already signed in: for a site "
+        'in KNOWN LOGINS, sign in with that email and an ASK of kind "need_password"; '
+        'otherwise ASK kind "approve_account". If it is rejected or the answer is "none", '
+        "stop and output RESULT:FAILED:account_required as your final line.\n"
         "Never accept Terms of Use, privacy/data-consent statements, or any other legal "
         "agreement on the candidate's behalf -- do not tick such a checkbox or click an "
-        "\"I agree\"/\"Accept\" button for one. If proceeding requires accepting one, "
-        "stop and output RESULT:FAILED:account_required as your final line. The "
-        "candidate creates the account or gives the consent themselves, then this job "
-        "is retried."
+        "\"I agree\"/\"Accept\" button for one -- except the terms an approved "
+        "approve_account covered in its terms_summary. If proceeding requires accepting "
+        "any other one, stop and output RESULT:FAILED:account_required as your final "
+        "line. The candidate gives the consent themselves, then this job is retried."
     )
 
 
 def _known_logins_section(logins: list[dict]) -> str:
-    """S5 (Task 18 wires this in). domain + email only -- a caller may pass a
+    """S5 KNOWN LOGINS (build_prompt). domain + email only -- a caller may pass a
     dict that also carries a decrypted password (e.g. straight from
     credentials.get); this never renders it into the prompt."""
     if not logins:
@@ -238,23 +243,24 @@ def _known_logins_section(logins: list[dict]) -> str:
         f"{lines}\n"
         "You do NOT have the password for any of these -- when a site in this list "
         "asks you to sign in, do not guess or reuse a password from anywhere else. "
-        'Output an ASK of kind "need_password" naming the domain and wait for the '
-        "password to arrive in the ANSWER."
+        'Output an ASK of kind "need_password" naming the domain and the url of the page '
+        "you are on, and wait for the password to arrive in the ANSWER."
     )
 
 
-# S5's HARD RULES wording (Task 15 swaps this in for the "never create an
-# account" line above; Task 18 wires KNOWN LOGINS into build_prompt). Kept as
-# a standalone constant so it exists and is tested now without changing what
-# the agent is actually told today -- the backend still refuses
-# approve_account (SUBMISSION_IMPLEMENTED gate), so teaching the agent it can
-# ask for one would be a promise this build can't keep.
+# S5's account wording, spliced into HARD RULES. The backend answers both
+# kinds (web/actions.answer_prompt): approve_account stores a generated
+# password before replying; need_password releases a stored one only when
+# the reported page url is on that domain.
 ACCOUNT_RULES_S5 = (
     "Account creation, registration, or accepting Terms of Use / privacy consent is "
-    'allowed ONLY after an ASK of kind "approve_account" (with domain, email, and '
-    'terms_summary) receives an answer of "approve" carrying a password in the '
-    "ANSWER. Never choose a password yourself -- the backend supplies it. Never "
-    "type a password into any field other than that site's own sign-in/sign-up form."
+    'allowed ONLY after an ASK of kind "approve_account" (with domain, email, the '
+    'sign-up page as login_url, and terms_summary) receives an answer of "approve" '
+    "carrying a password in the ANSWER. Never choose a password yourself -- the "
+    'backend supplies it. To sign in to a site in KNOWN LOGINS, ASK kind "need_password" '
+    "with domain and url (the exact address of the page you are on); the password "
+    'arrives in the ANSWER, and an answer of "none" means there is none you may use. '
+    "Never type a password into any field other than that site's own sign-in/sign-up form."
 )
 
 
@@ -353,8 +359,9 @@ def _steps_section(mode, can_submit) -> str:
         "3. Run the LOCATION CHECK. Stop now if it fails.\n"
         "4. Find and click the real Apply button (not \"Save\" or \"Share\").\n"
         "5. If a login wall appears: check PLATFORM RULES for SSO first; otherwise look "
-        "for a guest/no-account path. If none exists, do NOT register -- output "
-        "RESULT:FAILED:account_required (see HARD RULES).\n"
+        "for a guest/no-account path. If none exists, sign in or register ONLY through "
+        "need_password / approve_account as HARD RULES say; if that fails, output "
+        "RESULT:FAILED:account_required.\n"
         "6. Upload the resume from FILES. If the form auto-parsed and pre-filled fields "
         "from a different, previously uploaded resume, delete that upload first and "
         "upload the correct file fresh.\n"
@@ -377,6 +384,9 @@ def _steps_section(mode, can_submit) -> str:
         '"question":"...","options":[...],"why":"...","memory_key":"<snake_case or null>",'
         '"default":"<best guess or null>","sensitive":false}\n'
         "then END YOUR TURN and do nothing until a line beginning ANSWER: arrives.\n"
+        'Account kinds (see HARD RULES) add "domain"; approve_account also "email", '
+        '"login_url" and "terms_summary"; need_password also "url" -- the exact address '
+        "of the page you are on.\n"
         "The JSON stays on that one line -- escape any newline inside a value as \\n. kind \"choice\" needs a non-empty options "
         "list. A KNOWN ANSWER marked stale is asked too, with that answer as default. "
         "Use memory_key for facts that recur across applications (notice_period, "
@@ -487,7 +497,8 @@ def pinned_section(answers: dict) -> str:
 
 
 def build_prompt(job, profile, brief, qa_rows, resume_text, resume_path, *,
-                 mode, can_submit, nonce, pinned_answers=None, score=None) -> str:
+                 mode, can_submit, nonce, pinned_answers=None, score=None,
+                 logins=None) -> str:
     """Build the full playbook prompt for one job's apply agent session. Pure
     and fully unit-tested -- see docs/lld-apply-button-v2.md section 3.2 for
     the section-by-section contract this follows.
@@ -529,6 +540,8 @@ def build_prompt(job, profile, brief, qa_rows, resume_text, resume_path, *,
         _profile_section(profile),
         f"== KNOWN ANSWERS (prefer these verbatim) ==\n{known_answers}",
     ]
+    if logins:      # credentials.list_ rows: domain + email, never a password
+        data.append(_known_logins_section(logins))
     if pinned_answers is not None:
         data.append(pinned_section(pinned_answers))
     rules = [
@@ -578,6 +591,43 @@ def parse_result(output: str, nonce: str) -> AgentResult:
 _ASK_KINDS = {"choice", "text", "approve", "approve_account", "need_password"}
 
 
+def _allowed_url(url) -> bool:
+    """https, or http only for a local server: never javascript:, file:, or a
+    bare host the agent could later have us treat as a page address."""
+    if not isinstance(url, str):
+        return False
+    try:
+        parts = urlsplit(url.strip())
+        host = parts.hostname
+    except ValueError:
+        return False
+    return bool(host) and (parts.scheme == "https" or (
+        parts.scheme == "http" and host in ("localhost", "127.0.0.1", "::1")))
+
+
+def _account_ask_ok(p: dict) -> bool:
+    """approve_account: domain + email (+ optional https login_url);
+    need_password: domain + the https url of the page the agent is on, which
+    answer_prompt checks against the stored domain. The domain is normalized
+    in place, so the card and the store key agree."""
+    try:
+        p["domain"] = credentials.normalize_domain(p["domain"])
+    except (KeyError, AttributeError, ValueError):
+        return False
+    if p["kind"] == "approve_account":
+        email = p.get("email")
+        if not (isinstance(email, str) and "@" in email):
+            return False
+        if p.get("login_url") and not _allowed_url(p["login_url"]):
+            return False
+        p.setdefault("question", f"Create an account at {p['domain']} as {email}?")
+    else:
+        if not _allowed_url(p.get("url")):
+            return False
+        p.setdefault("question", f"Saved password for {p['domain']}")
+    return True
+
+
 def strip_decoration(line: str) -> str:
     """A protocol line as the model may dress it -- bold, backticks, spaces --
     reduced to the line itself. The runner's detection, these parsers, and
@@ -602,9 +652,14 @@ def parse_ask(line: str, nonce: str) -> dict | None:
     wrong, the JSON is invalid, or a required key is missing -- the runner
     treats None as "no ask" and nudges."""
     p = _payload(line, ask_prefix(nonce))
-    if p is None or not {"id", "kind", "question"} <= p.keys():
+    if p is None or not {"id", "kind"} <= p.keys():
         return None
     if not isinstance(p["kind"], str) or p["kind"] not in _ASK_KINDS:
+        return None
+    if p["kind"] in ("approve_account", "need_password"):
+        if not _account_ask_ok(p):
+            return None
+    elif "question" not in p:
         return None
     if p["kind"] == "choice" and not (isinstance(p.get("options"), list) and p["options"]):
         return None
@@ -668,10 +723,25 @@ def _redact(obj):
             else _redact(v) for k, v in obj.items()}
 
 
-def summarize_tool_input(inp, limit: int = 300) -> str:
+SECRET_MASK = "••••••"
+
+
+def redact_secrets(s: str, secrets) -> str:
+    """Every exact password sent to a run -> SECRET_MASK, raw and JSON-escaped
+    (a tool input is logged as JSON). tuple(): the HTTP thread may add one
+    while the reader thread is scrubbing."""
+    for secret in tuple(secrets):
+        if secret:
+            s = s.replace(secret, SECRET_MASK).replace(json.dumps(secret)[1:-1], SECRET_MASK)
+    return s
+
+
+def summarize_tool_input(inp, limit: int = 300, secrets=()) -> str:
     """One transcript line of what a tool call entered, secrets redacted --
-    the audit trail must show what was typed without keeping a password."""
-    s = json.dumps(_redact(inp), ensure_ascii=False, separators=(",", ":"))
+    the audit trail must show what was typed without keeping a password.
+    Sent passwords are scrubbed before truncating, which could cut one."""
+    s = redact_secrets(json.dumps(_redact(inp), ensure_ascii=False, separators=(",", ":")),
+                       secrets)
     return s if len(s) <= limit else s[:limit] + "…"
 
 

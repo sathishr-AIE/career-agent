@@ -58,12 +58,31 @@ def generate_password(length: int = 20) -> str:
             return pw
 
 
+class UserLoginExists(Exception):
+    """An agent write would replace a login the user saved themselves."""
+
+
+def host_matches(page_url: str, domain: str) -> bool:
+    """True when page_url's host is `domain` or a subdomain of it on a dot
+    boundary. Both sides go through normalize_domain, so case, www, port and
+    backslash tricks can't make another host read as the stored domain."""
+    try:
+        host, d = normalize_domain(page_url), normalize_domain(domain)
+    except ValueError:
+        return False
+    return host == d or host.endswith("." + d)
+
+
 def put(conn, domain: str, login_url: str, email: str, password: str,
        created_by: str) -> int:
-    """Upsert by normalized domain; encrypts before writing. Returns the row id."""
+    """Upsert by normalized domain; encrypts before writing. Returns the row id.
+    An "agent" write never replaces a user-saved row (UserLoginExists)."""
     d = normalize_domain(domain)
+    row = conn.execute("SELECT id, created_by FROM site_credential WHERE domain = ?",
+                       (d,)).fetchone()
+    if row is not None and created_by == "agent" and row["created_by"] != "agent":
+        raise UserLoginExists(d)
     enc = encrypt(password)
-    row = conn.execute("SELECT id FROM site_credential WHERE domain = ?", (d,)).fetchone()
     if row is not None:
         conn.execute(
             "UPDATE site_credential SET login_url = ?, email = ?, password_enc = ?, "

@@ -4,8 +4,9 @@ import { useAnswer } from './useAnswer'
 import '../ui.css'
 import './cards.css'
 
-/** An open ASK: choice buttons, a text field, or Approve/Reject. Account
- * kinds render read-only -- the backend refuses them until a later slice. */
+/** An open ASK: choice buttons, a text field, or Approve/Reject (also for
+ * approve_account). need_password is answered by the backend on arrival, so
+ * its card is informational only. */
 export function PromptCard({ prompt, onAnswered }: { prompt: OpenPrompt; onAnswered: () => void }) {
   const p = prompt.payload as unknown as AskPayload
   const { busy, error, send } = useAnswer(prompt.id, onAnswered)
@@ -82,14 +83,36 @@ export function PromptCard({ prompt, onAnswered }: { prompt: OpenPrompt; onAnswe
         </div>
       )}
 
-      {(p.kind === 'approve_account' || p.kind === 'need_password') && (
+      {p.kind === 'approve_account' && (
         <>
           <div className="kv">
             {p.domain && <div><span>Domain</span>{p.domain}</div>}
             {p.email && <div><span>Email</span>{p.email}</div>}
             {p.terms_summary && <div><span>Terms</span>{p.terms_summary}</div>}
           </div>
-          <div className="qcard__note">Account actions arrive in a later slice.</div>
+          <div className="qcard__note">
+            Approving lets the agent create this account and accept these terms, with a generated
+            password saved to Logins.
+          </div>
+          <div className="qcard__actions">
+            <button type="button" className="btn primary" disabled={busy} onClick={() => send({ answer: 'approve' })}>
+              Approve
+            </button>
+            <button type="button" className="btn" disabled={busy} onClick={() => send({ answer: 'reject' })}>
+              Reject
+            </button>
+          </div>
+        </>
+      )}
+
+      {p.kind === 'need_password' && (
+        <>
+          <div className="kv">
+            {p.domain && <div><span>Domain</span>{p.domain}</div>}
+          </div>
+          <div className="qcard__note">
+            The saved login for this site is sent automatically when the agent's page is on it.
+          </div>
         </>
       )}
 

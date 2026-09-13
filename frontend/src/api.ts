@@ -138,6 +138,8 @@ export interface AskPayload {
   sensitive: boolean
   domain?: string
   email?: string
+  login_url?: string
+  url?: string
   terms_summary?: string
 }
 

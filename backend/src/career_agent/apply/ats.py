@@ -240,9 +240,16 @@ def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual",
 
     def on_ask(payload: dict) -> None:
         heard.set()
-        with_conn(lambda c: _checkpoint(checkpoint.mark_waiting, c, job_id,
-                                        chat.open_prompt(c, job_id, payload["kind"], payload)),
-                  "an ASK")
+
+        def record(c):
+            pid = chat.open_prompt(c, job_id, payload["kind"], payload)
+            _checkpoint(checkpoint.mark_waiting, c, job_id, pid)
+            if payload["kind"] == "need_password":
+                # No human step (spec S5: one Approve in chat): the backend
+                # answers from the store, host-checked in answer_prompt.
+                from career_agent.web import actions   # web imports this module
+                actions.answer_prompt(c, pid, {})
+        with_conn(record, "an ASK")
 
     def on_confirm(payload: dict) -> None:
         heard.set()
@@ -634,7 +641,7 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
                 f"résumé file for version {resume_version!r} is missing at"
                 f" {resume_path}"}
 
-    from career_agent import store  # local: store.py imports this module
+    from career_agent import credentials, store  # local: store.py imports this module
                                     # for RESUME_VERSION, so a top-level
                                     # import back would be circular.
     job = Job(source=row["source"], external_id=row["external_id"],
@@ -659,7 +666,8 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
     nonce = cp["nonce"] if resume else agent_mod.new_nonce()
     pinned = cp["answers"] if resume else None
     prompt = agent_mod.build_prompt(*prompt_args, mode=mode, can_submit=can_submit,
-                                    nonce=nonce, pinned_answers=pinned, score=score)
+                                    nonce=nonce, pinned_answers=pinned, score=score,
+                                    logins=credentials.list_(conn))
     session_id = cp["session_id"] if resume else str(uuid.uuid4())
     # The resumed session already has the prompt: only what is new since.
     first = (checkpoint.continue_message(cp, nonce) + "\n\n" + agent_mod.pinned_section(pinned)
