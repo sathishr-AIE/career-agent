@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 
 import pytest
 
@@ -632,7 +633,7 @@ async def test_tick_errors_on_unhandled_submit_exception(
 
 
 async def test_loop_marks_run_errored_on_exception_apply_tick_doesnt_catch(
-        conn, brief_path, profile_path, monkeypatch):
+        conn, brief_path, profile_path, monkeypatch, tmp_path):
     """apply_tick only catches exceptions around its own submit() calls, so
     anything else that raises (e.g. next_candidate's query blowing up) must
     still be caught by the loop itself -- otherwise the fire-and-forget
@@ -647,7 +648,7 @@ async def test_loop_marks_run_errored_on_exception_apply_tick_doesnt_catch(
     monkeypatch.setattr(worker, "next_candidate", boom)
 
     task = asyncio.create_task(
-        worker.apply_worker_loop(lambda: conn, brief_path, profile_path))
+        worker.apply_worker_loop(lambda: db.connect(tmp_path / "t.db"), brief_path, profile_path))
     for _ in range(50):
         await asyncio.sleep(0)
         if worker.get_run_state(conn, "apply")["status"] == "error":
@@ -747,7 +748,8 @@ async def test_a_chat_write_failure_does_not_change_the_tick(
     assert state["status"] == "running" and state["current_job_id"] == job_id
 
 
-async def test_the_loop_sweeps_orphaned_checkpoints_on_start(conn, brief_path, profile_path, monkeypatch):
+async def test_the_loop_sweeps_orphaned_checkpoints_on_start(conn, brief_path, profile_path, monkeypatch,
+                                                              tmp_path):
     """A running checkpoint with no live run (a crashed server) becomes resumable;
     one a live run is still driving is left alone."""
     from career_agent.apply import agent as agent_mod
@@ -760,7 +762,12 @@ async def test_the_loop_sweeps_orphaned_checkpoints_on_start(conn, brief_path, p
     class Live:
         done = asyncio.Event()      # has .is_set() -> False
     monkeypatch.setattr(agent_mod, "RUNS", {b: Live()})
-    task = asyncio.create_task(worker.apply_worker_loop(lambda: conn, brief_path, profile_path))
+    opened = []
+
+    def factory():
+        opened.append(db.connect(tmp_path / "t.db"))
+        return opened[-1]
+    task = asyncio.create_task(worker.apply_worker_loop(factory, brief_path, profile_path))
     await asyncio.sleep(0.05)
     task.cancel()
     try:
@@ -769,3 +776,5 @@ async def test_the_loop_sweeps_orphaned_checkpoints_on_start(conn, brief_path, p
         pass
     assert checkpoint.get(conn, a)["status"] == "resumable"
     assert checkpoint.get(conn, b)["status"] == "running"
+    with pytest.raises(sqlite3.ProgrammingError):      # M4: the sweep's connection is closed
+        opened[0].execute("SELECT 1")

@@ -32,8 +32,18 @@ def mark_waiting(conn, job_id: int, prompt_id: int) -> None:
 
 
 def mark_running(conn, job_id: int, step: str, answers: dict) -> None:
-    _set(conn, job_id, "status = 'running', step = ?, open_prompt_id = NULL,"
-         " answers = json_patch(answers, ?)", step, json.dumps(answers))
+    """Only a live run's row moves: an answer recorded after the run already
+    finished (or stopped resumable) must not reopen it."""
+    conn.execute("UPDATE apply_checkpoint SET status = 'running', step = ?, open_prompt_id = NULL,"
+                 " answers = json_patch(answers, ?), updated_at = datetime('now')"
+                 " WHERE job_id = ? AND status IN ('running','waiting')",
+                 (step, json.dumps(answers), job_id))
+    conn.commit()
+
+
+def resume(conn, job_id: int) -> None:
+    """resumable -> running, for submit(resume=True)."""
+    _set(conn, job_id, "status = 'running', step = 'resumed'")
 
 
 def mark_resumable(conn, job_id: int) -> None:
@@ -54,12 +64,22 @@ def continue_message(cp: dict, nonce: str) -> str:
     return f"CONTINUE:{nonce}:{body}\n{RESUMED_TEXT}"
 
 
+# A latest application row in one of these means the run reached an outcome
+# (a lost finish() write, or a crash the in_flight sweep already held).
+_TERMINAL = ("submitted", "draft", "failed", "failed_permanent", "held_unknown")
+
+
 def sweep_orphans(conn, live_job_ids: set[int]) -> int:
-    """running/waiting rows no live run is driving (a crashed server) -> resumable."""
+    """running/waiting rows no live run is driving (a crashed server) -> resumable,
+    or done when the job's latest application is terminal. Returns the resumable count."""
     live = list(live_job_ids)
-    cur = conn.execute(
-        "UPDATE apply_checkpoint SET status = 'resumable', updated_at = datetime('now')"
-        " WHERE status IN ('running','waiting')"
-        f" AND job_id NOT IN ({','.join('?' * len(live))})", live)
+    orphan = (" WHERE status IN ('running','waiting')"
+              f" AND job_id NOT IN ({','.join('?' * len(live))})")
+    ended = (" AND (SELECT ap.status FROM application ap WHERE ap.job_id = apply_checkpoint.job_id"
+             f" ORDER BY ap.id DESC LIMIT 1) IN ({','.join('?' * len(_TERMINAL))})")
+    conn.execute("UPDATE apply_checkpoint SET status = 'done', open_prompt_id = NULL,"
+                 " updated_at = datetime('now')" + orphan + ended, (*live, *_TERMINAL))
+    cur = conn.execute("UPDATE apply_checkpoint SET status = 'resumable',"
+                       " updated_at = datetime('now')" + orphan, live)
     conn.commit()
     return cur.rowcount

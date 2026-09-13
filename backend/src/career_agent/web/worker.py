@@ -247,8 +247,12 @@ async def apply_worker_loop(conn_factory, brief_path, profile_path,
     chat_conn_factory (default: conn_factory) is the lighter one handed to
     submit() for the agent's narration (see ats._chat_events)."""
     # A checkpoint left running/waiting by a crashed server is resumable.
-    checkpoint.sweep_orphans(conn_factory(), {jid for jid, run in agent_mod.RUNS.items()
-                                              if not run.done.is_set()})
+    conn = conn_factory()
+    try:
+        checkpoint.sweep_orphans(conn, {jid for jid, run in agent_mod.RUNS.items()
+                                        if not run.done.is_set()})
+    finally:
+        conn.close()
     while True:
         conn = conn_factory()
         state = get_run_state(conn, "apply")

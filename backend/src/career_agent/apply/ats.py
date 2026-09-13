@@ -234,30 +234,37 @@ def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual",
         with_conn(lambda c: chat.post_message(
             c, chat.conversation_for_job(c, job_id), role, content), f"a {role} message")
 
-    # Any sign of life from the session: a resume that shows none fell back.
+    # Assistant content from the session (text, tool, ASK, CONFIRM): a resume
+    # with none -- an is_error result alone included -- falls back.
     heard = threading.Event()
 
     def on_ask(payload: dict) -> None:
         heard.set()
-        with_conn(lambda c: checkpoint.mark_waiting(
-            c, job_id, chat.open_prompt(c, job_id, payload["kind"], payload)), "an ASK")
+        with_conn(lambda c: _checkpoint(checkpoint.mark_waiting, c, job_id,
+                                        chat.open_prompt(c, job_id, payload["kind"], payload)),
+                  "an ASK")
 
     def on_confirm(payload: dict) -> None:
         heard.set()
 
         def record(c):
             pid = chat.open_prompt(c, job_id, "confirm", payload)
-            checkpoint.mark_waiting(c, job_id, pid)
+            _checkpoint(checkpoint.mark_waiting, c, job_id, pid)
             if mode != "auto" or chat.answer_prompt_row(c, pid, {"decision": "approve"}) is None:
-                return False
-            checkpoint.mark_running(c, job_id, f"approved {pid}", {})
-            chat.post_message(c, chat.conversation_for_job(c, job_id), "system",
-                              "Auto mode: application summary approved without review")
-            return True
-        if with_conn(record, "a CONFIRM"):
-            run = agent_mod.RUNS.get(job_id)
-            if run is not None:     # False when not waiting: the pre-approved agent went on
-                run.send(agent_mod.answer_line(nonce, "confirm", {"decision": "approve"}))
+                return None
+            return pid
+        pid = with_conn(record, "a CONFIRM")
+        if pid is None:
+            return
+        # An approve on record must reach the run: send before any other write,
+        # or a failed chat/checkpoint write leaves it unsent -> answer_timeout ->
+        # held_unknown for a job that sent nothing.
+        run = agent_mod.RUNS.get(job_id)
+        if run is not None:     # False when not waiting: the pre-approved agent went on
+            run.send(agent_mod.answer_line(nonce, "confirm", {"decision": "approve"}))
+        with_conn(lambda c: _checkpoint(checkpoint.mark_running, c, job_id, f"approved {pid}", {}),
+                  "a checkpoint")
+        post("system", "Auto mode: application summary approved without review")
 
     def on_tool(name: str, summary: str) -> None:
         heard.set()
@@ -275,7 +282,6 @@ def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual",
             post("agent", kept)
 
     events = RunEvents(on_text=on_text, on_tool=on_tool, on_ask=on_ask, on_confirm=on_confirm,
-                       on_turn_end=lambda cost, usage: heard.set(),
                        prompt_baseline=prompt_baseline)
     events.heard = heard
     return events
@@ -685,7 +691,7 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
         app_id = cur.lastrowid
         conn.commit()
         if resume:
-            _checkpoint(checkpoint.mark_running, conn, job_id, "resumed", {})
+            _checkpoint(checkpoint.resume, conn, job_id)
         else:
             _checkpoint(checkpoint.start, conn, job_id, session_id, nonce)
         try:

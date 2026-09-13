@@ -70,3 +70,32 @@ def test_continue_message(conn):
     assert json.loads(first.split(":", 2)[2]) == {"step": "answered q1", "answers": {"Notice?": "30"}}
     assert "You were interrupted" in rest and "emit it again now" in rest
     assert "PREVIOUSLY ANSWERED" in rest
+
+
+def test_a_late_answer_never_reopens_a_finished_checkpoint(conn):
+    """M2: answer_prompt checkpoints after run.send; the run may finish first."""
+    checkpoint.start(conn, 1, "s", "n")
+    checkpoint.mark_waiting(conn, 1, 3)
+    checkpoint.finish(conn, 1)                          # the outcome lands first
+    checkpoint.mark_running(conn, 1, "answered 3", {"q": "a"})
+    cp = checkpoint.get(conn, 1)
+    assert (cp["status"], cp["answers"]) == ("done", {})
+    checkpoint.mark_resumable(conn, 1)
+    checkpoint.mark_running(conn, 1, "answered 3", {"q": "a"})
+    assert checkpoint.get(conn, 1)["status"] == "resumable"
+    checkpoint.resume(conn, 1)
+    assert (checkpoint.get(conn, 1)["status"], checkpoint.get(conn, 1)["step"]) == ("running", "resumed")
+
+
+def test_sweep_orphans_finishes_a_job_whose_latest_attempt_is_terminal(conn):
+    """M6: a lost finish() write must not make a finished job resumable on restart."""
+    checkpoint.start(conn, 1, "s", "n")
+    conn.execute("INSERT INTO application (job_id, resume_version, status) VALUES (1, 'v', 'draft')")
+    conn.commit()
+    assert checkpoint.sweep_orphans(conn, set()) == 0
+    assert checkpoint.get(conn, 1)["status"] == "done"
+    checkpoint.start(conn, 1, "s", "n")                 # a live attempt's row: in_flight
+    conn.execute("INSERT INTO application (job_id, resume_version, status) VALUES (1, 'v', 'in_flight')")
+    conn.commit()
+    assert checkpoint.sweep_orphans(conn, set()) == 1
+    assert checkpoint.get(conn, 1)["status"] == "resumable"

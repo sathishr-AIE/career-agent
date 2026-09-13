@@ -340,6 +340,7 @@ def mark_applied(conn: sqlite3.Connection, job_id: int, when: str,
     except sqlite3.IntegrityError:
         return {"ok": False, "message":
                 "This job already has a live application."}
+    checkpoint.finish(conn, job_id)     # a human decision supersedes an interrupted session
     _unpark(conn, job_id)
 
     # A manual application counts against daily_cap like any other (see
@@ -427,6 +428,8 @@ def queue_retry(conn: sqlite3.Connection, job_id: int,
                  (new_priority, job_id))
     conn.commit()
     store.log(conn, job_id, "job_skipped", "retry requested; requeued")
+    # A resumable checkpoint keeps the job out of QUEUE_WHERE: the retry supersedes it.
+    checkpoint.finish(conn, job_id)
     return {"ok": True, "message": "Requeued"}
 
 

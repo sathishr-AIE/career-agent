@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import sqlite3
 import threading
 from pathlib import Path
 
@@ -1746,6 +1747,93 @@ async def test_answer_prompt_records_the_answer_into_the_checkpoint(conn, runs, 
         pid2 = chat.open_prompt_for_job(factory(), jid)["id"]
         assert not actions.answer_prompt(factory(), pid2, {"answer": "no"}, factory)["ok"]
         assert checkpoint.get(factory(), jid)["answers"] == {"Notice?": "30"}
+        return AgentResult("draft_ready")
+
+    assert (await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory))["ok"]
+
+
+# -- Task 10 fix round 1 ------------------------------------------------------
+
+@pytest.mark.parametrize("broken", ["mark_waiting", "mark_running"])
+async def test_a_failing_checkpoint_write_never_blocks_the_auto_approve(conn, runs, factory,
+                                                                        monkeypatch, broken):
+    """I1: the approve is on record, so it must be sent -- else answer_timeout
+    with an approve on record holds a job that sent nothing."""
+    def boom(*a, **kw):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(checkpoint, broken, boom)
+
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
+        run = runs[jid] = FakeRun(nonce, events)
+        _waiting_on(run, events, "confirm", _confirm(Name="Asha"))
+        assert run.sent == [f'DECISION:{nonce}:{{"decision": "approve"}}']
+        return AgentResult("applied")
+
+    r = await _submit(conn, mode="auto", run_agent=fake, conn_factory=factory)
+    assert r["ok"] and _apps(conn)[-1]["status"] == "submitted"
+
+
+async def test_an_error_result_alone_falls_back_to_a_fresh_run(conn):
+    """I4: a resumed session that only returns an is_error result gave no
+    assistant content -- a turn end is not a sign of life."""
+    _resumable(conn, {"Notice?": "30 days"})
+    calls = []
+
+    def on_run(prompt, jid, nonce, events, session_id, resume):
+        if resume:
+            events.on_turn_end(0.0, {})
+            return AgentResult("failed", "no_result_line")
+        return AgentResult("draft_ready")
+
+    fake = _recording(None, calls, on_run)
+    fake.conn = conn
+    r = await _submit(conn, mode="manual", run_agent=fake, resume=True)
+    assert r["ok"] and [c["resume"] for c in calls] == [True, False]
+
+
+def _brief_file(tmp_path):
+    p = tmp_path / "career_brief.toml"
+    p.write_text('target_titles = ["AI Engineer"]\nsearch_locations = ["Chennai"]\ndaily_cap = 5\n')
+    return p
+
+
+def test_retry_supersedes_a_resumable_checkpoint(conn):
+    """I2: crash -> resumable -> held -> human confirms not submitted -> Retry
+    must actually requeue."""
+    from career_agent.web import actions, worker
+
+    _queue_ready(conn)
+    _resumable(conn, {})
+    _held(conn)
+    assert actions.queue_retry(conn, 1, confirm_not_submitted=True)["ok"]
+    assert checkpoint.get(conn, 1)["status"] == "done"
+    assert worker.next_candidate(conn)["job_id"] == 1
+
+
+def test_mark_applied_supersedes_a_resumable_checkpoint(conn, tmp_path):
+    from career_agent.web import actions
+
+    _resumable(conn, {})
+    assert actions.mark_applied(conn, 1, "2026-09-01", _brief_file(tmp_path))["ok"]
+    assert checkpoint.get(conn, 1)["status"] == "done"
+
+
+async def test_what_the_checkpoint_pins_from_answers(conn, runs, factory):
+    """M3: a sensitive ASK answer is never pinned; a CONFIRM pins only its
+    changes, never the unedited field list."""
+    from career_agent.web import actions
+
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
+        run = runs[jid] = FakeRun(nonce, events)
+        _waiting_on(run, events, "ask", {"id": "q1", "kind": "text", "question": "SSN?",
+                                         "options": [], "sensitive": True})
+        pid = chat.open_prompt_for_job(factory(), jid)["id"]
+        assert actions.answer_prompt(factory(), pid, {"answer": "123"}, factory)["ok"]
+        _waiting_on(run, events, "confirm", _confirm(Name="Asha", Phone="+1"))
+        pid = chat.open_prompt_for_job(factory(), jid)["id"]
+        assert actions.answer_prompt(factory(), pid, {"decision": "change",
+                                                      "changes": {"Phone": "+91"}}, factory)["ok"]
+        assert checkpoint.get(factory(), jid)["answers"] == {"Phone": "+91"}
         return AgentResult("draft_ready")
 
     assert (await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory))["ok"]

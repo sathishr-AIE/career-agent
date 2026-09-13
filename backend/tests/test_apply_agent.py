@@ -1010,3 +1010,13 @@ def test_a_resume_that_never_speaks_is_killed_as_resume_failed(child):
                               resume_output_s=0.3, popen=lambda *a, **kw: child)
     assert time.monotonic() - started < 5
     assert (r.code, r.reason) == ("failed", "resume_failed")
+
+
+def test_a_resume_answered_only_by_an_error_result_is_resume_failed(child):
+    """I4: an is_error result is not a sign of life -- the watchdog still fires."""
+    child.emit(_json.dumps({"type": "result", "is_error": True, "result": "No conversation found",
+                            "total_cost_usd": 0}))
+    r = agent_mod.run_session("CONTINUE", job_id=7, nonce=N, session_id="s-1",
+                              events=RunEvents(), timeout_s=30, resume=True,
+                              resume_output_s=0.3, popen=lambda *a, **kw: child)
+    assert (r.code, r.reason) == ("failed", "resume_failed")
