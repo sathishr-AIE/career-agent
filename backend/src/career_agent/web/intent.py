@@ -20,6 +20,7 @@ import os
 import sqlite3
 import subprocess
 
+from career_agent import run as run_module
 from career_agent.web.worker import QUEUE_WHERE
 
 log = logging.getLogger(__name__)
@@ -78,6 +79,12 @@ def build_intent_cmd(schema: dict) -> list[str]:
 
 
 def _default_runner(prompt: str, schema: dict) -> dict:
+    # An inherited ANTHROPIC_API_KEY outranks the subscription token and
+    # would silently bill per token -- same guard the apply worker runs
+    # before every tick (web/worker.py's apply_tick). route() runs on every
+    # Home-chat message, so this must run before every spawn too. A raise
+    # here is caught by route()'s except -> unknown fallback.
+    run_module.verify_auth()
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
     env.pop("CLAUDE_CODE_ENTRYPOINT", None)
@@ -85,6 +92,8 @@ def _default_runner(prompt: str, schema: dict) -> dict:
                           capture_output=True, text=True, env=env,
                           timeout=60, check=True)
     data = json.loads(proc.stdout)
+    if data.get("is_error"):
+        raise RuntimeError(f"claude CLI reported is_error: {data.get('result')!r}")
     structured = data.get("structured_output")
     if structured is None:
         structured = json.loads(data["result"])

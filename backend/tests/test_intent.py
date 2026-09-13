@@ -76,6 +76,24 @@ def test_route_runner_timeout_falls_back_to_unknown():
     assert result["intent"] == "unknown"
 
 
+def test_default_runner_refuses_when_anthropic_api_key_is_set(monkeypatch):
+    """An inherited ANTHROPIC_API_KEY outranks the subscription token and
+    would silently bill per token (run.verify_auth's guard, also run
+    before every apply_tick). route()'s default runner must check this
+    BEFORE spawning claude -- verify_auth's raise is caught by route()'s
+    own except and degrades to the unknown fallback."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-leaked")
+    calls = []
+    monkeypatch.setattr(intent.subprocess, "run",
+                        lambda *a, **kw: calls.append((a, kw)))
+
+    result = intent.route("find me new jobs")
+
+    assert result == {"intent": "unknown", "job_ref": None,
+                      "reply": "Sorry, I didn't understand that. Try 'help'."}
+    assert calls == []  # subprocess.run was never reached
+
+
 def test_route_truncates_overlong_input_before_reaching_runner():
     captured = {}
 
@@ -186,6 +204,34 @@ def test_resolve_job_like_metacharacters_are_literal(conn):
     _job(conn, "fp2", "Acme", "AI Engineer")
     # an unescaped '_' or '%' pattern must not accidentally match fp2's row
     assert intent.resolve_job(conn, "100%_Fresh") == jid
+
+
+def test_resolve_job_underscore_is_not_a_wildcard(conn):
+    """'_' in LIKE matches any single char. Unescaped, "A_Fresh" would also
+    match "AZFresh" (Z standing in for the wildcard), making the query
+    ambiguous and resolve_job wrongly return None. Escaped, only the
+    literal "A_Fresh Co" matches."""
+    jid = _job(conn, "fp1", "A_Fresh Co", "AI Engineer")
+    _job(conn, "fp2", "AZFresh Co", "AI Engineer")
+    assert intent.resolve_job(conn, "A_Fresh") == jid
+
+
+def test_resolve_job_percent_is_not_a_wildcard(conn):
+    """'%' in LIKE matches any run of chars. Unescaped, "50% Off" would
+    also match "50X Off" (X standing in for the wildcard), making the
+    query ambiguous and resolve_job wrongly return None. Escaped, only
+    the literal "50% Off" substring matches."""
+    jid = _job(conn, "fp1", "50% Off Co", "AI Engineer")
+    _job(conn, "fp2", "50X Off Co", "AI Engineer")
+    assert intent.resolve_job(conn, "50% Off") == jid
+
+
+def test_resolve_job_hash_id_resolves_even_when_not_in_queue(conn):
+    """The #id/bare-id path deliberately bypasses QUEUE_WHERE (any status
+    resolves by id) -- Task 20's apply_to must route through do_apply,
+    which re-validates before actually applying."""
+    jid = _job(conn, "fp1", "SkippedCo", "AI Engineer", verdict="skip")
+    assert intent.resolve_job(conn, f"#{jid}") == jid
 
 
 def test_resolve_job_case_insensitive(conn):
