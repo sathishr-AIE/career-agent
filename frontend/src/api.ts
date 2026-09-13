@@ -122,3 +122,44 @@ export interface OpenPrompt {
   payload: Record<string, unknown>
   created_at: string
 }
+
+/** An ASK card's payload (apply/agent.py parse_ask). The account kinds also
+ * carry domain/email/terms_summary. */
+export interface AskPayload {
+  id: string
+  kind: 'choice' | 'text' | 'approve' | 'approve_account' | 'need_password'
+  question: string
+  options: string[]
+  why: string
+  memory_key: string | null
+  default: string | null
+  sensitive: boolean
+  domain?: string
+  email?: string
+  terms_summary?: string
+}
+
+/** A CONFIRM card's payload (apply/agent.py parse_confirm). */
+export interface ConfirmPayload {
+  fields: { label: string; value: string }[]
+  files: string[]
+  account_actions: string[]
+  memory_used: string[]
+  notes: string
+}
+
+/** Body is the bare dict -- api_answer_prompt reads the whole JSON body:
+ * {answer, remember} for ASK, {decision, changes?} for CONFIRM. */
+export const answerPrompt = (promptId: number, body: Record<string, unknown>) =>
+  post<ActionResult>(`/api/chat/prompts/${promptId}/answer`, body)
+
+/** The backend's refusal text, for inline display. `detail` is only used
+ * when it's a string (FastAPI's own 422s make it an array). */
+export function errorText(e: unknown): string {
+  if (e instanceof ApiError) {
+    const b = e.body as { detail?: unknown; message?: unknown } | undefined
+    if (typeof b?.detail === 'string') return b.detail
+    if (typeof b?.message === 'string') return b.message
+  }
+  return e instanceof Error ? e.message : String(e)
+}
