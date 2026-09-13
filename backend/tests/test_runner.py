@@ -48,6 +48,7 @@ def _run(events=None):
 
 def test_first_message_is_written_as_stream_json():
     run, fake = _run()
+    assert _until(lambda: fake.stdin.getvalue())
     first = json.loads(fake.stdin.getvalue().splitlines()[0])
     assert first["type"] == "user" and first["message"]["content"][0]["text"] == "hello agent"
     fake.close(); assert run.wait(5)
@@ -72,8 +73,8 @@ def test_ask_sets_waiting_and_answer_is_sent_on_stdin():
     assert run.waiting.wait(5) and not run.done.is_set()
     assert asked == [{"id": "q1", "kind": "text", "question": "Notice?", "options": [],
                       "why": "", "memory_key": None, "default": None, "sensitive": False}]
-    run.send(f'ANSWER:{NONCE}:{{"id":"q1","answer":"30 days"}}')
-    assert "ANSWER:" in fake.stdin.getvalue().splitlines()[-1]
+    assert run.send(f'ANSWER:{NONCE}:{{"id":"q1","answer":"30 days"}}')
+    assert _until(lambda: "ANSWER:" in (fake.stdin.getvalue().splitlines() or [""])[-1])
     assert not run.waiting.is_set()          # cleared by send()
     fake.emit(_assistant(f"RESULT:{NONCE}:APPLIED")); fake.emit(_result(0.1)); fake.close()
     assert run.wait(5) and run.cost_total == 0.2
@@ -125,7 +126,7 @@ def test_a_malformed_ask_or_confirm_is_no_ask_and_the_nudge_says_so(line):
         time.sleep(0.01)
     assert run.nudges == 1 and not run.waiting.is_set() and asked == confirmed == []
     assert "do not proceed" in runner_mod.MALFORMED
-    assert fake.stdin.getvalue().splitlines()[-1].count(runner_mod.MALFORMED.strip()) == 1
+    assert _until(lambda: (fake.stdin.getvalue().splitlines() or [""])[-1].count(runner_mod.MALFORMED.strip()) == 1)
     fake.close(); assert run.wait(5)
 
 
@@ -224,3 +225,94 @@ def test_a_raising_callback_closes_stdin_so_the_session_ends():
     run._reader_thread.join(5)
     assert not run._reader_thread.is_alive()
     fake.close()
+
+
+def _until(pred, timeout=5):
+    deadline = time.time() + timeout
+    while not pred() and time.time() < deadline:
+        time.sleep(0.01)
+    return pred()
+
+
+def test_send_refuses_when_not_waiting_or_done_and_writes_nothing():
+    run, fake = _run()
+    assert _until(lambda: "hello agent" in fake.stdin.getvalue())
+    before = fake.stdin.getvalue()
+    assert run.send("stale answer") is False            # not waiting
+    fake.emit(_assistant(f'ASK:{NONCE}:{{"id":"q1","kind":"text","question":"q"}}'))
+    fake.emit(_result())
+    assert run.waiting.wait(5)
+    assert run.send("first") is True
+    assert run.send("double") is False                   # waiting already cleared
+    fake.emit(_assistant(f"RESULT:{NONCE}:APPLIED")); fake.emit(_result()); fake.close()
+    assert run.wait(5)
+    assert run.send("after done") is False
+    written = fake.stdin.getvalue()[len(before):]
+    assert "first" in written and "stale" not in written
+    assert "double" not in written and "after done" not in written
+
+
+def test_a_blocked_stdin_never_stalls_the_reader_or_a_concurrent_send():
+    """The old _write_user held the lock across a blocking pipe write that the
+    reader also needed: a nudge stuck on a full pipe froze the reader, and an
+    HTTP answer's send() then froze behind it. Only the writer thread writes."""
+    gate = threading.Event()
+    fake = FakePopen()
+
+    class _Blocking(_Stdin):
+        def write(self, s):
+            assert gate.wait(10)
+            return super().write(s)
+    fake.stdin = _Blocking()
+    asked = []
+    run = AgentRun(cmd=["x"], cwd=".", env={}, nonce=NONCE,
+                   events=RunEvents(on_ask=asked.append), popen=lambda *a, **kw: fake)
+    run.start("hello agent")                             # writer now blocked
+    fake.emit(_assistant("thinking")); fake.emit(_result())   # nudge queued behind it
+    fake.emit(_assistant(f'ASK:{NONCE}:{{"id":"q1","kind":"text","question":"q"}}'))
+    fake.emit(_result())
+    assert run.waiting.wait(5) and asked, "the reader stalled behind a blocked write"
+    sent = []
+    t = threading.Thread(target=lambda: sent.append(run.send("answer")))
+    t.start(); t.join(2)
+    assert sent == [True], "send() blocked behind the pipe"
+    gate.set()
+    fake.emit(_assistant(f"RESULT:{NONCE}:APPLIED")); fake.emit(_result()); fake.close()
+    assert run.wait(5)
+    lines = fake.stdin.getvalue()
+    assert lines.index("hello agent") < lines.index("Continue.") < lines.index("answer")
+    assert fake.stdin.was_closed
+
+
+def test_only_the_writer_thread_touches_stdin():
+    fake = FakePopen()
+    writers = set()
+
+    class _Tracking(_Stdin):
+        def write(self, s):
+            writers.add(threading.current_thread().name)
+            return super().write(s)
+        def close(self):
+            writers.add(threading.current_thread().name)
+            super().close()
+    fake.stdin = _Tracking()
+    run = AgentRun(cmd=["x"], cwd=".", env={}, nonce=NONCE, events=RunEvents(),
+                   popen=lambda *a, **kw: fake)
+    run.start("hello")
+    fake.emit(_assistant("thinking")); fake.emit(_result())
+    fake.emit(_assistant(f"RESULT:{NONCE}:APPLIED")); fake.emit(_result()); fake.close()
+    assert run.wait(5)
+    assert writers == {run._writer_thread.name}
+
+
+def test_a_confirm_in_the_result_turn_is_still_reported():
+    """Auto mode is pre-approved: the agent CONFIRMs and submits without ending
+    its turn, and that CONFIRM is the send's only record of its answers."""
+    confirmed = []
+    run, fake = _run(RunEvents(on_confirm=confirmed.append))
+    fake.emit(_assistant(f'CONFIRM:{NONCE}:{{"fields":[{{"label":"Name","value":"Asha"}}]}}\n'
+                         f"RESULT:{NONCE}:APPLIED"))
+    fake.emit(_result()); fake.close()
+    assert run.wait(5) and run.result_line == f"RESULT:{NONCE}:APPLIED"
+    assert [c["fields"] for c in confirmed] == [[{"label": "Name", "value": "Asha"}]]
+    assert not run.waiting.is_set()
