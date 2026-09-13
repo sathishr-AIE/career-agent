@@ -1382,6 +1382,30 @@ def test_settings_saves_the_brief_even_when_candidate_present_is_blank(
     assert store.get_settings(conn)["scoring_model"] == "claude-sonnet-5"
 
 
+def test_settings_save_preserves_work_history(client, tmp_path):
+    """The Settings form carries only the five flat candidate fields; a save
+    must merge onto the saved profile, not reset work history to []."""
+    from career_agent.config import (CandidateProfile, WorkEntry,
+                                     save_candidate_profile)
+    target = tmp_path / "full_candidate_profile.toml"
+    web.CANDIDATE_PROFILE_PATH = target
+    save_candidate_profile(target, CandidateProfile(
+        candidate_name="Jane Doe", candidate_email="jane@example.com",
+        candidate_phone="+91-1", gender="female",
+        work_history=[WorkEntry(company="Acme", title="Engineer")]))
+    r = client.post("/settings", data={
+        "candidate_present": "1", "candidate_name": "Jane Q Doe",
+        "candidate_email": "jane@example.com", "candidate_phone": "+91-1",
+        "linkedin_url": "", "portfolio_url": "",
+        "scoring_model": "claude-sonnet-5", "max_score_per_run": "25",
+    })
+    assert "Settings saved" in r.text
+    saved = load_candidate_profile(target)
+    assert saved.candidate_name == "Jane Q Doe"
+    assert saved.gender == "female"
+    assert [w.company for w in saved.work_history] == ["Acme"]
+
+
 def test_the_apply_activity_log_excludes_pipeline_events(client):
     conn = db.connect(web.DB_PATH)
     for i in range(12):

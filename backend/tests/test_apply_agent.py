@@ -950,3 +950,50 @@ def test_before_applying_requires_unique_labels():
                      can_submit=True, nonce=N)
     before = p.split("== BEFORE APPLYING ==")[1].split("== BROWSER EFFICIENCY ==")[0]
     assert "unique" in before and "Phone (mobile)" in before
+
+
+def test_profile_section_renders_gender_address_work_and_education():
+    from career_agent.apply.agent import _profile_section
+    from career_agent.config import Address, EduEntry, WorkEntry
+    prof = _profile().model_copy(update=dict(
+        address=Address(line1="1 Main St", city="Chennai", country="India"),
+        work_history=[WorkEntry(company="Old Co", title="Intern", start="2019-01",
+                                end="2020-01"),
+                      WorkEntry(company="Mid Co", title="Dev", start="2020-02",
+                                end="2022-01", description="APIs"),
+                      WorkEntry(company="Acme", title="Lead", start="2018-01",
+                                current=True)],
+        education=[EduEntry(institution="IIT", degree="B.Tech", field="CS",
+                            start="2014", end="2018")]))
+    s = _profile_section(prof)
+    assert "Gender: decline to self-identify" in s
+    assert ("Any EEO / gender / race / veteran / disability self-identification "
+            "question: decline to self-identify") in s
+    assert "Gender question: answer" not in s
+    assert "Address: 1 Main St, Chennai, India" in s
+    acme = s.index("- Acme — Lead (2018-01–present)")
+    mid = s.index("- Mid Co — Dev (2020-02–2022-01): APIs")
+    old = s.index("- Old Co — Intern (2019-01–2020-01)")
+    assert acme < mid < old
+    assert "- IIT — B.Tech in CS (2014–2018)" in s
+    assert "Standard defaults" in s
+
+
+def test_profile_section_empty_sections():
+    from career_agent.apply.agent import _profile_section
+    s = _profile_section(_profile().model_copy(update={"gender": "male"}))
+    assert "Gender: male" in s
+    assert "- Gender question: answer male" in s
+    assert ("race / ethnicity / veteran / disability self-identification "
+            "question: decline to self-identify") in s
+    decline_lines = [ln for ln in s.splitlines() if "decline" in ln.lower()]
+    assert not any("gender" in ln.lower() for ln in decline_lines)
+    assert "Address: (not provided)" in s
+    # Whole prompt, not just the section: no other section may decline gender.
+    p = build_prompt(_job(), _profile().model_copy(update={"gender": "male"}),
+                     _brief(), QA, "r", "x.docx", mode="auto", can_submit=True,
+                     nonce=N)
+    assert not any("gender" in ln.lower() and "decline" in ln.lower()
+                   for ln in p.splitlines())
+    assert "Work history:\n(none recorded)" in s
+    assert "Education:\n(none recorded)" in s
