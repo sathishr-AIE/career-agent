@@ -55,3 +55,6 @@ graphify-out/
 # un-ignored path is also a path git resolves through the parent
 # checkout, which is why worktree creation refuses it.
 .claude/worktrees/
+
+# per-task agent reports written in worktrees (kept out of the repo)
+.superpowers-task-*-report.md
