@@ -2136,16 +2136,39 @@ def test_a_resume_with_no_bullets_is_refused(client, tmp_path, monkeypatch):
     assert not target.exists()
 
 
-@pytest.mark.parametrize("path", ["/apply/1", "/api/apply/1"])
-def test_apply_routes_hand_submit_a_conn_factory(client, monkeypatch, path):
+_SUBMIT_ROUTES = [("/apply/1", {}), ("/api/apply/1", {}),
+                  ("/override/1", {}), ("/api/override/1", {}),
+                  ("/send/1", {}), ("/api/send/1", {})]
+_TICK_ROUTES = [("/run/start", {"data": {"mode": "manual"}}),
+                ("/api/run/start", {"json": "manual"}),
+                ("/run/resume", {}), ("/api/run/resume", {}),
+                ("/queue/1/skip", {}), ("/api/queue/1/skip", {})]
+
+
+@pytest.mark.parametrize("path,kw", _SUBMIT_ROUTES + _TICK_ROUTES)
+def test_agent_routes_hand_a_chat_conn_factory_down(client, monkeypatch, path, kw):
     """The agent's narration reaches the job chat only through this factory
-    (a fresh connection per event, on the runner's reader thread)."""
+    (a fresh, light connection per event, on the runner's reader thread).
+    Start/Resume/Skip matter as much as Apply: their click's own tick runs
+    the whole first agent session."""
     captured = {}
 
     async def fake_submit(conn, job_id, dry_run, conn_factory=None, **kw):
         captured["conn_factory"] = conn_factory
         return {"ok": True, "job_id": job_id, "status": "draft"}
 
+    async def fake_tick(conn, brief_path, profile_path, conn_factory=None):
+        captured["conn_factory"] = conn_factory
+
     monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
-    client.post(path)
-    assert captured["conn_factory"] is web._conn
+    monkeypatch.setattr(web.worker, "apply_tick", fake_tick)
+    monkeypatch.setattr(web.worker, "next_candidate", lambda conn: {"job_id": 2})
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'base-v1', 'draft')")
+    conn.commit()
+    worker.set_run_state(conn, "apply", status="paused", mode="manual",
+                         current_job_id=1)
+
+    client.post(path, **kw)
+    assert captured.get("conn_factory") is web._chat_conn

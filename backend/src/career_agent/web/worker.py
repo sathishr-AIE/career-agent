@@ -196,17 +196,21 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
     set_run_state(conn, "apply", current_job_id=None)  # auto: done
 
 
-async def apply_worker_loop(conn_factory, brief_path, profile_path) -> None:
+async def apply_worker_loop(conn_factory, brief_path, profile_path,
+                            chat_conn_factory=None) -> None:
     """Keeps the apply run advancing without anyone polling — the piece
     that makes Start actually mean 'walk away'. conn_factory is a
     zero-arg callable (web/app.py's _conn) so each iteration gets a
-    fresh connection, matching the rest of the app's per-call pattern."""
+    fresh connection, matching the rest of the app's per-call pattern.
+    chat_conn_factory (default: conn_factory) is the lighter one handed to
+    submit() for the agent's narration (see ats._chat_events)."""
     while True:
         conn = conn_factory()
         state = get_run_state(conn, "apply")
         if state["status"] == "running" and state["current_job_id"] is None:
             try:
-                await apply_tick(conn, brief_path, profile_path, conn_factory)
+                await apply_tick(conn, brief_path, profile_path,
+                                 chat_conn_factory or conn_factory)
             except Exception as exc:
                 set_run_state(conn, "apply", status="error", current_job_id=None,
                               last_error=str(exc))

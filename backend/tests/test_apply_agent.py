@@ -403,6 +403,27 @@ def test_output_after_the_result_still_lands_in_the_transcript(child):
     assert "closing the tab" in Path(r.transcript_path).read_text(encoding="utf-8")
 
 
+def test_a_deadline_landing_after_the_result_does_not_override_it(child, monkeypatch):
+    """The watchdog can fire between the RESULT turn setting `done` and
+    alarm.cancel(): an APPLIED run must not become failed/timeout (which the
+    send path holds as held_unknown)."""
+    class _LateTimer:
+        def __init__(self, interval, fn):
+            self.fn, self.daemon = fn, False
+        def start(self):
+            pass
+        def cancel(self):
+            self.fn()                  # fires just before the cancel lands
+
+    monkeypatch.setattr(agent_mod.threading, "Timer", _LateTimer)
+    child.emit(_asst("m2", f"{R}APPLIED"))
+    child.emit(_result_msg(0.01))
+
+    r = _session(child)
+
+    assert (r.code, r.reason) == ("applied", "")
+
+
 async def test_run_agent_names_a_fresh_session_per_run(monkeypatch):
     seen = []
     monkeypatch.setattr(agent_mod, "run_session",

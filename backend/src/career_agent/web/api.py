@@ -98,7 +98,7 @@ async def api_apply(job_id: int):
     result = await actions.do_apply(
         m._conn(), job_id, allow_skip=False, event="human_applied",
         brief_path=m.BRIEF_PATH, candidate_profile_path=m.CANDIDATE_PROFILE_PATH,
-        conn_factory=m._conn)
+        conn_factory=m._chat_conn)
     return _result(result)
 
 
@@ -108,7 +108,7 @@ async def api_override(job_id: int):
     result = await actions.do_apply(
         m._conn(), job_id, allow_skip=True, event="human_override",
         brief_path=m.BRIEF_PATH, candidate_profile_path=m.CANDIDATE_PROFILE_PATH,
-        conn_factory=m._conn)
+        conn_factory=m._chat_conn)
     return _result(result)
 
 
@@ -126,7 +126,7 @@ async def api_send(job_id: int):
     m = _app()
     result = await actions.send(m._conn(), job_id, brief_path=m.BRIEF_PATH,
                                 candidate_profile_path=m.CANDIDATE_PROFILE_PATH,
-                                conn_factory=m._conn)
+                                conn_factory=m._chat_conn)
     return _result(result)
 
 
@@ -161,7 +161,8 @@ def api_run_status():
 async def api_run_start(mode: str = Body(...)):
     m = _app()
     return _result(await actions.run_start(m._conn(), mode, m.BRIEF_PATH,
-                                           m.CANDIDATE_PROFILE_PATH))
+                                           m.CANDIDATE_PROFILE_PATH,
+                                           conn_factory=m._chat_conn))
 
 
 @router.post("/run/pause")
@@ -174,7 +175,8 @@ def api_run_pause():
 async def api_run_resume():
     m = _app()
     return _result(await actions.run_resume(m._conn(), m.BRIEF_PATH,
-                                            m.CANDIDATE_PROFILE_PATH))
+                                            m.CANDIDATE_PROFILE_PATH,
+                                            conn_factory=m._chat_conn))
 
 
 @router.post("/run/stop")
@@ -222,7 +224,8 @@ async def api_queue_skip(job_id: int):
     m = _app()
     return _result(await actions.queue_skip(
         m._conn(), job_id, brief_path=m.BRIEF_PATH,
-        candidate_profile_path=m.CANDIDATE_PROFILE_PATH))
+        candidate_profile_path=m.CANDIDATE_PROFILE_PATH,
+        conn_factory=m._chat_conn))
 
 
 @router.post("/queue/{job_id}/retry")

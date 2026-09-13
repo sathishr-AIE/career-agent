@@ -258,14 +258,15 @@ def record_outcome(conn: sqlite3.Connection, application_id: int, type: str,
 
 
 async def queue_skip(conn: sqlite3.Connection, job_id: int, brief_path: Path,
-                     candidate_profile_path: Path) -> dict:
+                     candidate_profile_path: Path, conn_factory=None) -> dict:
     store.log(conn, job_id, "job_skipped", "skipped by user")
     state = worker.get_run_state(conn, "apply")
     if state["current_job_id"] == job_id:
         worker.set_run_state(conn, "apply", current_job_id=None)
         nxt = worker.next_candidate(conn)
         if nxt is not None and nxt["job_id"] != job_id:
-            await worker.apply_tick(conn, brief_path, candidate_profile_path)
+            await worker.apply_tick(conn, brief_path, candidate_profile_path,
+                                    conn_factory)
     return {"ok": True, "message": "ok"}
 
 
@@ -447,14 +448,15 @@ def save_settings(conn: sqlite3.Connection, form: dict, brief_path: Path,
 
 
 async def run_start(conn: sqlite3.Connection, mode: str, brief_path: Path,
-                    candidate_profile_path: Path) -> dict:
+                    candidate_profile_path: Path, conn_factory=None) -> dict:
     worker.set_run_state(conn, "apply", status="running", mode=mode,
                          last_error=None)
     conn.execute("UPDATE run_state SET started_at = datetime('now')"
                  " WHERE kind = 'apply'")
     conn.commit()
     store.log(conn, None, "run_started", mode)
-    await worker.apply_tick(conn, brief_path, candidate_profile_path)
+    await worker.apply_tick(conn, brief_path, candidate_profile_path,
+                            conn_factory)
     return {"ok": True, "message": "ok"}
 
 
@@ -465,10 +467,11 @@ def run_pause(conn: sqlite3.Connection) -> dict:
 
 
 async def run_resume(conn: sqlite3.Connection, brief_path: Path,
-                     candidate_profile_path: Path) -> dict:
+                     candidate_profile_path: Path, conn_factory=None) -> dict:
     worker.set_run_state(conn, "apply", status="running")
     store.log(conn, None, "run_resumed")
-    await worker.apply_tick(conn, brief_path, candidate_profile_path)
+    await worker.apply_tick(conn, brief_path, candidate_profile_path,
+                            conn_factory)
     return {"ok": True, "message": "ok"}
 
 

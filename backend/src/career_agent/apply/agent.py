@@ -16,6 +16,10 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from career_agent.apply.runner import AgentRun   # runner imports this module
 
 log = logging.getLogger(__name__)
 
@@ -619,7 +623,7 @@ def build_cmd(model: str, mcp_path, session_id: str,
             "--resume" if resume else "--session-id", session_id]
 
 
-RUNS: dict = {}   # job_id -> its live AgentRun; the answer API sends into it (Task 7)
+RUNS: "dict[int, AgentRun]" = {}   # job_id -> its live run; the answer API sends into it (Task 7)
 
 
 def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events,
@@ -703,7 +707,9 @@ def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events
     duration_ms = int((time.time() - start) * 1000)
     transcript = _write_transcript(log_dir, job_id, run.transcript, run.cost_total,
                                    duration_ms, run.usage_total)
-    if timed_out.is_set():
+    # A deadline landing after the RESULT turn (before alarm.cancel) must
+    # not turn a real APPLIED into failed/timeout -> held_unknown.
+    if timed_out.is_set() and run.result_line is None:
         result = AgentResult("failed", "timeout")
     else:
         result = parse_result(run.transcript, nonce)

@@ -71,7 +71,8 @@ async def lifespan(app: FastAPI):
         worker.set_run_state(conn, "pipeline", status="error",
                              last_error="Interrupted by a server restart.")
     task = asyncio.create_task(
-        worker.apply_worker_loop(_conn, BRIEF_PATH, CANDIDATE_PROFILE_PATH))
+        worker.apply_worker_loop(_conn, BRIEF_PATH, CANDIDATE_PROFILE_PATH,
+                                 chat_conn_factory=_chat_conn))
     yield
     task.cancel()
 
@@ -88,6 +89,13 @@ def _conn():
     db.init_schema(conn)
     ats_apply.sweep_stale_in_flight(conn)
     return conn
+
+
+def _chat_conn():
+    """The agent's narration factory: called per event on the thread that
+    drains `claude`'s stdout, so no init_schema/sweep there -- a slow commit
+    stalls the agent on its pipe. DB_PATH read at call time (tests patch it)."""
+    return db.connect(DB_PATH)
 
 
 def _span(result: dict) -> HTMLResponse:
@@ -156,7 +164,7 @@ async def apply(job_id: int):
     return _span(await actions.do_apply(
         conn, job_id, allow_skip=False, event="human_applied",
         brief_path=BRIEF_PATH, candidate_profile_path=CANDIDATE_PROFILE_PATH,
-        conn_factory=_conn))
+        conn_factory=_chat_conn))
 
 
 @app.post("/override/{job_id}", response_class=HTMLResponse)
@@ -167,7 +175,7 @@ async def override(job_id: int):
     return _span(await actions.do_apply(
         conn, job_id, allow_skip=True, event="human_override",
         brief_path=BRIEF_PATH, candidate_profile_path=CANDIDATE_PROFILE_PATH,
-        conn_factory=_conn))
+        conn_factory=_chat_conn))
 
 
 @app.post("/answer/{job_id}", response_class=HTMLResponse)
@@ -184,7 +192,7 @@ async def send(job_id: int):
     conn = _conn()
     return _span(await actions.send(
         conn, job_id, brief_path=BRIEF_PATH,
-        candidate_profile_path=CANDIDATE_PROFILE_PATH, conn_factory=_conn))
+        candidate_profile_path=CANDIDATE_PROFILE_PATH, conn_factory=_chat_conn))
 
 
 @app.post("/dismiss/{job_id}", response_class=HTMLResponse)
@@ -218,7 +226,8 @@ def run_status(request: Request):
 @app.post("/run/start")
 async def run_start(mode: str = Form(...)):
     conn = _conn()
-    await actions.run_start(conn, mode, BRIEF_PATH, CANDIDATE_PROFILE_PATH)
+    await actions.run_start(conn, mode, BRIEF_PATH, CANDIDATE_PROFILE_PATH,
+                            conn_factory=_chat_conn)
     return HTMLResponse("ok")
 
 
@@ -232,7 +241,8 @@ def run_pause():
 @app.post("/run/resume")
 async def run_resume():
     conn = _conn()
-    await actions.run_resume(conn, BRIEF_PATH, CANDIDATE_PROFILE_PATH)
+    await actions.run_resume(conn, BRIEF_PATH, CANDIDATE_PROFILE_PATH,
+                             conn_factory=_chat_conn)
     return HTMLResponse("ok")
 
 
@@ -280,7 +290,8 @@ def pipeline_status(request: Request):
 async def queue_skip(job_id: int):
     conn = _conn()
     await actions.queue_skip(conn, job_id, brief_path=BRIEF_PATH,
-                             candidate_profile_path=CANDIDATE_PROFILE_PATH)
+                             candidate_profile_path=CANDIDATE_PROFILE_PATH,
+                             conn_factory=_chat_conn)
     return HTMLResponse("ok")
 
 
