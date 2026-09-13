@@ -91,11 +91,11 @@ def is_unknown_state(reason: str) -> bool:
     return reason.split(":", 1)[0].strip() in UNKNOWN_STATE_REASONS
 
 
-def sweep_stale_in_flight(conn: sqlite3.Connection, minutes: int = 20) -> int:
+def sweep_stale_in_flight(conn: sqlite3.Connection, minutes: int = 30) -> int:
     """A crash during submission leaves in_flight behind. Its true state is
     unknown, so it blocks rather than allowing a possible double send.
 
-    20 minutes, paired with agent.run_agent's 600 s deadline and always the
+    30 minutes, paired with agent.run_agent's 1200 s deadline and always the
     LARGER of the two: the agent's own deadline is armed at spawn, so a
     timing-out run always resolves its own row before this sweep can touch
     it, and the sweep-vs-returning-run race never opens. Raise one of the

@@ -132,7 +132,7 @@ its source is AGPL):
 | GIVE-UP RULES | 3 attempts same page → `failed:stuck`; closed posting → `EXPIRED`; broken page → `failed:page_error`; any CAPTCHA → `RESULT:CAPTCHA` (no solving in P0). Stop immediately, output the code, never loop. |
 | RESULT CODES | the exact grammar `parse_result` accepts (below), every line stamped with this run's nonce |
 
-### 3.3 `run_agent(prompt, *, cdp_port=9222, timeout_s=600, model=APPLY_MODEL) -> AgentResult`
+### 3.3 `run_agent(prompt, *, cdp_port=9222, timeout_s=1200, model=APPLY_MODEL) -> AgentResult`
 
 - Writes `<system temp>/career-agent-apply/.mcp-apply.json` — the agent's work dir lives
   OUTSIDE the repo on purpose: the session reads untrusted posting text under
@@ -158,10 +158,10 @@ its source is AGPL):
   sandbox) stays allowed.
 - Streams stdout line-by-line: `assistant` text and humanized `tool_use` lines append to a
   per-job transcript `data/logs/apply_<ts>_job<id>.txt`; the final `result` message yields
-  `cost_usd`. Wall-clock timeout 600 s → process-tree kill → `AgentResult("failed", "timeout")`.
-  600 s, not 300: a multi-page ATS form (Workday/iCIMS) routinely runs past five minutes,
+  `cost_usd`. Wall-clock timeout 1200 s → process-tree kill → `AgentResult("failed", "timeout")`.
+  1200 s, not 600: a multi-page ATS form (Workday/iCIMS/SuccessFactors) can run past ten minutes (a live SuccessFactors draft did),
   and killing a healthy run costs a `failed:timeout` toward `MAX_ATTEMPTS` (draft) or a
-  `held_unknown` (send). It is also always strictly under `sweep_stale_in_flight`'s 20 min:
+  `held_unknown` (send). It is also always strictly under `sweep_stale_in_flight`'s 30 min:
   armed at spawn, this deadline fires first, so a timing-out run resolves its own
   `in_flight` row before the sweep can touch it. Raise one, raise the other.
 - Wall-clock deadline enforced by a watchdog timer, not by `proc.wait`: `consume_stream`

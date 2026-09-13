@@ -569,7 +569,7 @@ def _sweeping_agent(conn, result):
     held_unknown while the agent is still driving the browser."""
     async def _fake(prompt, job_id, nonce):
         conn.execute("UPDATE application SET started_at ="
-                     " datetime('now', '-30 minutes') WHERE status = 'in_flight'")
+                     " datetime('now', '-45 minutes') WHERE status = 'in_flight'")
         conn.commit()
         assert ats_apply.sweep_stale_in_flight(conn) == 1
         return result
@@ -847,9 +847,11 @@ def test_the_agent_deadline_fires_before_the_sweep_window():
         agent_mod.run_agent).parameters["timeout_s"].default
     sweep_s = inspect.signature(
         ats_apply.sweep_stale_in_flight).parameters["minutes"].default * 60
-    assert deadline_s >= 600, (
-        "a multi-page ATS form (Workday/iCIMS: snapshot -> upload -> parse ->"
+    assert deadline_s >= 1200, (
+        "a multi-page ATS form (Workday/iCIMS/SuccessFactors -- a live"
+        " SuccessFactors run needed over 10 min: snapshot -> upload -> parse ->"
         f" several screens) needs more than {deadline_s}s of healthy run")
+    assert sweep_s == 30 * 60
     assert deadline_s < sweep_s, (
         f"agent deadline {deadline_s}s must fire before the {sweep_s}s sweep")
 
