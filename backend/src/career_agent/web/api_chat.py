@@ -2,8 +2,10 @@
 api.py: app.py mounts this router, so app.py is imported at call time."""
 import json
 from fastapi import APIRouter, Body, HTTPException
+from fastapi.responses import JSONResponse
 
 from career_agent import chat
+from career_agent.web import actions
 
 router = APIRouter(prefix="/api/chat")
 
@@ -48,3 +50,13 @@ def api_post_message(cid: int, text: str = Body(..., embed=True)):
     if conv["kind"] == "home":
         chat.post_message(conn, cid, "system", "Commands arrive in a later slice.")
     return {"ok": True, "message_id": mid}
+
+
+@router.post("/prompts/{prompt_id}/answer")
+def api_answer_prompt(prompt_id: int, answer: dict = Body(...)):
+    """Body: {"answer": ..., "remember": bool} for an ASK card,
+    {"decision": "approve"|"change"|"cancel", "changes": {...}} for CONFIRM.
+    Refusals keep the {ok, message} body with 404/409/422."""
+    m = _app()
+    result = actions.answer_prompt(m._conn(), prompt_id, answer, m._chat_conn)
+    return JSONResponse(status_code=200 if result["ok"] else result["code"], content=result)

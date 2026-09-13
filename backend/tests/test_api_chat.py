@@ -88,3 +88,69 @@ def test_second_conversations_poll_does_no_backfill(client, conn):
     before = conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
     client.get("/api/chat/conversations")
     assert conn.execute("SELECT COUNT(*) FROM message").fetchone()[0] == before
+
+
+class _LiveRun:
+    """A registered run waiting on its prompt: same send() contract as AgentRun."""
+    def __init__(self):
+        import threading
+        self.nonce, self.sent = "n0nce", []
+        self.waiting, self.done = threading.Event(), threading.Event()
+        self.waiting.set()
+
+    def send(self, text):
+        if self.done.is_set() or not self.waiting.is_set():
+            return False
+        self.waiting.clear()
+        self.sent.append(text)
+        return True
+
+
+@pytest.fixture
+def runs(monkeypatch):
+    from career_agent.apply import agent as agent_mod
+    d = {}
+    monkeypatch.setattr(agent_mod, "RUNS", d)
+    return d
+
+
+def _confirm_prompt(conn):
+    return chat.open_prompt(conn, 1, "confirm", {"fields": [{"label": "Name", "value": "Asha"}]})
+
+
+def test_answer_a_prompt_relays_it_to_the_live_run(client, conn, runs):
+    run = runs[1] = _LiveRun()
+    pid = _confirm_prompt(conn)
+    r = client.post(f"/api/chat/prompts/{pid}/answer", json={"decision": "approve"})
+    assert r.status_code == 200 and r.json()["ok"]
+    assert run.sent == ['DECISION:n0nce:{"decision": "approve"}']
+    row = conn.execute("SELECT status, answer FROM agent_prompt WHERE id = ?", (pid,)).fetchone()
+    assert row["status"] == "answered"
+
+
+def test_answer_with_no_live_run_is_409_and_stays_open(client, conn, runs):
+    pid = _confirm_prompt(conn)
+    r = client.post(f"/api/chat/prompts/{pid}/answer", json={"decision": "approve"})
+    assert r.status_code == 409
+    assert r.json() == {"ok": False, "code": 409, "message": "No live agent run for this job"}
+    assert chat.open_prompt_for_job(conn, 1)["id"] == pid
+
+
+def test_answering_twice_is_409_no_longer_open(client, conn, runs):
+    runs[1] = _LiveRun()
+    pid = _confirm_prompt(conn)
+    assert client.post(f"/api/chat/prompts/{pid}/answer", json={"decision": "cancel"}).status_code == 200
+    r = client.post(f"/api/chat/prompts/{pid}/answer", json={"decision": "cancel"})
+    assert r.status_code == 409 and r.json()["message"] == "That question is no longer open"
+
+
+def test_an_invalid_answer_is_422(client, conn, runs):
+    runs[1] = _LiveRun()
+    pid = _confirm_prompt(conn)
+    r = client.post(f"/api/chat/prompts/{pid}/answer", json={"decision": "yolo"})
+    assert r.status_code == 422 and not r.json()["ok"]
+    assert runs[1].sent == []
+
+
+def test_an_unknown_prompt_is_404(client, conn, runs):
+    assert client.post("/api/chat/prompts/999/answer", json={"decision": "approve"}).status_code == 404

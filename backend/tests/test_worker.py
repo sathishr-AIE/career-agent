@@ -82,7 +82,7 @@ async def test_apply_tick_passes_brief_and_profile_to_submit(
 
     captured = {}
 
-    async def fake_submit(conn, job_id, dry_run, brief=None, profile=None,
+    async def fake_submit(conn, job_id, mode, brief=None, profile=None,
                           resume_version=None, **kw):
         captured["brief"] = brief
         captured["profile"] = profile
@@ -126,7 +126,7 @@ async def test_apply_tick_parks_on_needs_answer_instead_of_looping(
     job_id = _job(conn, "fp1")
     worker.set_run_state(conn, "apply", status="running", mode="manual")
 
-    async def fake_submit(conn, job_id, dry_run, brief=None, profile=None,
+    async def fake_submit(conn, job_id, mode, brief=None, profile=None,
                           resume_version=None, **kw):
         return {"ok": False, "needs_answer": "Notice period?"}
 
@@ -157,7 +157,7 @@ async def test_apply_tick_tailors_before_drafting_and_threads_the_version(
 
     captured = {}
 
-    async def fake_submit(conn, job_id, dry_run, resume_version=None, **kw):
+    async def fake_submit(conn, job_id, mode, resume_version=None, **kw):
         captured["resume_version"] = resume_version
         return {"ok": True, "job_id": job_id, "status": "draft"}
 
@@ -187,7 +187,7 @@ async def test_apply_tick_reuses_an_already_tailored_resume(conn, brief_path,
 
     captured = {}
 
-    async def fake_submit(conn, job_id, dry_run, resume_version=None, **kw):
+    async def fake_submit(conn, job_id, mode, resume_version=None, **kw):
         captured["resume_version"] = resume_version
         return {"ok": True, "job_id": job_id, "status": "draft"}
 
@@ -394,17 +394,16 @@ async def test_tick_with_empty_queue_goes_idle_and_logs_completion(
 async def test_auto_mode_makes_exactly_one_submit_call(conn, brief_path,
                                                         profile_path,
                                                         monkeypatch):
-    """Auto mode used to draft (dry_run=True) then immediately send
-    (dry_run=False) -- two browser sessions seconds apart with no human in
-    between. The agent does both jobs in a single session now, so auto mode
-    makes exactly one call, straight to dry_run=False."""
+    """Auto mode used to draft then immediately send -- two browser sessions
+    seconds apart with no human in between. The agent does both jobs in a
+    single session now, so auto mode makes exactly one call, in auto mode."""
     job_id = _job(conn, "auto-me")
     worker.set_run_state(conn, "apply", status="running", mode="auto")
 
     calls = []
 
-    async def fake_submit(conn, job_id, dry_run, resume_version=None, **kw):
-        calls.append(dry_run)
+    async def fake_submit(conn, job_id, mode, resume_version=None, **kw):
+        calls.append(mode)
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', 'submitted')", (job_id,))
         conn.commit()
@@ -413,7 +412,7 @@ async def test_auto_mode_makes_exactly_one_submit_call(conn, brief_path,
     monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
     await worker.apply_tick(conn, brief_path, profile_path)
 
-    assert calls == [False]
+    assert calls == ["auto"]
     assert worker.get_run_state(conn, "apply")["current_job_id"] is None
 
 
@@ -425,7 +424,7 @@ async def test_tick_auto_mode_skips_when_the_real_send_reports_not_ok(
     job_id = _job(conn, "captcha")
     worker.set_run_state(conn, "apply", status="running", mode="auto")
 
-    async def fake_submit(conn, job_id, dry_run, resume_version=None, **kw):
+    async def fake_submit(conn, job_id, mode, resume_version=None, **kw):
         return {"ok": False, "reason": "captcha held the submission"}
 
     monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
@@ -452,7 +451,7 @@ async def test_auto_mode_pauses_when_submit_reports_unsupported(
 
     calls = []
 
-    async def fake_submit(conn, job_id, dry_run, resume_version=None, **kw):
+    async def fake_submit(conn, job_id, mode, resume_version=None, **kw):
         calls.append(1)
         return {"ok": False, "unsupported": True,
                 "reason": "real sends are not enabled yet"}
@@ -480,7 +479,7 @@ async def test_needs_answer_from_auto_send_parks(conn, brief_path,
     job_id = _job(conn, "needs-answer-auto")
     worker.set_run_state(conn, "apply", status="running", mode="auto")
 
-    async def fake_submit(conn, job_id, dry_run, resume_version=None, **kw):
+    async def fake_submit(conn, job_id, mode, resume_version=None, **kw):
         return {"ok": False, "needs_answer": "PMP cert?",
                 "reason": "needs an answer: PMP cert?"}
 
@@ -500,14 +499,14 @@ async def test_manual_mode_still_drafts_and_parks_for_review(
 
     calls = []
 
-    async def fake_submit(conn, job_id, dry_run, resume_version=None, **kw):
-        calls.append(dry_run)
+    async def fake_submit(conn, job_id, mode, resume_version=None, **kw):
+        calls.append(mode)
         return {"ok": True, "job_id": job_id, "status": "draft"}
 
     monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
     await worker.apply_tick(conn, brief_path, profile_path)
 
-    assert calls == [True]
+    assert calls == ["manual"]
     assert worker.get_run_state(conn, "apply")["current_job_id"] is not None
 
 
@@ -518,8 +517,8 @@ async def test_tick_manual_mode_stops_after_draft(conn, brief_path, profile_path
 
     calls = []
 
-    async def fake_submit(conn, job_id, dry_run, resume_version=None, **kw):
-        calls.append(dry_run)
+    async def fake_submit(conn, job_id, mode, resume_version=None, **kw):
+        calls.append(mode)
         conn.execute("INSERT INTO application (job_id, resume_version,"
                      " status) VALUES (?, 'v1', 'draft')", (job_id,))
         conn.commit()
@@ -528,7 +527,7 @@ async def test_tick_manual_mode_stops_after_draft(conn, brief_path, profile_path
     monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
     await worker.apply_tick(conn, brief_path, profile_path)
 
-    assert calls == [True]
+    assert calls == ["manual"]
     state = worker.get_run_state(conn, "apply")
     assert state["status"] == "running"
     assert state["current_job_id"] == job_id
@@ -655,7 +654,7 @@ async def test_apply_tick_hands_its_conn_factory_to_submit(
     worker.set_run_state(conn, "apply", status="running", mode="manual")
     captured = {}
 
-    async def fake_submit(conn, job_id, dry_run, conn_factory=None, **kw):
+    async def fake_submit(conn, job_id, mode, conn_factory=None, **kw):
         captured["conn_factory"] = conn_factory
         return {"ok": True, "job_id": job_id, "status": "draft"}
 

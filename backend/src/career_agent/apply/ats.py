@@ -41,17 +41,20 @@ PERMANENT_REASONS = {
     "expired", "sso_required", "easy_apply", "naukri_platform",
     "not_eligible_location", "already_applied", "not_a_job_application",
     "unsafe_permissions", "unsafe_verification", "site_blocked",
+    # A human's DECISION cancel: a choice about this job, not a failure to
+    # retry. Re-queue it deliberately via queue_retry if they change their mind.
+    "cancelled",
 }
 
 # Reasons that mean the agent drove a real browser and then stopped
-# reporting: it may have clicked Submit before it died. ON THE SEND PATH
-# these are neither "failed" nor "permanent" -- the application's true
-# state is UNKNOWN, so they become 'held_unknown' (a BLOCKING status) and
-# a human adjudicates, exactly as sweep_stale_in_flight does for a crashed
-# in_flight row (see docs/lld-apply-button-v2.md section 6, layer 2).
-# Retrying instead would be a double-submit vector the moment
-# SUBMISSION_IMPLEMENTED flips. The DRAFT path keeps them retryable:
-# nothing is submitted at draft time, so re-drafting is free and correct.
+# reporting: it may have clicked Submit before it died. When the run COULD
+# submit (can_submit) these are neither "failed" nor "permanent" -- the
+# application's true state is UNKNOWN, so they become 'held_unknown' (a
+# BLOCKING status) and a human adjudicates, exactly as sweep_stale_in_flight
+# does for a crashed in_flight row (see docs/lld-apply-button-v2.md section
+# 6, layer 2). With submission disabled nothing could have been sent, so
+# they stay retryable. `answer_timeout` is deliberately NOT here: the agent
+# only waits at ASK/CONFIRM and CONFIRM precedes Submit.
 # Matched on the part before the first ':' -- "unrecognized_result:<body>"
 # carries a payload.
 UNKNOWN_STATE_REASONS = {"agent_error", "timeout", "no_result_line",
@@ -146,8 +149,19 @@ async def _live_run_agent(prompt: str, job_id: int, nonce: str,
     try:
         return await agent_mod.run_agent(prompt, job_id=job_id, nonce=nonce,
                                          events=events)
+    except asyncio.CancelledError:
+        _kill_live(job_id)     # before cleanup: never leave claude driving a dead Chrome
+        raise
     finally:
         chrome_mod.cleanup(proc)
+
+
+def _kill_live(job_id: int) -> None:
+    """A cancelled await does not stop the to_thread worker: the claude
+    session would keep running unobserved. Kill it."""
+    run = agent_mod.RUNS.get(job_id)
+    if run is not None:
+        run.kill()
 
 
 # Tool calls worth a line in the chat; snapshots, waits, evaluates are noise.
@@ -155,7 +169,7 @@ _NARRATED_TOOLS = {"browser_navigate", "browser_file_upload", "browser_click",
                    "browser_fill_form"}
 
 
-def _chat_events(conn_factory, job_id: int, nonce: str) -> RunEvents:
+def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual") -> RunEvents:
     """RunEvents that narrate a run into the job's conversation, or no-ops
     when there is no conn_factory.
 
@@ -167,20 +181,43 @@ def _chat_events(conn_factory, job_id: int, nonce: str) -> RunEvents:
 
     Protocol lines (RESULT/ASK/CONFIRM stamped with this run's nonce) are
     cut from the narration: they would put the nonce and raw JSON in the
-    chat, and the ASK/CONFIRM cards reach it through on_ask/on_confirm."""
-    if conn_factory is None:
-        return RunEvents()
+    chat, and the ASK/CONFIRM cards reach it through on_ask/on_confirm.
 
-    def post(role: str, content: str) -> None:
+    ASK and CONFIRM open an agent_prompt card. In auto mode a CONFIRM is
+    approved on the spot (the prompt pre-approves it) and DECISION approve
+    is sent if the run is waiting -- the ONLY approval not given by a human
+    through actions.answer_prompt."""
+    def with_conn(fn, what: str) -> None:
+        if conn_factory is None:
+            return
         try:
             c = conn_factory()
             try:
-                chat.post_message(c, chat.conversation_for_job(c, job_id), role, content)
+                fn(c)
             finally:
                 c.close()
         except Exception:
-            log.warning("could not post a %s message for job %s", role, job_id,
-                        exc_info=True)
+            log.warning("could not record %s for job %s", what, job_id, exc_info=True)
+
+    def post(role: str, content: str) -> None:
+        with_conn(lambda c: chat.post_message(
+            c, chat.conversation_for_job(c, job_id), role, content), f"a {role} message")
+
+    def on_ask(payload: dict) -> None:
+        with_conn(lambda c: chat.open_prompt(c, job_id, payload["kind"], payload), "an ASK")
+
+    def on_confirm(payload: dict) -> None:
+        def record(c):
+            pid = chat.open_prompt(c, job_id, "confirm", payload)
+            if mode == "auto":
+                chat.answer_prompt_row(c, pid, {"decision": "approve"})
+                chat.post_message(c, chat.conversation_for_job(c, job_id), "system",
+                                  "Auto mode: application summary approved without review")
+        with_conn(record, "a CONFIRM")
+        if mode == "auto":
+            run = agent_mod.RUNS.get(job_id)
+            if run is not None:     # False when not waiting: the pre-approved agent went on
+                run.send(agent_mod.answer_line(nonce, "confirm", {"decision": "approve"}))
 
     def on_tool(name: str, summary: str) -> None:
         if name in _NARRATED_TOOLS:
@@ -195,7 +232,7 @@ def _chat_events(conn_factory, job_id: int, nonce: str) -> RunEvents:
         if kept:
             post("agent", kept)
 
-    return RunEvents(on_text=on_text, on_tool=on_tool)
+    return RunEvents(on_text=on_text, on_tool=on_tool, on_ask=on_ask, on_confirm=on_confirm)
 
 
 def _resume_text(row) -> str:
@@ -293,139 +330,93 @@ def _prior_failures(conn, job_id: int) -> int:
         " WHERE job_id = ? AND status = 'failed'", (job_id,)).fetchone()["n"]
 
 
-def _record_draft_outcome(conn, job_id: int, resume_version: str, url: str,
-                          result, detail: str = "") -> dict:
+def _approved_answers(conn, job_id: int, after_prompt_id: int) -> dict | None:
+    """{label: value} from this run's last APPROVED CONFIRM, or None when no
+    CONFIRM was approved -- answers are never fabricated."""
+    row = conn.execute(
+        "SELECT payload FROM agent_prompt WHERE job_id = ? AND id > ?"
+        " AND kind = 'confirm' AND status = 'answered'"
+        " AND json_extract(answer, '$.decision') = 'approve'"
+        " ORDER BY id DESC LIMIT 1", (job_id, after_prompt_id)).fetchone()
+    if row is None:
+        return None
+    return {f["label"]: f["value"] for f in json.loads(row["payload"])["fields"]}
+
+
+def _record_outcome(conn, job_id: int, app_id: int, url: str, result,
+                    detail: str, can_submit: bool, answers: dict | None) -> dict:
+    """The one outcome recorder: turns this run's in_flight row into what
+    happened. Every non-submitted UPDATE/DELETE is guarded on
+    `status = 'in_flight'`: a run can outlive sweep_stale_in_flight and come
+    back to find its row held_unknown, and downgrading that re-admits a job
+    this run may already have submitted."""
     code = result.code
+    event = lambda type_, payload: conn.execute(
+        "INSERT INTO event (job_id, type, payload) VALUES (?, ?, ?)",
+        (job_id, type_, payload))
 
-    if code == "draft_ready":
-        conn.execute(
-            "INSERT INTO application (job_id, resume_version, answers, status,"
-            " transcript_path) VALUES (?, ?, ?, 'draft', ?)",
-            (job_id, resume_version, json.dumps(result.answers or {}),
-             result.transcript_path or None))
-        conn.commit()
-        return {"ok": True, "job_id": job_id, "status": "draft"}
-
-    if code == "needs_answer":
-        # Never falsy: worker.apply_tick parks on `if result.get(
-        # "needs_answer")`, so a bare RESULT:NEEDS_ANSWER: with no question
-        # text would fall through to job_skipped and clear the very park
-        # this mechanism exists to set.
-        question = result.reason or "(question not reported)"
-        return {"ok": False, "needs_answer": question,
-                "reason": f"needs an answer: {question}"}
-
-    if code == "captcha":
-        conn.execute("INSERT INTO event (job_id, type, payload)"
-                     " VALUES (?, 'captcha_held', ?)",
-                     (job_id, result.transcript_path or url))
-        conn.commit()
-        return {"ok": False, "held": True,
-                "reason": "captcha encountered; held for review"}
-
-    if code == "applied":
-        # Draft mode explicitly forbids clicking Submit. If the agent says
-        # it applied anyway, the true state is unknown and possibly
-        # submitted -- hold it (a BLOCKING status) so no later run can send
-        # a second time, rather than filing a retryable failure.
-        status, reason = "held_unknown", "applied_during_draft"
-    else:
-        # No UNKNOWN_STATE_REASONS special case here on purpose: a draft
-        # submits nothing, so a crashed/timed-out/unparseable draft run is
-        # simply retryable.
-        reason = _reason_of(result)
-        status = classify_failure(reason, _prior_failures(conn, job_id))
-
-    conn.execute(
-        "INSERT INTO application (job_id, resume_version, answers, status,"
-        " failure_reason, transcript_path) VALUES (?, ?, ?, ?, ?, ?)",
-        (job_id, resume_version, json.dumps(result.answers or {}), status,
-         reason, result.transcript_path or None))
-    conn.execute("INSERT INTO event (job_id, type, payload) VALUES (?, ?, ?)",
-                 (job_id, status, detail or reason))
-    conn.commit()
-    return {"ok": False, "reason": f"draft {status}: {detail or reason}"}
-
-
-def _record_send_outcome(conn, job_id: int, app_id: int, url: str,
-                         pinned: dict | None, result, detail: str = "") -> dict:
-    code = result.code
-
-    if code == "applied":
-        # pinned wins when the agent reports nothing back -- an empty
-        # ANSWERS_JSON included. The review invariant says the recorded
-        # answers are what was reviewed, so `{}` must not overwrite them.
-        answers = result.answers or pinned or {}
-        # ... but when BOTH are empty there is no audit trail at all for a
-        # real submission: parse_result only demands ANSWERS_JSON for
-        # DRAFT_READY, so auto mode's bare RESULT:APPLIED lands here with
-        # `{}`. Record the send regardless -- it happened, and that is the
-        # irreversible truth -- but never silently: failure_reason on a
-        # 'submitted' row is the gap marker, not a failure.
-        gap = "answers_json_missing" if not answers else None
+    if code == "applied" and can_submit:
+        # Recorded regardless of a missing approved CONFIRM -- the send
+        # happened, that is the irreversible truth -- but never silently:
+        # failure_reason on a 'submitted' row is the gap marker. Unguarded on
+        # purpose: held_unknown -> submitted is the truthful upgrade.
+        gap = "confirm_missing" if answers is None else None
         conn.execute(
             "UPDATE application SET status = 'submitted', answers = ?,"
             " submitted_at = datetime('now'), transcript_path = ?,"
             " failure_reason = ? WHERE id = ?",
-            (json.dumps(answers), result.transcript_path or None, gap, app_id))
-        conn.execute("INSERT INTO event (job_id, type, payload)"
-                     " VALUES (?, 'submitted', ?)", (job_id, url))
+            (json.dumps(answers or {}), result.transcript_path or None, gap, app_id))
+        event("submitted", url)
         if gap:
-            conn.execute("INSERT INTO event (job_id, type, payload)"
-                         " VALUES (?, ?, ?)",
-                         (job_id, gap, "submitted with no answers recorded:"
-                          f" {result.transcript_path or url}"))
+            event(gap, f"submitted with no approved CONFIRM: {result.transcript_path or url}")
         conn.commit()
         return {"ok": True, "job_id": job_id, "status": "submitted"}
 
-    if code == "captcha":
-        # `AND status = 'in_flight'` for the same reason as the failure path
-        # below: a run can outlive sweep_stale_in_flight and come back to
-        # find its own row already held_unknown. Deleting that row would
-        # re-admit a job this run may already have submitted.
+    if code == "draft_ready":
+        conn.execute(
+            "UPDATE application SET status = 'draft', answers = ?, transcript_path = ?"
+            " WHERE id = ? AND status = 'in_flight'",
+            (json.dumps(answers or {}), result.transcript_path or None, app_id))
+        if answers is None:
+            event("confirm_missing", f"draft with no approved CONFIRM: {result.transcript_path or url}")
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    if code in ("captcha", "needs_answer"):
+        # Nothing was sent: the attempt leaves no row.
         conn.execute("DELETE FROM application WHERE id = ?"
                      " AND status = 'in_flight'", (app_id,))
-        conn.execute("INSERT INTO event (job_id, type, payload)"
-                     " VALUES (?, 'captcha_held', ?)", (job_id, url))
+        if code == "captcha":
+            event("captcha_held", result.transcript_path or url)
+            conn.commit()
+            return {"ok": False, "held": True,
+                    "reason": "captcha encountered; held for review"}
         conn.commit()
-        return {"ok": False, "held": True,
-                "reason": "captcha encountered; held for review"}
-
-    if code == "needs_answer":
-        # Nothing was sent, so the attempt leaves no trace: the worker
-        # parks on the question and the job re-enters the queue once it is
-        # answered.
-        conn.execute("DELETE FROM application WHERE id = ?"
-                     " AND status = 'in_flight'", (app_id,))   # same guard
-        conn.commit()
+        # Never falsy: worker.apply_tick parks on `if result.get("needs_answer")`.
         question = result.reason or "(question not reported)"
         return {"ok": False, "needs_answer": question,
                 "reason": f"needs an answer: {question}"}
 
-    # expired / login_issue / failed / draft_ready-in-send-mode / anything
-    # unrecognized: the in_flight row becomes the failure record. A reason
-    # that means "the agent stopped reporting mid-run" holds instead of
-    # failing -- it may already have submitted (see UNKNOWN_STATE_REASONS).
-    reason = _reason_of(result)
-    status = ("held_unknown" if is_unknown_state(reason)
-              else classify_failure(reason, _prior_failures(conn, job_id)))
-    # `AND status = 'in_flight'` closes a double-submit race: the agent's
-    # deadline is meant to fire well before sweep_stale_in_flight's window,
-    # but if that kill ever fails to land a run can outlive the sweep and
-    # come back to find its own row already held_unknown.
-    # Overwriting that with 'failed' (not BLOCKING) would re-admit the job
-    # to QUEUE_WHERE and apply a second time to a form this run may
-    # already have submitted. The 'applied' branch above stays
-    # unconditional on purpose -- held_unknown -> submitted is the
-    # truthful upgrade and must never be suppressed.
+    if code == "applied":
+        # Submission was disabled, yet the agent says it clicked Submit: the
+        # true state is unknown and possibly submitted -- hold, never retry.
+        status, reason = "held_unknown", "applied_during_draft"
+    else:
+        reason = _reason_of(result)
+        # answer_timeout: the agent only waits at ASK/CONFIRM and CONFIRM
+        # precedes Submit, so a wait-kill cannot have submitted. Unknown-state
+        # reasons hold only when a submit was possible at all.
+        if can_submit and is_unknown_state(reason):
+            status = "held_unknown"
+        else:
+            status = classify_failure(reason, _prior_failures(conn, job_id))
     conn.execute(
         "UPDATE application SET status = ?, failure_reason = ?,"
         " transcript_path = ? WHERE id = ? AND status = 'in_flight'",
         (status, reason, result.transcript_path or None, app_id))
-    conn.execute("INSERT INTO event (job_id, type, payload) VALUES (?, ?, ?)",
-                 (job_id, status, detail or reason))
+    event(status, detail or reason)
     conn.commit()
-    return {"ok": False, "reason": f"submission {status}: {detail or reason}"}
+    return {"ok": False, "reason": f"{status}: {detail or reason}"}
 
 
 async def _run(runner, prompt: str, job_id: int, nonce: str,
@@ -449,6 +440,9 @@ async def _run(runner, prompt: str, job_id: int, nonce: str,
                                       result.usage),
                  result.duration_ms, result.transcript_path or "none")
         return result, ""
+    except asyncio.CancelledError:
+        _kill_live(job_id)
+        raise
     except agent_mod.PreconditionError as exc:
         # submit()'s preflight normally catches this first; reaching here
         # means the backstop inside run_session fired. Nothing
@@ -461,30 +455,28 @@ async def _run(runner, prompt: str, job_id: int, nonce: str,
         return agent_mod.AgentResult("failed", "agent_error"), str(exc)
 
 
-async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
+async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
                  brief: CareerBrief,
                  profile: CandidateProfile | None = None,
                  resume_version: str | None = None,
                  run_agent=None, conn_factory=None) -> dict:
-    """Draft (dry_run=True) or really send (dry_run=False) one application,
-    by running one apply-agent session and translating its AgentResult into
-    this module's state machine. `run_agent` is the only test seam:
-    `async (prompt: str, job_id: int, nonce: str, events: RunEvents)
-    -> AgentResult`. `conn_factory` is a zero-arg callable returning a NEW
-    connection; with it the run's narration streams into the job's
-    conversation (see _chat_events), without it events are no-ops."""
+    """Run one apply-agent session for a job and translate its AgentResult
+    into this module's state machine. `mode` is "manual" (every CONFIRM
+    waits for the human's DECISION in the job chat) or "auto" (CONFIRMs are
+    auto-approved). What an approval MEANS is the kill switch's call:
+    can_submit = SUBMISSION_IMPLEMENTED or an injected run_agent (the test
+    seam); without it the run still fills and CONFIRMs, never clicks Submit,
+    and ends DRAFT_READY.
+
+    `run_agent`: `async (prompt, job_id, nonce, events: RunEvents) ->
+    AgentResult`. `conn_factory` is a zero-arg callable returning a NEW
+    connection; with it narration, ASK and CONFIRM cards reach the job's
+    conversation (see _chat_events), without it they are no-ops."""
+    if mode not in ("manual", "auto"):
+        raise ValueError(f"unknown mode {mode!r}")
     row = conn.execute("SELECT * FROM job WHERE id = ?", (job_id,)).fetchone()
     if row is None:
         return {"ok": False, "reason": f"job {job_id} not found"}
-
-    # Kill switch first, before anything is written. It now gates a real
-    # send for every source, not just Greenhouse -- an injected run_agent
-    # (tests only) is the escape hatch, same as the old injected filler.
-    if not dry_run and run_agent is None and not SUBMISSION_IMPLEMENTED:
-        return {"ok": False, "unsupported": True, "reason":
-                "The agentic apply engine is built but real sends are not"
-                " enabled yet (SUBMISSION_IMPLEMENTED). Apply on the site"
-                " yourself, then record the outcome."}
 
     live = _blocking_status(conn, job_id)
     if live:
@@ -558,62 +550,29 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
                    str(_stage_resume(resume_path, profile, job_id)))
     score = score_row["weighted_score"] if score_row else None
     runner = run_agent or _live_run_agent
-    # One unguessable token per run, stamped into every RESULT line the
-    # prompt teaches and the only one parse_result will accept back -- a
-    # job page cannot guess it, so it cannot forge an outcome. The runner
-    # carries it through to parse_result; nothing else ever sees it.
+    can_submit = SUBMISSION_IMPLEMENTED or run_agent is not None
+    # One unguessable token per run, stamped into every protocol line the
+    # prompt teaches and the only one the parsers accept back -- a job page
+    # cannot guess it, so it cannot forge an outcome, a CONFIRM, or an ASK.
     nonce = agent_mod.new_nonce()
-    events = _chat_events(conn_factory, job_id, nonce)
+    events = _chat_events(conn_factory, job_id, nonce, mode)
+    prompt = agent_mod.build_prompt(*prompt_args, mode=mode, can_submit=can_submit,
+                                    nonce=nonce, score=score)
 
-    if dry_run:
-        prompt = agent_mod.build_prompt(*prompt_args, mode="manual",
-                                        can_submit=False, nonce=nonce, score=score)
-        async with _agent_lock():
-            result, detail = await _run(runner, prompt, job_id, nonce, events)
-        return _record_draft_outcome(conn, job_id, resume_version,
-                                     row["url"], result, detail)
-
-    # Real send. A draft on record means a human (or auto mode's own draft
-    # pass) already reviewed those answers, and they are what must be sent
-    # -- never recomputed. No draft means auto mode's single pass, where
-    # the agent decides and submits in one session.
-    draft = conn.execute(
-        "SELECT answers FROM application WHERE job_id = ? AND status = 'draft'"
-        " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
-    pinned = None
-    if draft is not None:
-        # A draft exists => a human review is expected, so send mode is
-        # non-negotiable even if that draft recorded no answers. Falling
-        # through to auto mode there would let the agent improvise and
-        # submit answers nobody saw.
-        #
-        # Reused verbatim, with no re-check of qa_bank's 30-day volatility
-        # window even if the draft is older than that window. Revalidating
-        # here would contradict the whole point of reuse -- "what was shown
-        # for review is exactly what gets sent" -- by silently sending
-        # different answers than what was reviewed. Reuse wins.
-        pinned = json.loads(draft["answers"] or "{}")
-        prompt = agent_mod.build_prompt(*prompt_args, mode="manual", can_submit=True,
-                                        nonce=nonce, pinned_answers=pinned, score=score)
-    else:
-        prompt = agent_mod.build_prompt(*prompt_args, mode="auto", can_submit=True,
-                                        nonce=nonce, score=score)
-
-    # The in_flight row is written INSIDE the lock: started_at is what
-    # sweep_stale_in_flight measures, so a run queued behind another would
-    # otherwise age toward that window while it had not begun.
+    # The in_flight row is written INSIDE the lock, for every run: started_at
+    # is what sweep_stale_in_flight measures, so a run queued behind another
+    # would otherwise age toward that window while it had not begun.
     async with _agent_lock():
         # ...and the BLOCKING check is re-run here, authoritatively. The
         # early one above ran before the lock's await, so while a third run
-        # holds the lock the auto worker and a dashboard Send can both pass
-        # it seeing no live row; the loser's INSERT would then raise
-        # sqlite3.IntegrityError (one_live_application_per_job) out of
-        # submit(), which worker.apply_tick turns into run_state 'error' --
-        # stopping the whole apply queue over a refusal it already knows how
-        # to report.
+        # holds the lock two same-job submits can both pass it seeing no live
+        # row; the loser's INSERT would then raise sqlite3.IntegrityError
+        # (one_live_application_per_job) out of submit().
         live = _blocking_status(conn, job_id)
         if live:
             return _blocked(job_id, live)
+        # This run's cards are the ones created after this point.
+        before = conn.execute("SELECT COALESCE(MAX(id), 0) m FROM agent_prompt").fetchone()["m"]
         cur = conn.execute(
             "INSERT INTO application (job_id, resume_version, status, started_at)"
             " VALUES (?, ?, 'in_flight', datetime('now'))",
@@ -621,5 +580,6 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
         app_id = cur.lastrowid
         conn.commit()
         result, detail = await _run(runner, prompt, job_id, nonce, events)
-    return _record_send_outcome(conn, job_id, app_id, row["url"], pinned,
-                                result, detail)
+    chat.expire_open_prompts(conn, job_id)
+    return _record_outcome(conn, job_id, app_id, row["url"], result, detail,
+                           can_submit, _approved_answers(conn, job_id, before))

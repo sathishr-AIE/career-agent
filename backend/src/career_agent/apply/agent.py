@@ -97,6 +97,12 @@ def confirm_prefix(nonce: str) -> str:
     return _prefix("CONFIRM", nonce)
 
 
+def answer_line(nonce: str, kind: str, body: dict) -> str:
+    """The line written back into the session: DECISION for a CONFIRM card,
+    ANSWER for every ASK kind. Stamped with the run nonce like the rest."""
+    return _prefix("DECISION" if kind == "confirm" else "ANSWER", nonce) + json.dumps(body)
+
+
 # Every protocol line build_prompt teaches, stamped with the run nonce in one
 # pass. \b keeps NEEDS_ANSWER: (a RESULT body, not a line of its own) intact.
 _SENTINEL = re.compile(r"\b(RESULT|ASK|CONFIRM|ANSWER|DECISION):")
@@ -380,8 +386,9 @@ def _result_codes_section() -> str:
         "RESULT:FAILED:<reason> -- anything else; use slugs sso_required, easy_apply,\n"
         "    naukri_platform, not_eligible_location, already_applied, "
         "not_a_job_application,\n"
-        "    unsafe_permissions, unsafe_verification, account_required, stuck, page_error\n"
-        "    when they fit (account_required: an account or a legal agreement is needed)"
+        "    unsafe_permissions, unsafe_verification, account_required, stuck, page_error,\n"
+        "    cancelled when they fit (account_required: an account or a legal agreement is\n"
+        "    needed; cancelled: the human's DECISION was cancel)"
     )
 
 
@@ -452,46 +459,23 @@ def build_prompt(job, profile, brief, qa_rows, resume_text, resume_path, *,
 
 def parse_result(output: str, nonce: str) -> AgentResult:
     """Last RESULT line wins -- the agent may hit a failure, recover, and end
-    on a different code. ANSWERS_JSON must appear before DRAFT_READY.
+    on a different code. The answers of a draft or a send come from the
+    run's approved CONFIRM (ats._approved_answers), not from this line.
 
     Only lines carrying this run's token count (see result_prefix): a
     `RESULT:` line without it, or with someone else's, is not a result at
     all. A hijack attempt therefore lands on `no_result_line`, which the
     send path holds as unknown-state -- never as a false `submitted`."""
     prefix = result_prefix(nonce)
-    lines = output.splitlines()
-
-    # Find the last stamped result line and its index
-    result_line = None
-    result_line_idx = -1
-    for i, line in enumerate(lines):
-        line = line.strip()
-        if line.startswith(prefix):
-            result_line = line
-            result_line_idx = i
-
-    if result_line is None:
+    hits = [l.strip() for l in output.splitlines() if l.strip().startswith(prefix)]
+    if not hits:
         return AgentResult("failed", "no_result_line")
 
-    # Scan for ANSWERS_JSON that appears before the winning RESULT: line
-    answers = None
-    for i, line in enumerate(lines):
-        if i >= result_line_idx:
-            break
-        line = line.strip()
-        if line.startswith("ANSWERS_JSON:"):
-            try:
-                answers = json.loads(line[len("ANSWERS_JSON:"):].strip())
-            except json.JSONDecodeError:
-                pass  # Skip malformed, keep previous value
-
-    body = _clean(result_line[len(prefix):])
+    body = _clean(hits[-1][len(prefix):])
     if body in _SIMPLE:
         return AgentResult(_SIMPLE[body])
     if body == "DRAFT_READY":
-        if not isinstance(answers, dict):
-            return AgentResult("failed", "bad_answers_json")
-        return AgentResult("draft_ready", answers=answers)
+        return AgentResult("draft_ready")
     if body.startswith("NEEDS_ANSWER:"):
         return AgentResult("needs_answer", body[len("NEEDS_ANSWER:"):].strip())
     if body.startswith("FAILED"):

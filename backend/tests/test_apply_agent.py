@@ -28,22 +28,10 @@ def test_parse_applied():
     assert r.code == "applied" and r.reason == ""
 
 
-def test_parse_draft_ready_with_answers():
-    out = ('ANSWERS_JSON: {"_name": "A B", "Years of experience?": "6"}\n'
-           f"{R}DRAFT_READY\n")
-    r = parse_result(out, N)
-    assert r.code == "draft_ready"
-    assert r.answers == {"_name": "A B", "Years of experience?": "6"}
-
-
-def test_parse_draft_ready_without_answers_is_failed():
-    r = parse_result(f"{R}DRAFT_READY\n", N)
-    assert r.code == "failed" and r.reason == "bad_answers_json"
-
-
-def test_parse_draft_ready_with_malformed_answers_is_failed():
-    r = parse_result(f"ANSWERS_JSON: {{oops\n{R}DRAFT_READY\n", N)
-    assert r.code == "failed" and r.reason == "bad_answers_json"
+def test_parse_draft_ready_needs_no_answers_json():
+    """A draft's answers come from its approved CONFIRM, not the RESULT line."""
+    r = parse_result(f"filled\n{R}DRAFT_READY\n", N)
+    assert (r.code, r.reason, r.answers) == ("draft_ready", "", None)
 
 
 def test_parse_needs_answer_keeps_question():
@@ -81,14 +69,6 @@ def test_parse_last_result_line_wins():
 def test_parse_trailing_markdown_junk_stripped():
     assert parse_result(f"{R}FAILED:stuck**`", N).reason == "stuck"
 
-
-def test_parse_answers_json_after_result_is_ignored():
-    out = f'{R}DRAFT_READY\nANSWERS_JSON: {{"x": 1}}\n'
-    r = parse_result(out, N)
-    assert r.code == "failed" and r.reason == "bad_answers_json"
-
-
-# -- build_prompt --------------------------------------------------------
 
 def _job(**kw):
     d = dict(source="ats", external_id="x1", company="Acme", title="Backend Eng",
@@ -693,9 +673,20 @@ def test_every_sentinel_the_prompt_teaches_round_trips(body, code):
 def test_draft_ready_round_trips_with_the_nonce():
     nonce = agent_mod.new_nonce()
     assert f"RESULT:{nonce}:DRAFT_READY" in _prompt(nonce, mode="manual", can_submit=False)
-    r = parse_result(f'ANSWERS_JSON: {{"a": "b"}}\nRESULT:{nonce}:DRAFT_READY',
-                     nonce)
-    assert r.code == "draft_ready" and r.answers == {"a": "b"}
+    assert parse_result(f"RESULT:{nonce}:DRAFT_READY", nonce).code == "draft_ready"
+
+
+def test_cancel_is_taught_as_a_result_code():
+    """The human's DECISION cancel ends the run as FAILED:cancelled, which ats
+    records as failed_permanent -- the slug must be in the list the agent reads."""
+    assert "cancelled" in agent_mod._result_codes_section()
+    assert "RESULT:FAILED:cancelled" in agent_mod._steps_section("manual", True)
+
+
+def test_answer_line_stamps_decision_for_confirm_and_answer_for_asks():
+    assert agent_mod.answer_line("n1", "confirm", {"decision": "approve"}) == \
+        'DECISION:n1:{"decision": "approve"}'
+    assert agent_mod.answer_line("n1", "text", {"id": "q", "answer": "x"}).startswith("ANSWER:n1:{")
 
 
 def test_an_empty_nonce_is_refused_on_both_sides():

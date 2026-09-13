@@ -145,20 +145,12 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
         # missing profile is a run_state error, caught below like any other
         # submit()-time failure.
         profile = load_candidate_profile(profile_path)
-        if state["mode"] == "manual":
-            result = await ats_apply.submit(conn, job_id, dry_run=True,
-                                            brief=brief, profile=profile,
-                                            resume_version=resume_version,
-                                            conn_factory=conn_factory)
-        else:
-            # Auto mode used to draft then immediately send -- two browser
-            # sessions seconds apart with no human in between. The agent
-            # does both jobs in one session now, so this is the only submit
-            # call auto mode makes.
-            result = await ats_apply.submit(conn, job_id, dry_run=False,
-                                            brief=brief, profile=profile,
-                                            resume_version=resume_version,
-                                            conn_factory=conn_factory)
+        # One session per job in both modes: manual CONFIRMs wait for the
+        # human in the job chat, auto CONFIRMs are approved on the spot.
+        result = await ats_apply.submit(conn, job_id, mode=state["mode"],
+                                        brief=brief, profile=profile,
+                                        resume_version=resume_version,
+                                        conn_factory=conn_factory)
     except Exception as exc:
         set_run_state(conn, "apply", status="error", current_job_id=None,
                       last_error=str(exc))

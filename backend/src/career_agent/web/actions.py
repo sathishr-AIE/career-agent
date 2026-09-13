@@ -8,6 +8,7 @@ Messages are plain text, not HTML-escaped -- the Jinja side escapes at
 render time (app.py's _span), so a message never gets double-escaped and
 the JSON side gets clean text."""
 import datetime as dt
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -15,7 +16,8 @@ from pathlib import Path
 import docx
 from pydantic import ValidationError
 
-from career_agent import outcomes, store, tailor
+from career_agent import chat, outcomes, store, tailor
+from career_agent.apply import agent as agent_mod
 from career_agent.apply import ats as ats_apply
 from career_agent.config import (SCORING_MODELS, CandidateProfile,
                                  CareerBrief, load_brief, save_brief,
@@ -116,7 +118,7 @@ async def do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
     brief = load_brief(brief_path)
     profile = context.load_candidate_profile_or_none(candidate_profile_path)
     try:
-        result = await ats_apply.submit(conn, job_id, dry_run=True,
+        result = await ats_apply.submit(conn, job_id, mode="manual",
                                         brief=brief, profile=profile,
                                         resume_version=resume_version,
                                         conn_factory=conn_factory)
@@ -157,39 +159,78 @@ def answer_question(conn: sqlite3.Connection, job_id: int, question: str,
 
 async def send(conn: sqlite3.Connection, job_id: int, brief_path: Path,
                candidate_profile_path: Path, conn_factory=None) -> dict:
-    draft = conn.execute(
-        "SELECT id FROM application WHERE job_id = ? AND status = 'draft'"
-        " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
-    if draft is None:
-        return {"ok": False, "message": "No draft to send yet. Click Apply first."}
+    """Retired in S2: a live run's CONFIRM decision is the send. The route
+    stays so an old page's button gets a clear answer, not a 404."""
+    return {"ok": False, "message": "Answer the review card in the job's chat instead."}
 
-    denial = worker.guard(conn, job_id, allow_skip=True, brief_path=brief_path)
-    if denial:
-        return {"ok": False, "message": denial}
 
-    store.log(conn, job_id, "human_confirmed_send")
+_CLOSED = "That question is no longer open"
+_NO_RUN = "No live agent run for this job"
 
-    brief = load_brief(brief_path)
-    profile = context.load_candidate_profile_or_none(candidate_profile_path)
-    try:
-        result = await ats_apply.submit(
-            conn, job_id, dry_run=False, brief=brief, profile=profile,
-            resume_version=store.resume_version_for(conn, job_id),
-            conn_factory=conn_factory)
-    except Exception as exc:
-        return {"ok": False, "message": str(exc)}
-    if not result["ok"]:
-        # A categorical refusal -- submission is not implemented, which is
-        # every real send today -- can never succeed on a retry, so the only
-        # way forward is applying on the site: stop parking the run on it. A
-        # transient failure (a captcha hold, a filler that errored) stays
-        # parked, because that draft is still the thing to retry and the
-        # status card should keep pointing at it.
-        if result.get("unsupported"):
-            _unpark(conn, job_id)
-        return {"ok": False, "message": result["reason"]}
-    _unpark(conn, job_id)
-    return {"ok": True, "message": "Sent"}
+
+def _refuse(code: int, message: str) -> dict:
+    return {"ok": False, "code": code, "message": message}
+
+
+def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
+                  conn_factory=None) -> dict:
+    """Answer one open ASK/CONFIRM card: validate it against the prompt's
+    kind, record it, and write ANSWER:/DECISION: into the SAME live session.
+
+    The live run is checked before anything is recorded, and a send the run
+    refuses reopens the prompt: an answer the agent never received must not
+    read as given (a DECISION approve especially -- it is what the outcome
+    records as the reviewed answers). `code` is the HTTP status for api_chat."""
+    row = conn.execute("SELECT * FROM agent_prompt WHERE id = ?",
+                       (prompt_id,)).fetchone()
+    if row is None:
+        return _refuse(404, "No such question")
+    if row["status"] != "open":
+        return _refuse(409, _CLOSED)
+    kind, payload = row["kind"], json.loads(row["payload"])
+    if kind in ("need_password", "approve_account"):
+        return _refuse(422, "Account actions arrive in a later slice.")
+    answer = answer if isinstance(answer, dict) else {}
+
+    if kind == "confirm":
+        decision = answer.get("decision")
+        if decision not in ("approve", "change", "cancel"):
+            return _refuse(422, "decision must be approve, change, or cancel")
+        body = {"decision": decision}
+        if decision == "change":
+            changes = answer.get("changes")
+            if not isinstance(changes, dict) or not changes:
+                return _refuse(422, "a change needs at least one changed field")
+            body["changes"] = {str(k): str(v) for k, v in changes.items()}
+            summary = "Change: " + "; ".join(f"{k} → {v}" for k, v in body["changes"].items())
+        else:
+            summary = {"approve": "Approved the application",
+                       "cancel": "Cancelled this application"}[decision]
+    else:
+        value = answer.get("answer")
+        if kind == "choice" and value not in payload.get("options", []):
+            return _refuse(422, "Pick one of the offered options")
+        if kind == "text" and not (isinstance(value, str) and value.strip()):
+            return _refuse(422, "The answer can't be empty")
+        if kind == "approve" and value not in ("approve", "reject"):
+            return _refuse(422, "answer must be approve or reject")
+        if kind == "text":
+            value = value.strip()
+        body = {"id": payload.get("id"), "answer": value,
+                "remember": bool(answer.get("remember", False))}
+        shown = "(hidden)" if payload.get("sensitive") else value
+        summary = f"{payload.get('question', kind)} → {shown}"
+
+    run = agent_mod.RUNS.get(row["job_id"])
+    if run is None or run.done.is_set() or not run.waiting.is_set():
+        return _refuse(409, _NO_RUN)
+    if chat.answer_prompt_row(conn, prompt_id, body) is None:
+        return _refuse(409, _CLOSED)            # answered concurrently
+    if not run.send(agent_mod.answer_line(run.nonce, kind, body)):
+        chat.reopen_prompt_row(conn, prompt_id)
+        return _refuse(409, _NO_RUN)
+    chat.post_message(conn, row["conversation_id"], "user", summary)
+    return {"ok": True, "message": "Answer sent"}
 
 
 def dismiss(conn: sqlite3.Connection, job_id: int) -> dict:

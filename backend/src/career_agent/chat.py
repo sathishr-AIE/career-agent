@@ -122,8 +122,27 @@ def open_prompt_for_job(conn, job_id: int):
 
 
 def answer_prompt_row(conn, prompt_id: int, answer: dict):
-    conn.execute("UPDATE agent_prompt SET status = 'answered', answer = ?,"
-                 " answered_at = datetime('now') WHERE id = ? AND status = 'open'",
-                 (json.dumps(answer), prompt_id))
+    """The answered row, or None when this call did not answer it (already
+    answered or expired) -- two answers racing must not both be relayed."""
+    cur = conn.execute("UPDATE agent_prompt SET status = 'answered', answer = ?,"
+                       " answered_at = datetime('now') WHERE id = ? AND status = 'open'",
+                       (json.dumps(answer), prompt_id))
     conn.commit()
+    if cur.rowcount != 1:
+        return None
     return conn.execute("SELECT * FROM agent_prompt WHERE id = ?", (prompt_id,)).fetchone()
+
+
+def reopen_prompt_row(conn, prompt_id: int) -> None:
+    """Undo answer_prompt_row when the live run refused the answer: an answer
+    the agent never received must not read as given."""
+    conn.execute("UPDATE agent_prompt SET status = 'open', answer = NULL,"
+                 " answered_at = NULL WHERE id = ? AND status = 'answered'", (prompt_id,))
+    conn.commit()
+
+
+def expire_open_prompts(conn, job_id: int) -> None:
+    """A finished run's cards can never be answered."""
+    conn.execute("UPDATE agent_prompt SET status = 'expired'"
+                 " WHERE job_id = ? AND status = 'open'", (job_id,))
+    conn.commit()
