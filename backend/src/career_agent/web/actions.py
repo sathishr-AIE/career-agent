@@ -9,6 +9,7 @@ render time (app.py's _span), so a message never gets double-escaped and
 the JSON side gets clean text."""
 import datetime as dt
 import json
+import logging
 import os
 import sqlite3
 import tomllib
@@ -24,6 +25,8 @@ from career_agent.config import (SCORING_MODELS, CandidateProfile,
                                  CareerBrief, load_brief, save_brief,
                                  save_candidate_profile)
 from career_agent.web import context, worker
+
+log = logging.getLogger(__name__)
 
 
 def _unpark(conn: sqlite3.Connection, job_id: int) -> None:
@@ -255,7 +258,7 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
         if kind == "text":
             value = value.strip()
         body = {"id": payload.get("id"), "answer": value,
-                "remember": bool(answer.get("remember", False))}
+                "remember": bool(answer.get("remember", True))}
         shown = "(hidden)" if payload.get("sensitive") else value
         summary = f"{payload.get('question', kind)} → {shown}"
 
@@ -284,19 +287,31 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
     if not run.send(agent_mod.answer_line(run.nonce, kind, body)):
         chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
         return _refuse(409, _NO_RUN)
+    # The answer is already sent and recorded at this point -- posting the
+    # summary first means a memory-store hiccup below can never turn a
+    # delivered answer into a failed response (see the two try/excepts).
+    chat.post_message(conn, row["conversation_id"], "user", summary)
     # Remember a successfully-sent choice/text answer for next time, unless
     # the human opted out or the card was marked sensitive (never store a
-    # password/SSN-shaped answer in qa_bank). approve/confirm/need_password/
-    # approve_account are excluded by construction: only "choice"/"text"
-    # reach here with `value` defined.
+    # password/SSN-shaped answer in qa_bank; qa_remember itself also
+    # backstops this by content, in case a card isn't marked sensitive).
+    # approve/confirm/need_password/approve_account are excluded by
+    # construction: only "choice"/"text" reach here with `value` defined.
     if kind in ("choice", "text") and answer.get("remember", True) and not payload.get("sensitive"):
-        store.qa_remember(conn, payload["question"], value, kind=kind,
-                          options=payload.get("options") or None,
-                          memory_key=payload.get("memory_key"),
-                          source_job_id=row["job_id"], is_volatile=False)
+        try:
+            store.qa_remember(conn, payload["question"], value, kind=kind,
+                              options=payload.get("options") or None,
+                              memory_key=payload.get("memory_key"),
+                              source_job_id=row["job_id"], is_volatile=False)
+        except Exception:
+            log.exception("qa_remember failed for prompt %s -- answer was"
+                          " already sent and recorded", prompt_id)
     if kind == "confirm" and decision == "approve":
-        store.qa_touch(conn, payload.get("memory_used") or [])
-    chat.post_message(conn, row["conversation_id"], "user", summary)
+        try:
+            store.qa_touch(conn, payload.get("memory_used") or [])
+        except Exception:
+            log.exception("qa_touch failed for prompt %s -- answer was"
+                          " already sent and recorded", prompt_id)
     return {"ok": True, "message": "Answer sent"}
 
 

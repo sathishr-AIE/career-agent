@@ -55,3 +55,7 @@ graphify-out/
 # un-ignored path is also a path git resolves through the parent
 # checkout, which is why worktree creation refuses it.
 .claude/worktrees/
+
+# Per-task worktree agent reports: working notes for the controller, not
+# part of the shipped code.
+.superpowers-task-*-report.md

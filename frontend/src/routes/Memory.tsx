@@ -118,12 +118,27 @@ function Row({ item, onChanged }: { item: MemoryItem; onChanged: () => void }) {
 
 export function Memory() {
   const [items, setItems] = useState<MemoryItem[] | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   function load() {
-    get<{ items: MemoryItem[] }>('/api/memory').then((r) => setItems(r.items))
+    get<{ items: MemoryItem[] }>('/api/memory')
+      .then((r) => {
+        setLoadError(null)
+        setItems(r.items)
+      })
+      .catch((err) => setLoadError(err instanceof ApiError ? err.message : String(err)))
   }
 
   useEffect(load, [])
+
+  if (loadError) {
+    return (
+      <>
+        <h1 className="page-title">Memory</h1>
+        <div className="banner banner--denied">Couldn't load memory: {loadError}</div>
+      </>
+    )
+  }
 
   if (!items) return null
 

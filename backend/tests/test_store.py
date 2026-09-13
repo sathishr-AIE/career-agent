@@ -488,3 +488,78 @@ def test_memory_list_hides_literal_twins_but_shows_untwinned_literals(conn):
         assert {"id", "label", "answer", "kind", "options", "is_volatile",
                "last_confirmed_at", "use_count", "last_used_at",
                "is_preference"} <= item.keys()
+
+
+# -- Fix round 1: twin_key (explicit link) replaces (answer, source_job_id) --
+# A review found the coincidental-matching scheme unsafe: a keyed row and an
+# UNRELATED literal row from the SAME job that happen to share an answer
+# text (e.g. two different yes/no questions both answered "Yes") must not be
+# linked. These write the collision on purpose and assert it does NOT fire.
+
+def _seed_collision(conn):
+    store.qa_remember(conn, "Willing to relocate?", "Yes",
+                      memory_key="willing_to_relocate", source_job_id=5)
+    store.qa_upsert(conn, "Are you authorized to work in India?", "Yes",
+                    is_volatile=False)
+    # Force the same source_job_id an unsafe (answer, source_job_id) scheme
+    # would have keyed off of -- qa_upsert itself never sets source_job_id.
+    conn.execute("UPDATE qa_bank SET source_job_id = 5 WHERE question_normalized = ?",
+                (store.qa_normalize("Are you authorized to work in India?"),))
+    conn.commit()
+
+
+def test_qa_update_leaves_an_unrelated_same_job_same_answer_row_untouched(conn):
+    _seed_collision(conn)
+    keyed = store.qa_by_key(conn, "willing_to_relocate")
+    store.qa_update(conn, keyed["id"], "No", False)
+
+    assert store.qa_by_key(conn, "willing_to_relocate")["answer"] == "No"
+    unrelated = store.qa_lookup(conn, "Are you authorized to work in India?")
+    assert unrelated["answer"] == "Yes"
+
+
+def test_qa_delete_leaves_an_unrelated_same_job_same_answer_row_untouched(conn):
+    _seed_collision(conn)
+    keyed = store.qa_by_key(conn, "willing_to_relocate")
+    store.qa_delete(conn, keyed["id"])
+    assert store.qa_lookup(conn, "Are you authorized to work in India?") is not None
+
+
+def test_memory_list_still_shows_an_unrelated_same_job_same_answer_row(conn):
+    _seed_collision(conn)
+    labels = {i["label"] for i in store.memory_list(conn)}
+    assert store.qa_normalize("Are you authorized to work in India?") in labels
+
+
+def test_requestioning_with_the_same_key_from_another_job_keeps_one_twin_link(conn):
+    store.qa_remember(conn, "Notice period?", "30 days", memory_key="notice_period",
+                      source_job_id=1)
+    store.qa_remember(conn, "Notice period?", "45 days", memory_key="notice_period",
+                      source_job_id=2)
+    n = conn.execute(
+        "SELECT COUNT(*) n FROM qa_bank WHERE twin_key = 'notice_period'").fetchone()["n"]
+    assert n == 1
+    twin = store.qa_lookup(conn, "Notice period?")
+    assert twin["twin_key"] == "notice_period"
+    assert twin["answer"] == "45 days" and twin["source_job_id"] == 2
+
+
+def test_qa_remember_without_a_key_clears_a_prior_twin_link(conn):
+    store.qa_remember(conn, "Notice period?", "30 days", memory_key="notice_period")
+    assert store.qa_lookup(conn, "Notice period?")["twin_key"] == "notice_period"
+    store.qa_remember(conn, "Notice period?", "45 days")   # re-answered, no key this time
+    assert store.qa_lookup(conn, "Notice period?")["twin_key"] is None
+
+
+# -- Fix round 1: secrets backstop, independent of the caller's sensitive flag --
+
+def test_qa_remember_refuses_a_secret_shaped_question(conn):
+    store.qa_remember(conn, "What is your bank account number?", "12345",
+                      memory_key="bank_account")
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 0
+
+
+def test_qa_remember_refuses_a_secret_shaped_memory_key(conn):
+    store.qa_remember(conn, "What should we use to log in?", "hunter2",
+                      memory_key="account_password")
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 0

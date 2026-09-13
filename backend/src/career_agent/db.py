@@ -206,6 +206,11 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "qa_bank", "source_job_id", "INTEGER")
     _add_column_if_missing(conn, "qa_bank", "use_count", "INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "qa_bank", "last_used_at", "TEXT")
+    # Explicit twin link (fix round 1, T13 review): a literal row's twin_key
+    # names the memory_key of the keyed row it was written alongside, so
+    # qa_update/qa_delete/memory_list identify twins by that link instead of
+    # by (answer, source_job_id) coincidence -- see store.qa_remember.
+    _add_column_if_missing(conn, "qa_bank", "twin_key", "TEXT")
     conn.commit()
 
 

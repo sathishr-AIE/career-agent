@@ -168,6 +168,14 @@ def qa_upsert(conn, question: str, answer: str, is_volatile: bool) -> None:
 # and literal questions in visibly different shapes.
 _MEMORY_KEY_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)+$")
 
+# Backstop, independent of the ASK card's own `sensitive` flag: an agent
+# that forgot to mark a card sensitive must not still get a password/SSN/PIN
+# shaped answer written into qa_bank, where it would be rendered back into a
+# future application's KNOWN ANSWERS/PREFERENCES prompt in plain text.
+_SECRET_QA_RE = re.compile(
+    r"(?i)password|passcode|ssn|social security|pan\b|aadhaar|otp|cvv|pin\b"
+    r"|bank account|card number")
+
 
 def qa_remember(conn, question: str, answer: str, *, kind: str = "text",
                 options=None, memory_key: str | None = None,
@@ -185,7 +193,24 @@ def qa_remember(conn, question: str, answer: str, *, kind: str = "text",
     first insert. An invalid memory_key (not ^[a-z][a-z0-9]*(_[a-z0-9]+)+$)
     is dropped -- the literal row is still stored -- and logged, since the
     agent proposes keys and a bad one must not silently collide with an
-    unrelated question (see _MEMORY_KEY_RE)."""
+    unrelated question (see _MEMORY_KEY_RE).
+
+    The literal row's twin_key records which keyed row it was written
+    alongside (superseding an earlier (answer, source_job_id) matching
+    scheme a review found unsafe: two unrelated questions can share both an
+    answer text and a job). twin_key is set to the accepted memory_key, or
+    cleared to NULL when this call has no key -- re-answering a question
+    without a key un-links it from any earlier keyed twin. The keyed row
+    itself never carries a twin_key.
+
+    Nothing is stored -- not even the literal row -- when the question or
+    memory_key looks like a secret (_SECRET_QA_RE), regardless of the
+    caller's own sensitivity flag: this is a backstop for an agent that
+    forgot to mark the card sensitive."""
+    if _SECRET_QA_RE.search(question) or (memory_key and _SECRET_QA_RE.search(memory_key)):
+        logger.warning("qa_remember: refused a secret-shaped question/key %r -- not stored",
+                       question)
+        return
     if memory_key and not _MEMORY_KEY_RE.match(memory_key):
         logger.warning("qa_remember: rejected memory_key %r (must be snake_case,"
                        " e.g. 'notice_period') -- storing the literal answer only",
@@ -194,23 +219,26 @@ def qa_remember(conn, question: str, answer: str, *, kind: str = "text",
 
     options_json = json.dumps(options) if options is not None else None
 
-    def _upsert(question_normalized: str, mem_key: str | None) -> None:
+    def _upsert(question_normalized: str, mem_key: str | None,
+               twin_key: str | None) -> None:
         conn.execute(
             "INSERT INTO qa_bank (question_normalized, answer, is_volatile,"
-            " last_confirmed_at, kind, options_json, source_job_id, memory_key)"
-            " VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?)"
+            " last_confirmed_at, kind, options_json, source_job_id, memory_key,"
+            " twin_key)"
+            " VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?)"
             " ON CONFLICT(question_normalized) DO UPDATE SET"
             "   answer = excluded.answer, is_volatile = excluded.is_volatile,"
             "   last_confirmed_at = excluded.last_confirmed_at,"
             "   kind = excluded.kind, options_json = excluded.options_json,"
             "   source_job_id = excluded.source_job_id,"
-            "   memory_key = excluded.memory_key",
+            "   memory_key = excluded.memory_key,"
+            "   twin_key = excluded.twin_key",
             (question_normalized, answer, int(is_volatile), kind, options_json,
-             source_job_id, mem_key))
+             source_job_id, mem_key, twin_key))
 
-    _upsert(qa_normalize(question), None)
+    _upsert(qa_normalize(question), None, memory_key)
     if memory_key:
-        _upsert(qa_normalize(memory_key), memory_key)
+        _upsert(qa_normalize(memory_key), memory_key, None)
     conn.commit()
 
 
@@ -241,31 +269,23 @@ def qa_all(conn) -> list:
         " last_used_at FROM qa_bank ORDER BY question_normalized").fetchall()
 
 
-def _literal_twins(conn, answer: str, source_job_id: int | None):
-    """The literal (memory_key IS NULL) rows qa_remember wrote alongside a
-    keyed row: same answer text, same source_job_id. `source_job_id IS ?`
-    (not `=`) so a NULL source_job_id still matches NULL, the SQLite way."""
-    return conn.execute(
-        "SELECT id FROM qa_bank WHERE memory_key IS NULL"
-        " AND answer = ? AND source_job_id IS ?", (answer, source_job_id))
-
-
 def qa_update(conn, row_id: int, answer: str, is_volatile: bool) -> bool:
     """Edit one qa_bank row (the /memory drawer's Save). When the row is
-    keyed, its literal twins -- identified the same way qa_remember wrote
-    them, by the row's PRIOR answer and source_job_id -- are updated too, so
+    keyed, its literal twins -- identified by twin_key = this row's
+    memory_key, the explicit link qa_remember writes -- are updated too, so
     editing the canonical preference doesn't leave the per-job history rows
-    stale (see the "keyed vs literal drift" ruling). Returns False for an
-    unknown id."""
+    stale (see the "keyed vs literal drift" ruling). A prior (answer,
+    source_job_id) matching scheme was replaced here after a review found it
+    could hit an unrelated literal row that happened to share both. Returns
+    False for an unknown id."""
     row = conn.execute("SELECT * FROM qa_bank WHERE id = ?", (row_id,)).fetchone()
     if row is None:
         return False
     if row["memory_key"]:
-        twins = [r["id"] for r in _literal_twins(conn, row["answer"], row["source_job_id"])]
-        for twin_id in twins:
-            conn.execute(
-                "UPDATE qa_bank SET answer = ?, last_confirmed_at = datetime('now')"
-                " WHERE id = ?", (answer, twin_id))
+        conn.execute(
+            "UPDATE qa_bank SET answer = ?, last_confirmed_at = datetime('now')"
+            " WHERE memory_key IS NULL AND twin_key = ?",
+            (answer, row["memory_key"]))
     conn.execute(
         "UPDATE qa_bank SET answer = ?, is_volatile = ?,"
         " last_confirmed_at = datetime('now') WHERE id = ?",
@@ -276,15 +296,15 @@ def qa_update(conn, row_id: int, answer: str, is_volatile: bool) -> bool:
 
 def qa_delete(conn, row_id: int) -> bool:
     """Delete one qa_bank row and, for a keyed row, its literal twins
-    (same identification as qa_update). Returns False for an unknown id."""
+    (same twin_key identification as qa_update). Returns False for an
+    unknown id."""
     row = conn.execute("SELECT * FROM qa_bank WHERE id = ?", (row_id,)).fetchone()
     if row is None:
         return False
     if row["memory_key"]:
         conn.execute(
-            "DELETE FROM qa_bank WHERE memory_key IS NULL"
-            " AND answer = ? AND source_job_id IS ?",
-            (row["answer"], row["source_job_id"]))
+            "DELETE FROM qa_bank WHERE memory_key IS NULL AND twin_key = ?",
+            (row["memory_key"],))
     conn.execute("DELETE FROM qa_bank WHERE id = ?", (row_id,))
     conn.commit()
     return True
@@ -292,22 +312,22 @@ def qa_delete(conn, row_id: int) -> bool:
 
 def memory_list(conn) -> list[dict]:
     """The /memory drawer's rows: every keyed (preference) row, plus literal
-    rows that are NOT a keyed row's twin (same answer + source_job_id) --
-    those twins are history, not something to edit or show twice (see the
-    "keyed vs literal drift" ruling). A literal row that coincidentally
-    shares both an answer and a (possibly NULL) source_job_id with an
-    unrelated keyed row would also be hidden by this; accepted as the same
-    limitation the ruling already names."""
+    rows that are NOT a keyed row's twin -- identified by twin_key equalling
+    some keyed row's memory_key, not by coincidental (answer, source_job_id)
+    matching (a review found that scheme could hide/corrupt an unrelated
+    literal answer; see qa_remember/qa_update/qa_delete). Those twins are
+    history, not something to edit or show twice (see the "keyed vs literal
+    drift" ruling)."""
     rows = conn.execute(
         "SELECT id, question_normalized, answer, is_volatile, last_confirmed_at,"
         " memory_key, kind, options_json, source_job_id, use_count,"
-        " last_used_at FROM qa_bank ORDER BY question_normalized").fetchall()
-    keyed_twin_keys = {(r["answer"], r["source_job_id"]) for r in rows if r["memory_key"]}
+        " last_used_at, twin_key FROM qa_bank ORDER BY question_normalized").fetchall()
+    keyed_keys = {r["memory_key"] for r in rows if r["memory_key"]}
 
     items = []
     for r in rows:
         is_keyed = bool(r["memory_key"])
-        if not is_keyed and (r["answer"], r["source_job_id"]) in keyed_twin_keys:
+        if not is_keyed and r["twin_key"] and r["twin_key"] in keyed_keys:
             continue
         items.append({
             "id": r["id"],
