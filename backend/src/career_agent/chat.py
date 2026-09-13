@@ -112,8 +112,26 @@ def open_prompt(conn, job_id: int, kind: str, payload: dict) -> int:
         "INSERT INTO agent_prompt (job_id, conversation_id, kind, payload) VALUES (?, ?, ?, ?)",
         (job_id, cid, kind, json.dumps(payload)))
     pid = cur.lastrowid
-    post_message(conn, cid, "prompt", payload.get("question", kind), {"prompt_id": pid, "kind": kind})
+    post_message(conn, cid, "prompt", prompt_title(kind, payload), {"prompt_id": pid, "kind": kind})
     return pid
+
+
+def prompt_title(kind: str, payload: dict) -> str:
+    return "Review before applying" if kind == "confirm" else payload.get("question", kind)
+
+
+def prompt_statuses(conn, messages: list[dict]) -> list[dict]:
+    """Stamp each prompt message with its agent_prompt's current status."""
+    ids = [m["payload"]["prompt_id"] for m in messages
+           if m["role"] == "prompt" and (m["payload"] or {}).get("prompt_id")]
+    if ids:
+        status = dict(conn.execute(
+            f"SELECT id, status FROM agent_prompt WHERE id IN ({','.join('?' * len(ids))})",
+            ids).fetchall())
+        for m in messages:
+            if m["role"] == "prompt" and (m["payload"] or {}).get("prompt_id"):
+                m["prompt_status"] = status.get(m["payload"]["prompt_id"], "expired")
+    return messages
 
 
 def open_prompt_for_job(conn, job_id: int):

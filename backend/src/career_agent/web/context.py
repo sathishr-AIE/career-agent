@@ -8,7 +8,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from career_agent import outcomes, store, tailor
+from career_agent import chat, outcomes, store, tailor
 from career_agent.apply import ats as ats_apply
 from career_agent.config import (MODEL_LABELS, SCORING_MODELS,
                                  CandidateProfile, load_brief,
@@ -187,32 +187,20 @@ def settings_context(conn: sqlite3.Connection, brief_path: Path,
 def run_status_context(conn: sqlite3.Connection) -> dict:
     state = worker.get_run_state(conn, "apply")
     current_job = None
-    needs_answer_question = None
-    draft_answers = None
+    open_prompt = None
+    conversation_id = None
     if state["current_job_id"]:
         current_job = conn.execute(
             "SELECT j.id AS job_id, j.company, j.title FROM job j"
             " WHERE j.id = ?", (state["current_job_id"],)).fetchone()
-        draft = conn.execute(
-            "SELECT answers FROM application WHERE job_id = ? AND status = 'draft'"
-            " ORDER BY id DESC LIMIT 1", (state["current_job_id"],)).fetchone()
-        if draft is not None:
-            if draft["answers"] is not None:
-                draft_answers = json.loads(draft["answers"])
-        else:
-            # Only show the card if the most recent needs_answer event for
-            # this job is newer than the most recent needs_answer_resolved
-            # event for it (or nothing has resolved it yet). Without this,
-            # answering re-parks a stale "Answer needed" card during the
-            # window between the worker re-picking the job (setting
-            # current_job_id again) and its draft actually landing.
-            row = conn.execute(
-                "SELECT payload FROM event WHERE job_id = ? AND type = 'needs_answer'"
-                " AND id > COALESCE((SELECT MAX(id) FROM event"
-                "                     WHERE job_id = ? AND type = 'needs_answer_resolved'), 0)"
-                " ORDER BY id DESC LIMIT 1",
-                (state["current_job_id"], state["current_job_id"])).fetchone()
-            needs_answer_question = row["payload"] if row else None
+        if current_job:
+            conversation_id = chat.conversation_for_job(conn, state["current_job_id"])
+        # The prompt row's own status closes the card on answer, so the old
+        # needs_answer/needs_answer_resolved event race can't re-show it.
+        row = chat.open_prompt_for_job(conn, state["current_job_id"])
+        if row:
+            open_prompt = {"id": row["id"], "kind": row["kind"],
+                           "question": chat.prompt_title(row["kind"], json.loads(row["payload"]))}
     submitted = conn.execute(
         "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
     ).fetchone()["n"]
@@ -246,11 +234,20 @@ def run_status_context(conn: sqlite3.Connection) -> dict:
         " ORDER BY id DESC LIMIT 10").fetchall()
     return {"run_state": state, "current_job": current_job, "stats": stats,
             "recent_events": recent_events,
-            "needs_answer_question": needs_answer_question,
-            "draft_answers": draft_answers,
+            "open_prompt": open_prompt, "conversation_id": conversation_id,
             # Read once, cheaply, so the always-visible status bar can show
             # the kill switch's state without a second endpoint just for it.
             "submission_implemented": ats_apply.SUBMISSION_IMPLEMENTED}
+
+
+def draft_answers(conn: sqlite3.Connection) -> dict | None:
+    """The parked job's drafted answers, for the legacy Jinja status card
+    only (the React app shows them on the chat's CONFIRM card)."""
+    draft = conn.execute(
+        "SELECT ap.answers FROM application ap JOIN run_state r ON r.kind = 'apply'"
+        " WHERE ap.job_id = r.current_job_id AND ap.status = 'draft'"
+        " ORDER BY ap.id DESC LIMIT 1").fetchone()
+    return json.loads(draft["answers"]) if draft and draft["answers"] else None
 
 
 def pipeline_status_context(conn: sqlite3.Connection) -> dict:

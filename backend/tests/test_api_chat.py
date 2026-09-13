@@ -156,3 +156,75 @@ def test_an_invalid_answer_is_422(client, conn, runs):
 
 def test_an_unknown_prompt_is_404(client, conn, runs):
     assert client.post("/api/chat/prompts/999/answer", json={"decision": "approve"}).status_code == 404
+
+
+# -- Task 9 --------------------------------------------------------------------
+
+def _needs_answer_prompt(conn, question="Notice period?"):
+    return chat.open_prompt(conn, 1, "text", {
+        "id": "needs_answer", "kind": "text", "question": question,
+        "why": "The agent stopped to ask this before continuing.", "origin": "needs_answer",
+        "memory_key": None, "default": None, "options": [], "sensitive": False})
+
+
+def test_a_needs_answer_card_is_answered_without_a_live_run(client, conn, runs):
+    from career_agent import store
+    from career_agent.web import worker
+    worker.set_run_state(conn, "apply", status="running", mode="manual", current_job_id=1)
+    pid = _needs_answer_prompt(conn)
+    r = client.post(f"/api/chat/prompts/{pid}/answer", json={"answer": " 30 days "})
+    assert r.status_code == 200 and r.json()["ok"]
+    assert store.qa_lookup(conn, "Notice period?")["answer"] == "30 days"
+    assert worker.get_run_state(conn, "apply")["current_job_id"] is None
+    status = conn.execute("SELECT status FROM agent_prompt WHERE id = ?", (pid,)).fetchone()[0]
+    assert status == "answered"
+    types = [e[0] for e in conn.execute("SELECT type FROM event WHERE job_id = 1")]
+    assert "needs_answer_resolved" in types
+    msgs = chat.messages_after(conn, chat.conversation_for_job(conn, 1))
+    assert msgs[-1]["role"] == "user" and msgs[-1]["content"] == "Notice period? → 30 days"
+
+
+def test_a_blank_needs_answer_is_422(client, conn, runs):
+    pid = _needs_answer_prompt(conn)
+    assert client.post(f"/api/chat/prompts/{pid}/answer", json={"answer": "  "}).status_code == 422
+    assert chat.open_prompt_for_job(conn, 1)["id"] == pid
+
+
+def test_a_normal_ask_card_still_needs_a_live_run(client, conn, runs):
+    pid = chat.open_prompt(conn, 1, "text", {"id": "q1", "kind": "text", "question": "Notice?"})
+    r = client.post(f"/api/chat/prompts/{pid}/answer", json={"answer": "30 days"})
+    assert r.status_code == 409 and r.json()["message"] == "No live agent run for this job"
+
+
+def test_a_change_with_a_blank_value_is_422(client, conn, runs):
+    runs[1] = _LiveRun()
+    pid = _confirm_prompt(conn)
+    r = client.post(f"/api/chat/prompts/{pid}/answer",
+                    json={"decision": "change", "changes": {"Name": "  "}})
+    assert r.status_code == 422 and runs[1].sent == []
+    assert chat.open_prompt_for_job(conn, 1)["id"] == pid
+
+
+def test_messages_carry_the_prompt_status(client, conn, runs):
+    answered = chat.open_prompt(conn, 1, "text", {"id": "a", "question": "A?"})
+    chat.answer_prompt_row(conn, answered, {"answer": "x"})
+    expired = chat.open_prompt(conn, 1, "text", {"id": "b", "question": "B?"})
+    chat.expire_open_prompts(conn, 1)
+    still_open = chat.open_prompt(conn, 1, "text", {"id": "c", "question": "C?"})
+    cid = chat.conversation_for_job(conn, 1)
+    chat.post_message(conn, cid, "system", "hi")
+    msgs = client.get(f"/api/chat/{cid}/messages").json()["messages"]
+    by_pid = {m["payload"]["prompt_id"]: m["prompt_status"] for m in msgs if m["role"] == "prompt"}
+    assert by_pid == {answered: "answered", expired: "expired", still_open: "open"}
+    assert all("prompt_status" not in m for m in msgs if m["role"] != "prompt")
+
+
+def test_a_confirm_card_message_reads_review_before_applying(conn):
+    _confirm_prompt(conn)
+    msgs = chat.messages_after(conn, chat.conversation_for_job(conn, 1))
+    assert msgs[-1]["content"] == "Review before applying"
+
+
+def test_job_conversation_lookup(client, conn):
+    r = client.get("/api/chat/jobs/1/conversation")
+    assert r.status_code == 200 and r.json()["id"] == chat.conversation_for_job(conn, 1)

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
 import { ApiError, get, post, type ActionResult, type Job, type RunState } from '../api'
 import { VerdictRail } from '../components/VerdictRail'
 import '../components/ui.css'
@@ -30,8 +31,8 @@ interface ApplicationsContext {
     failed_skipped: number
   }
   recent_events: { type: string; payload: string | null; occurred_at: string }[]
-  needs_answer_question: string | null
-  draft_answers: Record<string, unknown> | null
+  open_prompt: { id: number; kind: string; question: string } | null
+  conversation_id: number | null
 }
 
 type Tab = 'queue' | 'all' | 'skipped'
@@ -92,8 +93,10 @@ function RunControls({ ctx, onChanged }: { ctx: ApplicationsContext; onChanged: 
           <div>
             <b>{ctx.current_job.title}</b> at {ctx.current_job.company}
           </div>
-          {ctx.needs_answer_question ? (
-            <AnswerForm jobId={ctx.current_job.job_id} question={ctx.needs_answer_question} onSaved={onChanged} />
+          {ctx.open_prompt && ctx.conversation_id ? (
+            <span className="rationale">
+              {ctx.open_prompt.question} <Link to={`/chat/${ctx.conversation_id}`}>Answer in chat →</Link>
+            </span>
           ) : mode === 'manual' && s.mode === 'manual' ? (
             <form onSubmit={(e) => e.preventDefault()}>
               <span className="rationale">Draft ready — review and send.</span>
@@ -102,9 +105,6 @@ function RunControls({ ctx, onChanged }: { ctx: ApplicationsContext; onChanged: 
             </form>
           ) : (
             <span className="rationale">Applying…</span>
-          )}
-          {ctx.draft_answers && (
-            <pre className="draft-answers">{JSON.stringify(ctx.draft_answers, null, 2)}</pre>
           )}
         </div>
       )}
@@ -118,28 +118,6 @@ function RunControls({ ctx, onChanged }: { ctx: ApplicationsContext; onChanged: 
         ))}
       </div>
     </div>
-  )
-}
-
-function AnswerForm({ jobId, question, onSaved }: { jobId: number; question: string; onSaved: () => void }) {
-  const [answer, setAnswer] = useState('')
-  const [isVolatile, setIsVolatile] = useState(false)
-  return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault()
-        post(`/api/answer/${jobId}`, { question, answer, is_volatile: isVolatile }).then(onSaved)
-      }}
-    >
-      <span className="rationale">Answer needed: {question}</span>
-      <input type="text" placeholder="Your answer" required value={answer}
-            onChange={(e) => setAnswer(e.target.value)} />
-      <label>
-        <input type="checkbox" checked={isVolatile} onChange={(e) => setIsVolatile(e.target.checked)} />
-        This may change later
-      </label>
-      <button className="btn" type="submit">Save answer</button>
-    </form>
   )
 }
 
@@ -163,6 +141,13 @@ function ActionCell({
         onChanged()
       })
       .catch((e) => setMsg({ ok: false, message: e instanceof ApiError ? e.message : 'Failed.' }))
+  const nav = useNavigate()
+  // The apply request lasts the whole agent run (a CONFIRM waits on the
+  // human in chat), so open the job's chat as soon as it starts.
+  const apply = (path: string) => {
+    run(path)
+    get<{ id: number }>(`/api/chat/jobs/${job.id}/conversation`).then((c) => nav(`/chat/${c.id}`))
+  }
 
   const tracked = ctx.applied[job.id]
   const untracked = !tracked && job.terminal_status !== 'held_unknown' &&
@@ -198,7 +183,7 @@ function ActionCell({
             <span className="rationale">Drafted — review in the status card above.</span>
           ) : (
             <button className="btn"
-                    onClick={() => run(job.verdict === 'skip' ? `/api/override/${job.id}` : `/api/apply/${job.id}`)}>
+                    onClick={() => apply(job.verdict === 'skip' ? `/api/override/${job.id}` : `/api/apply/${job.id}`)}>
               Apply
             </button>
           )

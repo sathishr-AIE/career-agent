@@ -662,3 +662,65 @@ async def test_apply_tick_hands_its_conn_factory_to_submit(
     factory = lambda: conn
     await worker.apply_tick(conn, brief_path, profile_path, factory)
     assert captured["conn_factory"] is factory
+
+
+# -- Task 9: lifecycle system messages ------------------------------------------
+
+def _chat_texts(conn, job_id=None):
+    from career_agent import chat
+    cid = chat.home_conversation(conn) if job_id is None else chat.conversation_for_job(conn, job_id)
+    return [m["content"] for m in chat.messages_after(conn, cid) if m["role"] == "system"]
+
+
+async def test_apply_tick_posts_pick_up_and_outcome_messages(
+        conn, brief_path, profile_path, monkeypatch):
+    job_id = _job(conn, "fp1")
+    worker.set_run_state(conn, "apply", status="running", mode="manual")
+
+    async def fake_submit(conn, job_id, mode, **kw):
+        conn.execute("INSERT INTO application (job_id, resume_version, status, failure_reason)"
+                     " VALUES (?, 'v1', 'failed', 'stuck')", (job_id,))
+        conn.commit()
+        return {"ok": False, "reason": "failed: stuck"}
+
+    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
+    await worker.apply_tick(conn, brief_path, profile_path)
+    texts = _chat_texts(conn, job_id)
+    assert "Picked up by the apply worker (manual mode)" in texts
+    assert any(t.startswith("Run ended") and "failed" in t and "stuck" in t for t in texts)
+
+
+async def test_empty_queue_posts_idle_to_home(conn, brief_path, profile_path):
+    worker.set_run_state(conn, "apply", status="running", mode="auto")
+    await worker.apply_tick(conn, brief_path, profile_path)
+    assert "Queue empty — apply run idle" in _chat_texts(conn)
+
+
+async def test_unsupported_pause_posts_the_reason(conn, brief_path, profile_path, monkeypatch):
+    job_id = _job(conn, "fp1")
+    worker.set_run_state(conn, "apply", status="running", mode="auto")
+
+    async def fake_submit(conn, job_id, mode, **kw):
+        return {"ok": False, "unsupported": True, "reason": "claude not on PATH"}
+
+    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
+    await worker.apply_tick(conn, brief_path, profile_path)
+    texts = _chat_texts(conn, job_id)
+    assert any("paused" in t.lower() and "claude not on PATH" in t for t in texts)
+
+
+async def test_a_chat_write_failure_does_not_change_the_tick(
+        conn, brief_path, profile_path, monkeypatch):
+    job_id = _job(conn, "fp1")
+    worker.set_run_state(conn, "apply", status="running", mode="manual")
+
+    async def fake_submit(conn, job_id, mode, **kw):
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    def broken_factory():
+        raise RuntimeError("chat db down")
+
+    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
+    await worker.apply_tick(conn, brief_path, profile_path, broken_factory)
+    state = worker.get_run_state(conn, "apply")
+    assert state["status"] == "running" and state["current_job_id"] == job_id

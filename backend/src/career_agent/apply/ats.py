@@ -607,4 +607,12 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
     outcome = _record_outcome(conn, job_id, app_id, row["url"], result, detail,
                               can_submit, _confirm_outcome(conn, job_id, baseline))
     chat.expire_open_prompts(conn, job_id)
+    if outcome.get("needs_answer"):
+        # The worker parks on this; the card is how the human unparks it
+        # (actions.answer_prompt answers origin needs_answer with no live run).
+        chat.open_prompt(conn, job_id, "text", {
+            "id": "needs_answer", "kind": "text", "question": outcome["needs_answer"],
+            "why": "The agent stopped to ask this before continuing.",
+            "origin": "needs_answer", "memory_key": None, "default": None,
+            "options": [], "sensitive": False})
     return outcome

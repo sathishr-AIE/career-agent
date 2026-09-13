@@ -1867,6 +1867,14 @@ def test_answer_route_saves_to_qa_bank_and_unparks(client):
     assert worker.get_run_state(conn, "apply")["current_job_id"] is None
 
 
+def _open_needs_answer(conn, job_id, question):
+    """What submit() opens on a needs_answer result."""
+    from career_agent import chat
+    chat.open_prompt(conn, job_id, "text", {
+        "id": "needs_answer", "kind": "text", "question": question,
+        "origin": "needs_answer", "options": [], "sensitive": False})
+
+
 def test_run_status_shows_the_answer_needed_card(client):
     conn = db.connect(web.DB_PATH)
     job_id = conn.execute(
@@ -1876,8 +1884,7 @@ def test_run_status_shows_the_answer_needed_card(client):
     ).lastrowid
     worker.set_run_state(conn, "apply", status="running", mode="manual",
                          current_job_id=job_id)
-    store.log(conn, job_id, "needs_answer", "Notice period?")
-    conn.commit()
+    _open_needs_answer(conn, job_id, "Notice period?")
 
     r = client.get("/run/status")
     assert "Answer needed" in r.text
@@ -1903,7 +1910,7 @@ def test_answering_clears_the_needs_answer_card_before_a_new_draft_lands(client)
     worker.set_run_state(conn, "apply", status="running", mode="manual",
                          current_job_id=job_id)
     store.log(conn, job_id, "needs_answer", "Notice period?")
-    conn.commit()
+    _open_needs_answer(conn, job_id, "Notice period?")
 
     r = client.post(f"/answer/{job_id}", data={
         "question": "Notice period?", "answer": "30 days"})
@@ -1953,6 +1960,7 @@ def test_do_apply_needs_answer_parks_the_run_so_the_card_shows(client, monkeypat
     unless the run happened to already be parked on that exact job."""
     async def needs_answer(conn, job_id, mode, brief=None, profile=None,
                            resume_version=None, **kw):
+        _open_needs_answer(conn, job_id, "Notice period?")
         return {"ok": False, "needs_answer": "Notice period?",
                 "reason": "needs an answer: Notice period?"}
 
@@ -2091,3 +2099,20 @@ def test_agent_routes_hand_a_chat_conn_factory_down(client, monkeypatch, path, k
 
     client.post(path, **kw)
     assert captured.get("conn_factory") is web._chat_conn
+
+
+def test_run_status_context_exposes_the_open_prompt_and_conversation(client):
+    from career_agent import chat
+    conn = db.connect(web.DB_PATH)
+    worker.set_run_state(conn, "apply", status="running", mode="manual", current_job_id=1)
+    ctx = web._run_status_context(conn)
+    assert "needs_answer_question" not in ctx and "draft_answers" not in ctx
+    assert ctx["open_prompt"] is None
+    assert ctx["conversation_id"] == chat.conversation_for_job(conn, 1)
+    pid = chat.open_prompt(conn, 1, "text", {"id": "q", "question": "Notice?"})
+    assert web._run_status_context(conn)["open_prompt"] == {
+        "id": pid, "kind": "text", "question": "Notice?"}
+    chat.expire_open_prompts(conn, 1)
+    cpid = chat.open_prompt(conn, 1, "confirm", {"fields": []})
+    assert web._run_status_context(conn)["open_prompt"] == {
+        "id": cpid, "kind": "confirm", "question": "Review before applying"}

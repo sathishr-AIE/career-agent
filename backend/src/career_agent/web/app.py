@@ -153,6 +153,7 @@ def applications(request: Request, show: str = "queue"):
     return templates.TemplateResponse(
         request=request, name="applications.html",
         context={"active_nav": "applications",
+                 "draft_answers": context.draft_answers(conn),
                  **context.applications_context(
                      conn, show, BRIEF_PATH,
                      scheduled=scheduled_task_installed())})
@@ -220,7 +221,8 @@ def run_status(request: Request):
     conn = _conn()
     return templates.TemplateResponse(
         request=request, name="_run_status.html",
-        context=context.run_status_context(conn))
+        context={**context.run_status_context(conn),
+                 "draft_answers": context.draft_answers(conn)})
 
 
 @app.post("/run/start")

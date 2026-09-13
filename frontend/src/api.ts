@@ -86,8 +86,8 @@ export interface RunStatusContext {
     failed_skipped: number
   }
   recent_events: { type: string; payload: string | null; occurred_at: string }[]
-  needs_answer_question: string | null
-  draft_answers: Record<string, unknown> | null
+  open_prompt: { id: number; kind: string; question: string } | null
+  conversation_id: number | null
   submission_implemented: boolean
 }
 
@@ -114,6 +114,8 @@ export interface ChatMessage {
   content: string
   payload: Record<string, unknown> | null
   created_at: string
+  /** Only on `prompt` messages: the agent_prompt's current status. */
+  prompt_status?: 'open' | 'answered' | 'expired'
 }
 
 export interface OpenPrompt {

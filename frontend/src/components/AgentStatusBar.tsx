@@ -33,7 +33,7 @@ export function AgentStatusBar() {
   }, [])
 
   if (!status) return null
-  const { run_state, current_job, needs_answer_question, submission_implemented } = status
+  const { run_state, current_job, open_prompt, conversation_id, submission_implemented } = status
 
   return (
     <Glass as="footer" className="status-bar">
@@ -48,10 +48,10 @@ export function AgentStatusBar() {
         </span>
       )}
       <span className="status-bar__spacer" />
-      {needs_answer_question && (
+      {open_prompt && conversation_id && (
         <span className="status-bar__answer">
-          Answer needed
-          <Link to="/applications">Resolve →</Link>
+          {open_prompt.question}
+          <Link to={`/chat/${conversation_id}`}>Answer in chat →</Link>
         </span>
       )}
       {!submission_implemented && (

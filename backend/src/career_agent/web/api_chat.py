@@ -34,7 +34,14 @@ def api_messages(cid: int, after: int = 0):
         if row:
             open_prompt = {"id": row["id"], "kind": row["kind"],
                            "payload": json.loads(row["payload"]), "created_at": row["created_at"]}
-    return {"messages": chat.messages_after(conn, cid, after), "open_prompt": open_prompt}
+    return {"messages": chat.prompt_statuses(conn, chat.messages_after(conn, cid, after)),
+            "open_prompt": open_prompt}
+
+
+@router.get("/jobs/{job_id}/conversation")
+def api_job_conversation(job_id: int):
+    """So a page can open a job's chat (created on first use)."""
+    return {"id": chat.conversation_for_job(_app()._conn(), job_id)}
 
 
 @router.post("/{cid}/messages")

@@ -134,8 +134,8 @@ async def do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
         # on this exact job.
         worker.set_run_state(conn, "apply", current_job_id=job_id)
         return {"ok": False, "message":
-                f'Answer needed: {result["needs_answer"]} — see the status'
-                ' card below.'}
+                f'Answer needed: {result["needs_answer"]} — answer it in the'
+                " job's chat."}
     if not result["ok"]:
         return {"ok": False, "message": result["reason"]}
     # Park on this job so the status card's Send/Skip review actually finds
@@ -148,6 +148,10 @@ async def do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
 def answer_question(conn: sqlite3.Connection, job_id: int, question: str,
                     answer: str, is_volatile: bool) -> dict:
     store.qa_upsert(conn, question, answer.strip(), is_volatile=is_volatile)
+    # Legacy (Jinja) path: close the chat card too, or it stays answerable.
+    open_row = chat.open_prompt_for_job(conn, job_id)
+    if open_row and json.loads(open_row["payload"]).get("origin") == "needs_answer":
+        chat.answer_prompt_row(conn, open_row["id"], {"answer": answer.strip()})
     # Distinguishable from the needs_answer event that parked the job, so
     # run_status_context can tell "still needs an answer" apart from
     # "already answered, draft not back yet" -- see its comment for the
@@ -202,6 +206,8 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
             if not isinstance(changes, dict) or not changes:
                 return _refuse(422, "a change needs at least one changed field")
             body["changes"] = {str(k): str(v) for k, v in changes.items()}
+            if any(not v.strip() for v in body["changes"].values()):
+                return _refuse(422, "a changed field can't be blank")
             summary = "Change: " + "; ".join(f"{k} → {v}" for k, v in body["changes"].items())
         else:
             summary = {"approve": "Approved the application",
@@ -220,6 +226,17 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
                 "remember": bool(answer.get("remember", False))}
         shown = "(hidden)" if payload.get("sensitive") else value
         summary = f"{payload.get('question', kind)} → {shown}"
+
+    if payload.get("origin") == "needs_answer":
+        # A parked job, not a live run: nothing to relay. The answer goes to
+        # the qa bank the next attempt reads, and the park is released.
+        if chat.answer_prompt_row(conn, prompt_id, body) is None:
+            return _refuse(409, _CLOSED)
+        store.qa_upsert(conn, payload["question"], value, is_volatile=False)
+        store.log(conn, row["job_id"], "needs_answer_resolved")
+        _unpark(conn, row["job_id"])
+        chat.post_message(conn, row["conversation_id"], "user", summary)
+        return {"ok": True, "message": "Answer saved"}
 
     run = agent_mod.RUNS.get(row["job_id"])
     if run is None or run.done.is_set() or not run.waiting.is_set():
@@ -502,6 +519,7 @@ async def run_start(conn: sqlite3.Connection, mode: str, brief_path: Path,
                  " WHERE kind = 'apply'")
     conn.commit()
     store.log(conn, None, "run_started", mode)
+    worker.say(conn, None, f"Apply run started in {mode} mode")
     await worker.apply_tick(conn, brief_path, candidate_profile_path,
                             conn_factory)
     return {"ok": True, "message": "ok"}
@@ -510,6 +528,7 @@ async def run_start(conn: sqlite3.Connection, mode: str, brief_path: Path,
 def run_pause(conn: sqlite3.Connection) -> dict:
     worker.set_run_state(conn, "apply", status="paused")
     store.log(conn, None, "run_paused")
+    worker.say(conn, None, "Apply run paused")
     return {"ok": True, "message": "ok"}
 
 
@@ -517,6 +536,7 @@ async def run_resume(conn: sqlite3.Connection, brief_path: Path,
                      candidate_profile_path: Path, conn_factory=None) -> dict:
     worker.set_run_state(conn, "apply", status="running")
     store.log(conn, None, "run_resumed")
+    worker.say(conn, None, "Apply run resumed")
     await worker.apply_tick(conn, brief_path, candidate_profile_path,
                             conn_factory)
     return {"ok": True, "message": "ok"}
@@ -525,6 +545,7 @@ async def run_resume(conn: sqlite3.Connection, brief_path: Path,
 def run_stop(conn: sqlite3.Connection) -> dict:
     worker.set_run_state(conn, "apply", status="stopped", current_job_id=None)
     store.log(conn, None, "run_stopped")
+    worker.say(conn, None, "Apply run stopped")
     return {"ok": True, "message": "ok"}
 
 

@@ -1528,3 +1528,18 @@ async def test_cancelling_the_awaiting_task_kills_the_live_run(conn, runs):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert getattr(runs[1], "killed", False)
+
+
+# -- Task 9: a needs_answer park surfaces as a chat text card ---------------
+
+async def test_needs_answer_opens_a_text_card_in_the_job_chat(conn):
+    r = await _submit(conn, mode="manual",
+                      run_agent=fake_agent(AgentResult("needs_answer", "Do you have a PMP?")))
+    assert r["needs_answer"] == "Do you have a PMP?"
+    row = chat.open_prompt_for_job(conn, 1)
+    assert row is not None and row["kind"] == "text"
+    assert json.loads(row["payload"]) == {
+        "id": "needs_answer", "kind": "text", "question": "Do you have a PMP?",
+        "why": "The agent stopped to ask this before continuing.",
+        "origin": "needs_answer", "memory_key": None, "default": None,
+        "options": [], "sensitive": False}

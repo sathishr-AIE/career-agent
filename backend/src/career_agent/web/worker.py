@@ -1,12 +1,40 @@
 import asyncio
 import functools
+import logging
 import sqlite3
 from pathlib import Path
 
+from career_agent import chat
 from career_agent import run as run_module
 from career_agent import store, tailor
 from career_agent.apply import ats as ats_apply
 from career_agent.config import load_brief, load_candidate_profile
+
+log = logging.getLogger(__name__)
+
+
+def say(conn, job_id: int | None, text: str, conn_factory=None) -> None:
+    """A lifecycle line in the job's chat (Home when job_id is None). Never
+    raises: a chat write must not change what the worker does."""
+    try:
+        c = conn_factory() if conn_factory else conn
+        try:
+            cid = chat.home_conversation(c) if job_id is None else chat.conversation_for_job(c, job_id)
+            chat.post_message(c, cid, "system", text)
+        finally:
+            if c is not conn:
+                c.close()
+    except Exception:
+        log.warning("could not post %r for job %s", text, job_id, exc_info=True)
+
+
+def _outcome_text(conn, job_id: int, result: dict) -> str:
+    if result.get("status"):
+        row = conn.execute("SELECT status, failure_reason FROM application WHERE job_id = ?"
+                           " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+        status, reason = (row["status"], row["failure_reason"]) if row else (result["status"], None)
+        return f"Run ended: {status}" + (f" ({reason})" if reason else "")
+    return f"Run ended: {result.get('reason', 'no outcome')}"
 
 # The one definition of "is this job in the apply queue". Anything that
 # counts, picks, or reorders the queue joins job j + assessment a and uses
@@ -114,19 +142,23 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
     if candidate is None:
         set_run_state(conn, "apply", status="idle", current_job_id=None)
         store.log(conn, None, "run_completed")
+        say(conn, None, "Queue empty — apply run idle", conn_factory)
         return
 
     job_id = candidate["job_id"]
     set_run_state(conn, "apply", current_job_id=job_id)
+    say(conn, job_id, f"Picked up by the apply worker ({state['mode']} mode)", conn_factory)
 
     denial = guard(conn, job_id, allow_skip=True, brief_path=brief_path)
     if denial:
         if "cap" in denial.lower():
             set_run_state(conn, "apply", status="paused", current_job_id=None)
             store.log(conn, job_id, "run_autopaused", denial)
+            say(conn, job_id, f"Apply run auto-paused: {denial}", conn_factory)
         else:
             store.log(conn, job_id, "job_skipped", denial)
             set_run_state(conn, "apply", current_job_id=None)
+            say(conn, job_id, f"Skipped: {denial}", conn_factory)
         return
 
     try:
@@ -135,6 +167,7 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
         set_run_state(conn, "apply", status="error", current_job_id=None,
                       last_error=str(exc))
         store.log(conn, job_id, "run_error", str(exc))
+        say(conn, job_id, f"Run error: {exc}", conn_factory)
         return
 
     brief = load_brief(brief_path)
@@ -155,15 +188,17 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
         set_run_state(conn, "apply", status="error", current_job_id=None,
                       last_error=str(exc))
         store.log(conn, job_id, "run_error", str(exc))
+        say(conn, job_id, f"Run error: {exc}", conn_factory)
         return
 
     if result.get("needs_answer"):
         # Leave current_job_id set: apply_worker_loop's outer check
         # (current_job_id is None) keeps this exact job from being
         # re-picked on the next tick, so a question with no answer is a
-        # stop, not a spin. The dashboard's "Answer needed" card
-        # (app.py/_run_status.html) is what clears this park.
+        # stop, not a spin. Answering the text card submit() opened in the
+        # job chat (actions.answer_prompt, origin needs_answer) clears it.
         store.log(conn, job_id, "needs_answer", result["needs_answer"])
+        say(conn, job_id, "Run parked: waiting for your answer above", conn_factory)
         return
 
     if not result["ok"]:
@@ -177,11 +212,14 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
             set_run_state(conn, "apply", status="paused", current_job_id=None,
                           last_error=result.get("reason"))
             store.log(conn, job_id, "run_autopaused", result.get("reason", ""))
+            say(conn, job_id, f"Apply run auto-paused: {result.get('reason', '')}", conn_factory)
             return
         store.log(conn, job_id, "job_skipped", result.get("reason", ""))
         set_run_state(conn, "apply", current_job_id=None)
+        say(conn, job_id, _outcome_text(conn, job_id, result), conn_factory)
         return
 
+    say(conn, job_id, _outcome_text(conn, job_id, result), conn_factory)
     if state["mode"] == "manual":
         return  # stays 'running' with current_job_id set: awaiting review
 
