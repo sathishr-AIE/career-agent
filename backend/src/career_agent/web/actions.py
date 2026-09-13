@@ -7,6 +7,7 @@ can't drift: app.py wraps the dict in a <span>, api.py returns it as-is.
 Messages are plain text, not HTML-escaped -- the Jinja side escapes at
 render time (app.py's _span), so a message never gets double-escaped and
 the JSON side gets clean text."""
+import asyncio
 import datetime as dt
 import json
 import logging
@@ -21,11 +22,11 @@ from pydantic import ValidationError
 from career_agent import chat, credentials, outcomes, store, tailor
 from career_agent.apply import agent as agent_mod
 from career_agent.apply import ats as ats_apply
-from career_agent.apply import checkpoint
+from career_agent.apply import checkpoint, secret_fill
 from career_agent.config import (SCORING_MODELS, CandidateProfile,
                                  CareerBrief, load_brief, save_brief,
                                  save_candidate_profile)
-from career_agent.security import CredentialKeyError
+from career_agent.security import load_key
 from career_agent.web import context, worker
 
 log = logging.getLogger(__name__)
@@ -228,22 +229,51 @@ def _checkpoint_answer(conn, job_id: int, prompt_id: int, kind: str, payload: di
         log.warning("could not checkpoint answer %s for job %s", prompt_id, job_id, exc_info=True)
 
 
-def _password_answer(conn, payload: dict) -> tuple[dict, str]:
-    """need_password's ANSWER body and a chat notice. The agent-supplied
-    domain is untrusted: a login is released only when the page the agent
-    reports being on is that domain or a subdomain of it, so an injected page
-    can't ask for another site's password."""
-    domain, url = payload.get("domain") or "", payload.get("url") or ""
+def _fill_saved_login(conn, run, payload: dict) -> tuple[dict, str]:
+    """need_password: the backend types the saved password into the browser
+    itself (secret_fill), only into frames whose REAL url is on the domain.
+    The agent's `url` is informational: a prompt-injected page can make the
+    agent lie about where it is. The agent hears filled or none, never the
+    password."""
+    domain = payload.get("domain") or ""
     none = {"id": payload.get("id"), "answer": "none"}
-    if not credentials.host_matches(url, domain):
-        return none, f"Did not send the saved login for {domain}: the agent's page is {url}"
-    try:
-        cred = credentials.get(conn, domain)
-    except (CredentialKeyError, ValueError) as exc:
-        return none, f"Could not read the saved login for {domain}: {exc}"
+    cred = credentials.get(conn, domain)
     if cred is None:
         return none, f"No saved login for {domain}"
-    return {"id": payload.get("id"), "password": cred["password"]}, f"Sent the saved login for {domain}"
+    run.secrets.add(cred["password"])       # defence in depth: scrubbed if it ever echoes
+    result = secret_fill.fill_password(domain, cred["password"])
+    if not result["filled"]:
+        return none, (f"Did not fill the saved login for {domain}: no empty password field "
+                      f"on a {domain} page. The browser is on: "
+                      f"{', '.join(result['pages']) or 'no pages'}")
+    return ({"id": payload.get("id"), "filled": True},
+            f"Filled the saved login for {domain} on {result['page_url']}")
+
+
+def _account_refusal(conn, run, row, prompt_id: int, payload: dict) -> dict | None:
+    """approve_account's checks before the claim. The domain must be one an
+    account can be saved for, and the agent's login_url must be on it (the
+    fill itself is checked against the REAL page). An existing login is never
+    re-created: the agent is told "exists" so it signs in with it."""
+    try:
+        domain = credentials.account_domain(payload.get("domain") or "")
+    except ValueError as exc:
+        return _refuse(422, str(exc))
+    if not credentials.host_matches(payload.get("login_url") or "", domain):
+        return _refuse(409, f"the sign-up page {payload.get('login_url') or '(none)'} "
+                            f"is not on {domain}")
+    if not any(l["domain"] == domain for l in credentials.list_(conn)):
+        return None
+    exists = {"id": payload.get("id"), "answer": "exists"}
+    if chat.answer_prompt_row(conn, prompt_id, exists) is None:
+        return _refuse(409, _CLOSED)
+    if not run.send(agent_mod.answer_line(run.nonce, "approve_account", exists)):
+        chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
+        return _refuse(409, _NO_RUN)
+    chat.post_message(conn, row["conversation_id"], "system",
+                      f"A login already exists for {domain}; the agent will sign in with it")
+    return _refuse(409, f"a login already exists for {domain}; use it, or delete it in "
+                        "Logins first")
 
 
 def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
@@ -319,30 +349,50 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
     if (prompt_id <= getattr(getattr(run, "events", None), "prompt_baseline", float("inf"))
             or newest is None or newest["id"] != prompt_id):
         return _refuse(409, _CLOSED)
-    sent, notice = body, None   # `sent` may carry a password; `body`, the recorded answer, never
+    sent, notice = body, None   # what the agent gets; neither it nor `body` holds a password
+    if kind == "approve_account" and value == "approve":
+        refused = _account_refusal(conn, run, row, prompt_id, payload)
+        if refused:
+            return refused
     if kind == "need_password":
-        sent, notice = _password_answer(conn, payload)
-        body = {"id": payload.get("id"), "answer": "sent" if "password" in sent else "none"}
+        try:
+            sent, notice = _fill_saved_login(conn, run, payload)
+        except Exception as exc:
+            log.warning("need_password fill failed for prompt %s: %s", prompt_id,
+                        type(exc).__name__)
+            return _refuse(503, "Could not fill the saved login in the browser")
+        body = {"id": payload.get("id"), "answer": "filled" if sent.get("filled") else "none"}
         summary = None
     if chat.answer_prompt_row(conn, prompt_id, body) is None:
         return _refuse(409, _CLOSED)            # answered concurrently
     if kind == "approve_account" and value == "approve":
+        # After the claim (a double approve can't fill one password and store
+        # another); stored only once filled, so a failed fill stores nothing.
         pw = credentials.generate_password()
         try:
-            # After the claim above (a double approve can't store one password
-            # and send another) and BEFORE the ANSWER carries it. If the send
-            # below is refused the row is kept: no account was created with it,
-            # and the next approve overwrites it -- put refuses only a user row.
-            credentials.put(conn, payload["domain"], payload.get("login_url") or "",
-                            payload["email"], pw, "agent")
-        except (credentials.UserLoginExists, CredentialKeyError) as exc:
+            load_key()                          # a key problem surfaces before anything is typed
+            result = secret_fill.fill_password(payload["domain"], pw)
+            if result["filled"]:
+                credentials.put(conn, payload["domain"], payload["login_url"],
+                                payload["email"], pw, "agent")
+        except Exception as exc:
+            log.warning("approve_account fill/store failed for prompt %s: %s", prompt_id,
+                        type(exc).__name__)
             chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
-            if isinstance(exc, CredentialKeyError):
-                return _refuse(503, str(exc))
-            return _refuse(409, f"a login you saved already exists for {payload['domain']}")
-        sent, notice = {**body, "password": pw}, f"Saved login for {payload['domain']}"
-    if "password" in sent:
-        run.secrets.add(sent["password"])       # scrubbed from chat and transcript from now on
+            return _refuse(503, "Could not fill or save the new login; try again")
+        if not result["filled"]:
+            chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
+            return _refuse(409, f"No empty password field on a {payload['domain']} page; the "
+                                f"browser is on: {', '.join(result['pages']) or 'no pages'}")
+        run.secrets.add(pw)                     # defence in depth: scrubbed if it ever echoes
+        sent = {**body, "filled": True}
+        notice = f"Saved login for {payload['domain']} (filled on {result['page_url']})"
+    if kind == "confirm" and decision == "approve":
+        # Before the send: a crash just after it must never leave the session resumable.
+        try:
+            checkpoint.mark_approve_sent(conn, row["job_id"])
+        except Exception:
+            log.warning("could not checkpoint the approve for job %s", row["job_id"], exc_info=True)
     if not run.send(agent_mod.answer_line(run.nonce, kind, sent)):
         chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
         return _refuse(409, _NO_RUN)
@@ -376,6 +426,51 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
             log.exception("qa_touch failed for prompt %s -- answer was"
                           " already sent and recorded", prompt_id)
     return {"ok": True, "message": "Answer sent"}
+
+
+def resume_job(conn: sqlite3.Connection, job_id: int, brief_path: Path,
+               candidate_profile_path: Path, conn_factory=None, tasks: set | None = None) -> dict:
+    """The job chat's "Continue where it left off". Refuses like do_apply (a
+    BLOCKING attempt, a live run, the apply lock) and without a resumable
+    checkpoint; otherwise the resumed run goes to the background -- it can wait
+    on cards for many minutes -- tracked in `tasks` (app._background_tasks).
+    The resume cap and a mode mismatch are submit()'s call; both reach the chat.
+    Must be called on the event loop. `code` is the HTTP status for api_chat."""
+    cp = checkpoint.get(conn, job_id)
+    if cp is None or cp["status"] != "resumable":
+        return _refuse(409, "Nothing to continue: this job has no interrupted session")
+    live = ats_apply._blocking_status(conn, job_id)
+    if live:
+        return _refuse(409, ats_apply._blocked(job_id, live)["reason"])
+    run = agent_mod.RUNS.get(job_id)
+    if run is not None and not run.done.is_set():
+        return _refuse(409, f"job {job_id} already has a live agent run")
+    if ats_apply._agent_lock().locked():
+        return _refuse(409, "Another application is running — continue when it ends")
+    checkpoint.set_auto_resumed(conn, job_id, False)    # a human touch re-arms the worker's one
+    worker.say(conn, job_id, "Continuing where it left off")
+    task = asyncio.create_task(_resume_run(conn, job_id, brief_path, candidate_profile_path,
+                                           conn_factory))
+    if tasks is not None:
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+    return {"ok": True, "message": "Continuing where it left off"}
+
+
+async def _resume_run(conn, job_id: int, brief_path: Path, candidate_profile_path: Path,
+                      conn_factory=None) -> None:
+    """Manual mode, like do_apply: an auto session is restarted fresh by submit()."""
+    try:
+        resume_version = await worker.tailor_for_apply(conn, job_id, brief_path)
+        result = await ats_apply.submit(
+            conn, job_id, mode="manual", brief=load_brief(brief_path),
+            profile=context.load_candidate_profile_or_none(candidate_profile_path),
+            resume_version=resume_version, conn_factory=conn_factory, resume=True)
+    except Exception as exc:
+        log.exception("continue failed for job %s", job_id)
+        worker.say(conn, job_id, f"Continue failed: {exc}")
+        return
+    worker.say(conn, job_id, worker._outcome_text(conn, job_id, result))
 
 
 def dismiss(conn: sqlite3.Connection, job_id: int) -> dict:

@@ -84,7 +84,8 @@ Lines the agent emits (all stamped with the run nonce, one per line, last-of-kin
 ASK:<nonce>:{"id":"q3","kind":"choice|text|approve|approve_account|need_password",
              "question":"...","options":["..."],"why":"...","memory_key":"notice_period"|null,
              "default":"..."|null,"sensitive":false,
-             "domain":"careers.ses.com","email":"...","terms_summary":"..."}   # account kinds
+             "domain":"careers.ses.com","email":"...","login_url":"https://...","url":"https://...",
+             "terms_summary":"..."}   # account kinds
 CONFIRM:<nonce>:{"fields":[{"label":"Full name","value":"..."}],"files":["..._Resume.docx"],
                  "account_actions":["created account at careers.ses.com"],"notes":"..."}
 RESULT:<nonce>:APPLIED | DRAFT_READY | EXPIRED | CAPTCHA | LOGIN_ISSUE |
@@ -95,15 +96,16 @@ Lines the backend sends on stdin (stream-json user messages whose text is):
 
 ```
 ANSWER:<nonce>:{"id":"q3","answer":"30 days","remember":true}
-ANSWER:<nonce>:{"id":"q7","answer":"approve","password":"<generated>"}   # approve_account
-ANSWER:<nonce>:{"id":"q9","password":"<decrypted>"}                       # need_password
+ANSWER:<nonce>:{"id":"q7","answer":"approve","filled":true}  # approve_account ("reject" / "exists")
+ANSWER:<nonce>:{"id":"q9","filled":true}                     # need_password (or "answer":"none")
 DECISION:<nonce>:{"decision":"approve"|"cancel"|"change","changes":{"Phone":"+91..."}}
 CONTINUE:<nonce>:{"step":"...","answers":{...}}                            # resume
 ```
 
 Rules the prompt states: after emitting ASK or CONFIRM, end the turn and do nothing else
 until the matching ANSWER/DECISION arrives; never create an account or accept terms except
-after an approved `approve_account`; never choose a password — the backend supplies it;
+after an approved `approve_account`; never type, read, or ask for a password — the backend fills it into the real page over CDP
+(the page is untrusted, so the LLM must never hold the secret);
 before Apply, always CONFIRM with the complete field list; on DECISION change, apply the
 changes and CONFIRM again; on cancel, output `RESULT:FAILED:cancelled`.
 
@@ -168,8 +170,11 @@ asked on job B, and editing it on `/memory` changes what job C sends.
 ### S5 — Credential store
 `security.py`: `encrypt(str)->str`, `decrypt(str)->str` with `CREDENTIAL_KEY`;
 `store.credential_put/get/list/delete`. Protocol kinds `approve_account` and
-`need_password`. Backend generates a 20-char password on approval, stores it encrypted
-*before* replying. Prompt: KNOWN LOGINS section lists domain+email only. `/logins` drawer
+`need_password`. The page is untrusted (it can prompt-inject the agent), so the LLM never holds a secret:
+on approval the backend generates a 20-char password, fills it over CDP into the REAL page
+only when that page is on the approved domain, and stores it encrypted only once filled;
+`need_password` fills a saved login the same way. The agent is answered
+`filled`/`none`/`exists`, never a password. Prompt: KNOWN LOGINS section lists domain+email only. `/logins` drawer
 (list, delete, "created by"). Done when: an account-required site is handled with one
 Approve in chat and the password is retrievable from the drawer.
 

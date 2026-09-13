@@ -2,6 +2,7 @@
 """Encrypted storage for company-site logins (site_credential). Passwords are
 Fernet-encrypted at rest via security.py; list_() never returns a password or
 ciphertext -- only put()/get() ever touch security.decrypt/encrypt."""
+import ipaddress
 import secrets
 import string
 from urllib.parse import urlsplit
@@ -28,7 +29,10 @@ def normalize_domain(value: str) -> str:
     port and unwraps IPv6 brackets in one step, so "[::1]:8080" -> "::1"
     rather than the netloc's leading "[".
     """
-    value = value.strip().lower().replace("\\", "/")
+    value = value.strip()
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError("whitespace or a control character in a domain/URL")
+    value = value.lower().replace("\\", "/")
     if "//" not in value:
         value = "//" + value  # forces urlsplit to treat it as netloc, not path
     host = urlsplit(value).hostname
@@ -38,6 +42,8 @@ def normalize_domain(value: str) -> str:
         host = host[4:]
     if not host:
         raise ValueError(f"no host found in domain/URL {value!r}")
+    if "%" in host:
+        raise ValueError(f"percent-encoding in host {host!r}")
     try:
         return host.encode("idna").decode("ascii")
     except UnicodeError as exc:
@@ -58,8 +64,34 @@ def generate_password(length: int = 20) -> str:
             return pw
 
 
-class UserLoginExists(Exception):
-    """An agent write would replace a login the user saved themselves."""
+class LoginExists(Exception):
+    """An agent write would replace an existing login (user- or agent-made):
+    an approved account is only ever created, never re-keyed."""
+
+
+# Shared or public suffixes: a login saved under one would be offered to every
+# tenant on it -- on a shared ATS the key is the tenant's own host
+# (ses.wd3.myworkdayjobs.com). ponytail: a hand list, not the Public Suffix
+# List; add a suffix when a new shared platform shows up.
+_SHARED_SUFFIXES = {"co.in", "co.uk", "com.au", "github.io", "myworkdayjobs.com",
+                    "greenhouse.io", "lever.co", "icims.com", "smartrecruiters.com",
+                    "taleo.net", "successfactors.com", "ashbyhq.com"}
+
+
+def account_domain(value: str) -> str:
+    """normalize_domain, refusing a key no account may be saved under: a bare
+    label, an IP literal, localhost, or a shared suffix (checked after the
+    www. strip, so www.co.in is co.in). Raises ValueError."""
+    d = normalize_domain(value)
+    try:
+        ipaddress.ip_address(d)
+        is_ip = True
+    except ValueError:
+        is_ip = False
+    if (is_ip or "." not in d or d == "localhost" or d.endswith(".localhost")
+            or d in _SHARED_SUFFIXES):
+        raise ValueError(f"not a site an account can be saved for: {d!r}")
+    return d
 
 
 def host_matches(page_url: str, domain: str) -> bool:
@@ -76,12 +108,13 @@ def host_matches(page_url: str, domain: str) -> bool:
 def put(conn, domain: str, login_url: str, email: str, password: str,
        created_by: str) -> int:
     """Upsert by normalized domain; encrypts before writing. Returns the row id.
-    An "agent" write never replaces a user-saved row (UserLoginExists)."""
-    d = normalize_domain(domain)
+    An "agent" write needs an account_domain and never replaces an existing
+    row (LoginExists)."""
+    d = account_domain(domain) if created_by == "agent" else normalize_domain(domain)
     row = conn.execute("SELECT id, created_by FROM site_credential WHERE domain = ?",
                        (d,)).fetchone()
-    if row is not None and created_by == "agent" and row["created_by"] != "agent":
-        raise UserLoginExists(d)
+    if row is not None and created_by == "agent":
+        raise LoginExists(d)
     enc = encrypt(password)
     if row is not None:
         conn.execute(

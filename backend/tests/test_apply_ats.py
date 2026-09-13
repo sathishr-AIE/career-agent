@@ -1249,12 +1249,24 @@ def test_answer_prompt_validates_by_kind_and_refuses_closed(conn, runs):
     assert actions.answer_prompt(conn, 999, {})["code"] == 404
 
 
-# -- Task 15: approve_account / need_password --------------------------------
+# -- Task 15: approve_account / need_password (the backend fills over CDP) ---
 
 @pytest.fixture
 def key(monkeypatch):
     from cryptography.fernet import Fernet
     monkeypatch.setenv("CREDENTIAL_KEY", Fernet.generate_key().decode())
+
+
+@pytest.fixture
+def browser_on(monkeypatch):
+    """Point secret_fill at fake CDP pages -- never a real Chrome."""
+    from test_secret_fill import connect_to
+    from career_agent.apply import secret_fill
+
+    def on(*pages):
+        monkeypatch.setattr(secret_fill, "_live_connect", connect_to(*pages))
+        return pages
+    return on
 
 
 def _chat_texts(conn):
@@ -1269,41 +1281,108 @@ def _sent_body(line):
     return json.loads(line.split(":", 2)[2])
 
 
+def _in_flight(conn):
+    """The live run's row: a refused answer reopens its card only while it exists."""
+    conn.execute("INSERT INTO application (job_id, resume_version, status, started_at)"
+                 " VALUES (1, 'v1', 'in_flight', datetime('now'))")
+    conn.commit()
+
+
 _ACCT = {"id": "acct", "kind": "approve_account", "question": "Create an account?",
          "domain": "careers.ses.com", "email": "asha@example.com",
-         "login_url": "https://careers.ses.com/login"}
+         "login_url": "https://careers.ses.com/join"}
 
 
-def test_approve_account_stores_the_credential_before_the_answer_carries_it(conn, runs, key):
+def _waiting_run(runs):
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    return run
+
+
+def test_approve_account_fills_then_stores_and_never_sends_the_password(conn, runs, key, browser_on):
+    from test_secret_fill import Field, Page
     from career_agent import credentials
     from career_agent.web import actions
-    run = runs[1] = FakeRun("n")
-    at_send = []
-    real_send = run.send
-    run.send = lambda text: (at_send.append(credentials.get(conn, "careers.ses.com")),
-                             real_send(text))[1]
-    run.waiting.set()
+    [page] = browser_on(Page("https://careers.ses.com/join", [Field(), Field()]))
+    run = _waiting_run(runs)
     pid = _open(conn, "approve_account", _ACCT)
     assert actions.answer_prompt(conn, pid, {"answer": "approve"})["ok"]
 
-    body = _sent_body(run.sent[0])
-    pw = body["password"]
-    assert body == {"id": "acct", "answer": "approve", "password": pw} and len(pw) == 20
-    assert at_send[0]["password"] == pw and at_send[0]["created_by"] == "agent"
-    assert at_send[0]["email"] == "asha@example.com"
-    assert pw in run.secrets                               # redacted from chat/transcript
-    assert "Saved login for careers.ses.com" in _chat_texts(conn)
-    assert pw not in _db_dump(conn)                        # encrypted; no answer row/chat/checkpoint copy
+    pw = page.main.fields[0].value
+    assert len(pw) == 20 and page.main.fields[1].value == pw     # confirm field too
+    assert [_sent_body(s) for s in run.sent] == [{"id": "acct", "answer": "approve", "filled": True}]
+    assert pw not in "".join(run.sent)
+    cred = credentials.get(conn, "careers.ses.com")
+    assert cred["password"] == pw and cred["created_by"] == "agent"
+    assert cred["login_url"] == "https://careers.ses.com/join"
+    assert pw in run.secrets                                     # defence in depth
+    assert any(t.startswith("Saved login for careers.ses.com") for t in _chat_texts(conn))
+    assert pw not in _db_dump(conn)
     answer = json.loads(conn.execute("SELECT answer FROM agent_prompt WHERE id = ?",
                                      (pid,)).fetchone()[0])
-    assert answer["answer"] == "approve" and "password" not in answer
+    assert answer == {"id": "acct", "answer": "approve"}
+
+
+def test_approve_account_on_a_foreign_real_page_fills_and_stores_nothing(conn, runs, key, browser_on):
+    from test_secret_fill import Field, Page
+    from career_agent import credentials
+    from career_agent.web import actions
+    [page] = browser_on(Page("https://evil.com/join", [Field()]))
+    _in_flight(conn)
+    run = _waiting_run(runs)
+    pid = _open(conn, "approve_account", _ACCT)
+    r = actions.answer_prompt(conn, pid, {"answer": "approve"})
+    assert r["code"] == 409 and "https://evil.com/join" in r["message"]
+    assert run.sent == [] and credentials.list_(conn) == []
+    assert page.main.fields[0].value == ""
+    assert chat.open_prompt_for_job(conn, 1)["id"] == pid
+
+
+def test_approve_account_refuses_a_login_url_off_the_domain(conn, runs, key, browser_on):
+    from test_secret_fill import Field, Page
+    from career_agent import credentials
+    from career_agent.web import actions
+    [page] = browser_on(Page("https://careers.ses.com/join", [Field()]))
+    run = _waiting_run(runs)
+    pid = _open(conn, "approve_account", dict(_ACCT, login_url="https://evil.com/join"))
+    r = actions.answer_prompt(conn, pid, {"answer": "approve"})
+    assert r["code"] == 409 and run.sent == [] and credentials.list_(conn) == []
+    assert page.main.fields[0].value == ""
+    assert chat.open_prompt_for_job(conn, 1)["id"] == pid
+
+
+@pytest.mark.parametrize("domain", ["co.in", "myworkdayjobs.com", "localhost", "com"])
+def test_approve_account_refuses_shared_suffix_and_bare_domains(conn, runs, key, domain):
+    from career_agent import credentials
+    from career_agent.web import actions
+    run = _waiting_run(runs)
+    pid = _open(conn, "approve_account",
+                dict(_ACCT, domain=domain, login_url=f"https://{domain}/join"))
+    r = actions.answer_prompt(conn, pid, {"answer": "approve"})
+    assert r["code"] == 422 and run.sent == [] and credentials.list_(conn) == []
+
+
+def test_approve_account_with_an_existing_login_tells_the_agent_it_exists(conn, runs, key, browser_on):
+    from test_secret_fill import Field, Page
+    from career_agent import credentials
+    from career_agent.web import actions
+    [page] = browser_on(Page("https://careers.ses.com/join", [Field()]))
+    credentials.put(conn, "careers.ses.com", "", "a@x.com", "agent-made-pw", "agent")
+    run = _waiting_run(runs)
+    pid = _open(conn, "approve_account", _ACCT)
+    r = actions.answer_prompt(conn, pid, {"answer": "approve"})
+    assert r["code"] == 409
+    assert r["message"] == ("a login already exists for careers.ses.com; use it, or delete "
+                            "it in Logins first")
+    assert [_sent_body(s) for s in run.sent] == [{"id": "acct", "answer": "exists"}]
+    assert page.main.fields[0].value == ""
+    assert credentials.get(conn, "careers.ses.com")["password"] == "agent-made-pw"
 
 
 def test_reject_account_sends_reject_and_stores_nothing(conn, runs, key):
     from career_agent import credentials
     from career_agent.web import actions
-    run = runs[1] = FakeRun("n")
-    run.waiting.set()
+    run = _waiting_run(runs)
     pid = _open(conn, "approve_account", _ACCT)
     assert actions.answer_prompt(conn, pid, {"answer": "reject"})["ok"]
     assert _sent_body(run.sent[0]) == {"id": "acct", "answer": "reject"}
@@ -1312,82 +1391,120 @@ def test_reject_account_sends_reject_and_stores_nothing(conn, runs, key):
                                  {"answer": "maybe"})["code"] == 422
 
 
-def test_approve_account_never_overwrites_a_login_the_user_saved(conn, runs, key):
+def test_an_exception_after_the_approve_claim_reopens_the_card_with_503(conn, runs, key, monkeypatch):
     from career_agent import credentials
+    from career_agent.apply import secret_fill
     from career_agent.web import actions
-    credentials.put(conn, "careers.ses.com", "", "me@x.com", "users-own-pw", "user")
-    conn.execute("INSERT INTO application (job_id, resume_version, status, started_at)"
-                 " VALUES (1, 'v1', 'in_flight', datetime('now'))")   # the live run's row
-    conn.commit()
-    run = runs[1] = FakeRun("n")
-    run.waiting.set()
+
+    def boom(*a, **kw):
+        raise RuntimeError("cdp went away")
+    monkeypatch.setattr(secret_fill, "fill_password", boom)
+    _in_flight(conn)
+    run = _waiting_run(runs)
     pid = _open(conn, "approve_account", _ACCT)
     r = actions.answer_prompt(conn, pid, {"answer": "approve"})
-    assert r["code"] == 409
-    assert r["message"] == "a login you saved already exists for careers.ses.com"
-    assert run.sent == [] and chat.open_prompt_for_job(conn, 1)["id"] == pid
-    assert credentials.get(conn, "careers.ses.com")["password"] == "users-own-pw"
+    assert r["code"] == 503 and run.sent == [] and credentials.list_(conn) == []
+    assert chat.open_prompt_for_job(conn, 1)["id"] == pid
 
 
-def _need(url):
-    return {"id": "np", "kind": "need_password", "question": "Password for careers.ses.com",
-            "domain": "careers.ses.com", "url": url}
+def _need(domain="careers.ses.com", url="https://careers.ses.com/login"):
+    return {"id": "np", "kind": "need_password", "question": f"Password for {domain}",
+            "domain": domain, "url": url}
 
 
-def test_need_password_releases_the_login_only_on_the_matching_host(conn, runs, key):
+def test_need_password_fills_the_real_matching_page_and_answers_filled(conn, runs, key, browser_on):
+    from test_secret_fill import Field, Page
     from career_agent import credentials
     from career_agent.web import actions
     pw = "Stored!Pass_4321abcd"
     credentials.put(conn, "careers.ses.com", "", "a@x.com", pw, "agent")
-    run = runs[1] = FakeRun("n")
-    run.waiting.set()
-    pid = _open(conn, "need_password", _need("https://jobs.careers.ses.com/login"))
+    [page] = browser_on(Page("https://jobs.careers.ses.com/login", [Field()]))
+    run = _waiting_run(runs)
+    pid = _open(conn, "need_password", _need())
     assert actions.answer_prompt(conn, pid, {})["ok"]
-    assert _sent_body(run.sent[0]) == {"id": "np", "password": pw}
-    assert pw in run.secrets and pw not in _db_dump(conn)
-    assert not any(pw in t for t in _chat_texts(conn))
+    assert page.main.fields[0].value == pw
+    assert [_sent_body(s) for s in run.sent] == [{"id": "np", "filled": True}]
+    assert pw not in "".join(run.sent) and pw not in _db_dump(conn)
+    assert ("Filled the saved login for careers.ses.com on https://jobs.careers.ses.com/login"
+            in _chat_texts(conn))
 
 
-def test_need_password_on_a_foreign_host_answers_none_and_warns(conn, runs, key):
+def test_c1_a_claimed_url_never_releases_the_login_on_a_foreign_real_page(conn, runs, key, browser_on):
+    """C1 regression: an injected agent claims it is on linkedin while the
+    real browser page is evil.com -- nothing is filled, the answer is none."""
+    from test_secret_fill import Field, Page
     from career_agent import credentials
     from career_agent.web import actions
-    pw = "Stored!Pass_4321abcd"
-    credentials.put(conn, "careers.ses.com", "", "a@x.com", pw, "agent")
-    run = runs[1] = FakeRun("n")
-    run.waiting.set()
-    pid = _open(conn, "need_password", _need("https://careers.ses.com.evil.com/login"))
+    pw = "Users!Own_Pass_9876"
+    credentials.put(conn, "linkedin.com", "", "me@x.com", pw, "user")
+    [page] = browser_on(Page("https://evil.com/login", [Field()]))
+    run = _waiting_run(runs)
+    pid = _open(conn, "need_password", _need("linkedin.com", "https://www.linkedin.com/login"))
     assert actions.answer_prompt(conn, pid, {})["ok"]
-    assert _sent_body(run.sent[0]) == {"id": "np", "answer": "none"}
-    assert run.secrets == set() and pw not in _db_dump(conn)
-    assert any("careers.ses.com.evil.com" in t for t in _chat_texts(conn))
+    assert page.main.fields[0].value == ""
+    assert [_sent_body(s) for s in run.sent] == [{"id": "np", "answer": "none"}]
+    assert pw not in "".join(run.sent) and pw not in _db_dump(conn)
+    assert any("https://evil.com/login" in t for t in _chat_texts(conn))
 
 
 def test_need_password_with_no_saved_login_answers_none(conn, runs, key):
     from career_agent.web import actions
-    run = runs[1] = FakeRun("n")
-    run.waiting.set()
-    pid = _open(conn, "need_password", _need("https://careers.ses.com/login"))
+    run = _waiting_run(runs)
+    pid = _open(conn, "need_password", _need())
     assert actions.answer_prompt(conn, pid, {})["ok"]
     assert _sent_body(run.sent[0]) == {"id": "np", "answer": "none"}
 
 
-async def test_need_password_is_answered_on_ask_and_logins_reach_the_prompt(conn, runs, factory, key):
+async def test_need_password_is_filled_on_ask_and_logins_reach_the_prompt(conn, runs, factory, key, browser_on):
+    from test_secret_fill import Field, Page
     from career_agent import credentials
     pw = "Auto!Pass_1234wxyz"
     credentials.put(conn, "careers.ses.com", "", "a@x.com", pw, "agent")
+    [page] = browser_on(Page("https://careers.ses.com/login", [Field()]))
     seen = {}
 
     async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
         run = runs[jid] = FakeRun(nonce, events)
         seen["prompt"] = prompt
-        _waiting_on(run, events, "ask", _need("https://careers.ses.com/login"))
+        _waiting_on(run, events, "ask", _need())
         seen["sent"] = list(run.sent)
         return AgentResult("draft_ready")
 
     await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory)
-    assert [_sent_body(s) for s in seen["sent"]] == [{"id": "np", "password": pw}]
+    assert [_sent_body(s) for s in seen["sent"]] == [{"id": "np", "filled": True}]
+    assert page.main.fields[0].value == pw
     assert "careers.ses.com (sign in as a@x.com)" in seen["prompt"]
     assert pw not in seen["prompt"] and pw not in _db_dump(conn)
+
+
+async def test_a_failed_auto_need_password_answers_none_at_once(conn, runs, factory, key, monkeypatch):
+    from career_agent import credentials
+    from career_agent.apply import secret_fill
+    from career_agent.web import actions
+    credentials.put(conn, "careers.ses.com", "", "a@x.com", "pw-Fail-123!", "agent")
+    seen = {}
+
+    def boom(*a, **kw):
+        raise RuntimeError("answer_prompt blew up")
+
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
+        run = runs[jid] = FakeRun(nonce, events)
+        _waiting_on(run, events, "ask", _need())
+        seen["sent"] = list(run.sent)
+        return AgentResult("draft_ready")
+
+    monkeypatch.setattr(actions, "answer_prompt", boom)
+    await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory)
+    assert [_sent_body(s) for s in seen["sent"]] == [{"id": "np", "answer": "none"}]
+    assert any("careers.ses.com" in t and "none" in t for t in _chat_texts(conn))
+
+
+def test_an_approve_account_card_carries_the_real_page_urls(conn, factory, browser_on):
+    from test_secret_fill import Page
+    browser_on(Page("https://careers.ses.com/join"), Page("https://evil.com/x"))
+    ats_apply._chat_events(factory, 1, "nn").on_ask(dict(_ACCT, page_urls=["https://lie.example/"]))
+    payload = json.loads(chat.open_prompt_for_job(conn, 1)["payload"])
+    assert payload["page_urls"] == ["https://careers.ses.com/join", "https://evil.com/x"]
 
 
 def test_a_tool_call_echoing_a_sent_password_is_redacted_in_chat_and_transcript(conn, factory):
@@ -1921,7 +2038,8 @@ async def test_a_cancelled_run_is_left_resumable(conn):
 
 
 def _resumable(conn, answers):
-    checkpoint.start(conn, 1, "sess-old", "oldnonce")
+    # an injected runner means can_submit; these tests resume in manual mode
+    checkpoint.start(conn, 1, "sess-old", "oldnonce", mode="manual", can_submit=True)
     checkpoint.mark_running(conn, 1, "answered 4", answers)
     checkpoint.mark_resumable(conn, 1)
 
@@ -2097,3 +2215,100 @@ async def test_what_the_checkpoint_pins_from_answers(conn, runs, factory):
         return AgentResult("draft_ready")
 
     assert (await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory))["ok"]
+
+
+# -- Task 11: resume cap, mode mismatch, approve_sent, fallback nonce ------------
+
+def _resumable_as(conn, mode="manual", can_submit=True, answers=None):
+    checkpoint.start(conn, 1, "sess-old", "oldnonce", mode=mode, can_submit=can_submit)
+    checkpoint.mark_running(conn, 1, "answered 4", answers or {})
+    checkpoint.mark_resumable(conn, 1)
+
+
+async def test_resume_increments_the_resume_count(conn):
+    _resumable_as(conn)
+    await _submit(conn, mode="manual", run_agent=fake_agent(AgentResult("failed", "timeout")),
+                  resume=True)
+    cp = checkpoint.get(conn, 1)
+    assert (cp["status"], cp["resume_count"]) == ("resumable", 1)
+
+
+async def test_resume_past_the_cap_is_a_retryable_failure(conn):
+    _resumable_as(conn)
+    conn.execute("UPDATE apply_checkpoint SET resume_count = ?", (ats_apply.MAX_RESUMES,))
+    conn.commit()
+    fake = fake_agent(AgentResult("draft_ready"))
+    r = await _submit(conn, mode="manual", run_agent=fake, resume=True)
+    assert not r["ok"] and "resume_limit" in r["reason"] and fake.prompts == []
+    assert [(a["status"], a["failure_reason"]) for a in _apps(conn)] == [("failed", "resume_limit")]
+    assert checkpoint.get(conn, 1)["status"] == "done"
+    cid = chat.conversation_for_job(conn, 1)
+    assert any("resume limit" in m["content"] for m in chat.messages_after(conn, cid, 0))
+
+
+@pytest.mark.parametrize("stored", [("auto", True), ("manual", False), (None, None)])
+async def test_a_mode_or_can_submit_mismatch_starts_fresh(conn, stored):
+    """Never resume an auto session as manual (it could submit without a DECISION)."""
+    _resumable_as(conn, *stored)
+    calls = []
+    fake = _recording(AgentResult("draft_ready"), calls)
+    fake.conn = conn
+    r = await _submit(conn, mode="manual", run_agent=fake, resume=True)
+    assert r["ok"] and [c["resume"] for c in calls] == [False]
+    assert calls[0]["session_id"] != "sess-old" and calls[0]["nonce"] != "oldnonce"
+    assert calls[0]["cp"]["mode"] == "manual" and calls[0]["cp"]["can_submit"] == 1
+    cid = chat.conversation_for_job(conn, 1)
+    assert any("fresh session" in m["content"] for m in chat.messages_after(conn, cid, 0))
+
+
+async def test_a_matching_resume_says_so_in_chat(conn):
+    _resumable_as(conn)
+    await _submit(conn, mode="manual", run_agent=fake_agent(AgentResult("draft_ready")), resume=True)
+    cid = chat.conversation_for_job(conn, 1)
+    assert any("Resuming" in m["content"] for m in chat.messages_after(conn, cid, 0))
+
+
+async def test_the_fallback_gets_a_new_nonce_and_ignores_the_old_one(conn):
+    _resumable_as(conn, answers={"Notice?": "30 days"})
+    calls = []
+
+    def on_run(prompt, jid, nonce, events, session_id, resume):
+        if resume:
+            return AgentResult("failed", "agent_error")
+        # a stale line stamped with the old nonce is no protocol line for this run
+        return agent_mod.parse_result("RESULT:oldnonce:DRAFT_READY", nonce)
+
+    fake = _recording(None, calls, on_run)
+    fake.conn = conn
+    r = await _submit(conn, mode="manual", run_agent=fake, resume=True)
+    fresh = calls[1]
+    assert fresh["nonce"] != "oldnonce" and "oldnonce" not in fresh["prompt"]
+    assert f"RESULT:{fresh['nonce']}:" in fresh["prompt"]
+    assert fresh["cp"]["nonce"] == fresh["nonce"] and fresh["cp"]["session_id"] == fresh["session_id"]
+    assert fresh["cp"]["answers"] == {"Notice?": "30 days"}
+    assert not r["ok"] and r.get("status") != "draft"          # the stale RESULT did not count
+
+
+async def test_an_approve_is_recorded_on_the_checkpoint(conn, runs, factory):
+    from career_agent.web import actions
+
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
+        run = runs[jid] = FakeRun(nonce, events)
+        _waiting_on(run, events, "confirm", _confirm(Name="Asha"))
+        pid = chat.open_prompt_for_job(factory(), jid)["id"]
+        assert checkpoint.get(factory(), jid)["approve_sent"] == 0
+        assert actions.answer_prompt(factory(), pid, {"decision": "approve"}, factory)["ok"]
+        assert checkpoint.get(factory(), jid)["approve_sent"] == 1
+        return AgentResult("draft_ready")
+
+    await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory)
+
+
+async def test_an_auto_approve_is_recorded_on_the_checkpoint(conn, runs, factory):
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
+        run = runs[jid] = FakeRun(nonce, events)
+        _waiting_on(run, events, "confirm", _confirm(Name="Asha"))
+        assert checkpoint.get(factory(), jid)["approve_sent"] == 1
+        return AgentResult("applied")
+
+    await _submit(conn, mode="auto", run_agent=fake, conn_factory=factory)

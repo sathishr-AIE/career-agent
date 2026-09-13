@@ -150,19 +150,26 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
     if state["current_job_id"] is not None:
         return
 
-    candidate = next_candidate(conn)
-    if candidate is None:
+    # Auto mode continues an interrupted session first, once per checkpoint until
+    # a human touches it (the flag is on the row, so a restart can't loop).
+    # Manual mode never does: the job chat offers a Continue button instead.
+    resume_id = checkpoint.next_auto_resume(conn) if state["mode"] == "auto" else None
+    candidate = None if resume_id is not None else next_candidate(conn)
+    if resume_id is None and candidate is None:
         set_run_state(conn, "apply", status="idle", current_job_id=None)
         store.log(conn, None, "run_completed")
         say(conn, None, "Queue empty — apply run idle", conn_factory)
         return
 
-    job_id = candidate["job_id"]
+    job_id = resume_id if resume_id is not None else candidate["job_id"]
+    if resume_id is not None:
+        checkpoint.set_auto_resumed(conn, job_id, True)     # before any await
     set_run_state(conn, "apply", current_job_id=job_id)
     # Before any await: a stale needs_answer card answered while this job
     # starts would unpark it and let the next tick run it a second time.
     chat.expire_open_prompts(conn, job_id)
-    say(conn, job_id, f"Picked up by the apply worker ({state['mode']} mode)", conn_factory)
+    say(conn, job_id, "Auto mode: continuing where it left off" if resume_id is not None
+        else f"Picked up by the apply worker ({state['mode']} mode)", conn_factory)
 
     denial = guard(conn, job_id, allow_skip=True, brief_path=brief_path)
     if denial:
@@ -195,7 +202,8 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
         result = await ats_apply.submit(conn, job_id, mode=state["mode"],
                                         brief=brief, profile=profile,
                                         resume_version=resume_version,
-                                        conn_factory=conn_factory)
+                                        conn_factory=conn_factory,
+                                        **({"resume": True} if resume_id is not None else {}))
     except Exception as exc:
         set_run_state(conn, "apply", status="error", current_job_id=None,
                       last_error=str(exc))
@@ -249,8 +257,20 @@ async def apply_worker_loop(conn_factory, brief_path, profile_path,
     # A checkpoint left running/waiting by a crashed server is resumable.
     conn = conn_factory()
     try:
-        checkpoint.sweep_orphans(conn, {jid for jid, run in agent_mod.RUNS.items()
-                                        if not run.done.is_set()})
+        live = {jid for jid, run in agent_mod.RUNS.items() if not run.done.is_set()}
+        checkpoint.sweep_orphans(conn, live)
+        if not ats_apply.SUBMISSION_IMPLEMENTED:
+            # With the kill switch off no run could have clicked Submit: a crashed
+            # run's in_flight row needs no held_unknown adjudication. After the
+            # sweep, which reads that row as "not ended" (-> resumable).
+            for r in conn.execute("SELECT id, job_id FROM application"
+                                  " WHERE status = 'in_flight'").fetchall():
+                if r["job_id"] not in live and conn.execute(
+                        "DELETE FROM application WHERE id = ? AND status = 'in_flight'",
+                        (r["id"],)).rowcount:
+                    store.log(conn, r["job_id"], "orphan_in_flight_dropped",
+                              "submission disabled: nothing was sent")
+            conn.commit()
     finally:
         conn.close()
     while True:

@@ -224,19 +224,38 @@ def test_delete_returns_true_then_false(conn):
     ("https://evil.com/login", "linkedin.com", False),
     ("https://notlinkedin.com/", "linkedin.com", False),       # no dot boundary
     ("https://linkedin.com.evil.com/", "linkedin.com", False),
-    ("https://evil.com\@linkedin.com/", "linkedin.com", False),
+    ("https://evil.com\\@linkedin.com/", "linkedin.com", False),
     ("", "linkedin.com", False),
+    ("https://linkedin.com:8443/login", "linkedin.com", True),     # port
+    ("https://linkedin.com./login", "linkedin.com", True),         # trailing dot
+    ("https://bücher.de/login", "xn--bcher-kva.de", True),         # IDNA
+    ("https://linkedin%2ecom/login", "linkedin.com", False),       # percent in host
+    ("https://link\tedin.com/login", "linkedin.com", False),       # tab
+    ("https://linked\x01in.com/", "linkedin.com", False),          # control char
 ])
 def test_host_matches_only_on_the_domain_or_a_dot_boundary_subdomain(url, domain, ok):
     assert credentials.host_matches(url, domain) is ok
 
 
-def test_an_agent_put_never_overwrites_a_user_saved_login(conn):
+def test_an_agent_put_never_overwrites_any_existing_login(conn):
     credentials.put(conn, "ses.com", "", "me@x.com", "users-own-pw", "user")
-    with pytest.raises(credentials.UserLoginExists):
-        credentials.put(conn, "ses.com", "", "agent@x.com", "generated", "agent")
+    credentials.put(conn, "b.com", "", "a@x.com", "agent-pw", "agent")
+    for domain in ("ses.com", "b.com"):
+        with pytest.raises(credentials.LoginExists):
+            credentials.put(conn, domain, "", "agent@x.com", "generated", "agent")
     assert credentials.get(conn, "ses.com")["password"] == "users-own-pw"
-    # an agent row is overwritten by the next agent approve
-    credentials.put(conn, "b.com", "", "a@x.com", "one", "agent")
-    credentials.put(conn, "b.com", "", "a@x.com", "two", "agent")
-    assert credentials.get(conn, "b.com")["password"] == "two"
+    assert credentials.get(conn, "b.com")["password"] == "agent-pw"
+
+
+@pytest.mark.parametrize("domain", ["careers.ses.com", "ses.wd3.myworkdayjobs.com",
+                                    "https://www.careers.ses.com/join"])
+def test_account_domain_accepts_a_real_site(domain):
+    assert credentials.account_domain(domain) == credentials.normalize_domain(domain)
+
+
+@pytest.mark.parametrize("domain", ["com", "localhost", "127.0.0.1", "[::1]", "co.in",
+                                    "www.co.in", "co.uk", "myworkdayjobs.com", "github.io",
+                                    "greenhouse.io", "lever.co", "successfactors.com"])
+def test_account_domain_refuses_bare_ip_and_shared_suffixes(domain):
+    with pytest.raises(ValueError):
+        credentials.account_domain(domain)

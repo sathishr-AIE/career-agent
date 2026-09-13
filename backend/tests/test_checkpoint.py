@@ -99,3 +99,53 @@ def test_sweep_orphans_finishes_a_job_whose_latest_attempt_is_terminal(conn):
     conn.commit()
     assert checkpoint.sweep_orphans(conn, set()) == 1
     assert checkpoint.get(conn, 1)["status"] == "resumable"
+
+
+# -- Task 11 ------------------------------------------------------------------
+
+def test_start_records_mode_and_can_submit_and_resets_the_counters(conn):
+    checkpoint.start(conn, 1, "s", "n", mode="auto", can_submit=True)
+    checkpoint.mark_approve_sent(conn, 1)
+    checkpoint.mark_resumable(conn, 1)
+    checkpoint.resume(conn, 1)
+    cp = checkpoint.get(conn, 1)
+    assert (cp["mode"], cp["can_submit"], cp["approve_sent"], cp["resume_count"]) == ("auto", 1, 1, 1)
+    checkpoint.start(conn, 1, "s2", "n2", mode="manual", can_submit=False)
+    cp = checkpoint.get(conn, 1)
+    assert (cp["mode"], cp["can_submit"], cp["approve_sent"], cp["resume_count"], cp["auto_resumed"]) == (
+        "manual", 0, 0, 0, 0)
+
+
+def test_restart_keeps_the_resume_count_and_answers(conn):
+    checkpoint.start(conn, 1, "s", "n", mode="manual", can_submit=True)
+    checkpoint.mark_running(conn, 1, "answered 1", {"q": "a"})
+    checkpoint.mark_resumable(conn, 1)
+    checkpoint.resume(conn, 1)
+    checkpoint.restart(conn, 1, "s2", "n2")
+    cp = checkpoint.get(conn, 1)
+    assert (cp["session_id"], cp["nonce"], cp["resume_count"], cp["answers"], cp["status"]) == (
+        "s2", "n2", 1, {"q": "a"}, "running")
+
+
+def test_sweep_never_makes_a_session_that_sent_an_approve_resumable(conn):
+    """A crashed session after DECISION approve may have clicked Submit."""
+    conn.execute("INSERT INTO job (fingerprint, source, external_id, company, company_normalized,"
+                 " title, title_normalized, url) VALUES ('fp2','ats','2','B','b','AI','ai','https://y')")
+    checkpoint.start(conn, 1, "s", "n", mode="manual", can_submit=True)
+    checkpoint.mark_approve_sent(conn, 1)
+    checkpoint.start(conn, 2, "s", "n", mode="manual", can_submit=False)   # a draft: nothing sendable
+    checkpoint.mark_approve_sent(conn, 2)
+    assert checkpoint.sweep_orphans(conn, set()) == 1
+    assert checkpoint.get(conn, 1)["status"] == "done"
+    assert checkpoint.get(conn, 2)["status"] == "resumable"
+
+
+def test_next_auto_resume_picks_each_checkpoint_once(conn):
+    checkpoint.start(conn, 1, "s", "n", mode="auto", can_submit=True)
+    assert checkpoint.next_auto_resume(conn) is None           # running, not resumable
+    checkpoint.mark_resumable(conn, 1)
+    assert checkpoint.next_auto_resume(conn) == 1
+    checkpoint.set_auto_resumed(conn, 1, True)
+    assert checkpoint.next_auto_resume(conn) is None
+    checkpoint.set_auto_resumed(conn, 1, False)                # a human touch re-arms it
+    assert checkpoint.next_auto_resume(conn) == 1

@@ -372,7 +372,7 @@ def test_build_prompt_carries_account_rules_and_known_logins():
     p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual",
                      can_submit=False, nonce=N, logins=logins)
     assert "approve_account" in p and "need_password" in p
-    assert "Never choose a password yourself" in p
+    assert "You never type, read, or ask for a password" in p and '"filled"' in p
     assert "== KNOWN LOGINS ==" in p and "careers.ses.com (sign in as asha@example.com)" in p
     assert "should-never-appear" not in p
     assert "Never create an account" not in p
@@ -392,7 +392,7 @@ def test_parse_ask_account_kinds_are_validated_strictly():
              origin="needs_answer")
     assert ok["domain"] == "careers.ses.com" and "origin" not in ok
     assert "careers.ses.com" in ok["question"]              # defaulted
-    assert ask(kind="approve_account", domain="ses.com", email="a@x.com")   # login_url optional
+    assert ask(kind="approve_account", domain="ses.com", email="a@x.com") is None  # login_url required
     assert ask(kind="approve_account", domain="ses.com") is None            # no email
     assert ask(kind="approve_account", domain="ses.com", email="nope") is None
     assert ask(kind="approve_account", email="a@x.com") is None             # no domain
@@ -402,6 +402,15 @@ def test_parse_ask_account_kinds_are_validated_strictly():
                    login_url=bad) is None, bad
     assert ask(kind="approve_account", domain="ses.com", email="a@x.com",
                login_url="http://localhost:8080/login")
+
+    for bad in ("co.in", "www.co.in", "myworkdayjobs.com", "github.io", "localhost", "com",
+                "127.0.0.1"):
+        assert ask(kind="approve_account", domain=bad, email="a@x.com",
+                   login_url="https://x.com/join") is None, bad
+    assert ask(kind="approve_account", domain="ses.wd3.myworkdayjobs.com", email="a@x.com",
+               login_url="https://ses.wd3.myworkdayjobs.com/join")
+    # M1: a backslash ends the host in a browser, as in normalize_domain
+    assert ask(kind="need_password", domain="localhost", url="http://evil.com\\@localhost/") is None
 
     good = ask(kind="need_password", domain="ses.com", url="https://careers.ses.com/login")
     assert good["domain"] == "ses.com" and good["question"]
@@ -896,16 +905,16 @@ def test_the_prompt_forbids_creating_accounts_and_accepting_terms(mode, kw):
 
 def test_browser_run_code_unsafe_is_disallowed_at_the_cli():
     """It runs code in Playwright's own Node process, outside the page
-    sandbox; the live draft run called it 32 times. browser_evaluate (page
-    sandbox) stays allowed."""
+    sandbox; the live draft run called it 32 times. browser_evaluate is blocked
+    too (Task 15): it could read a backend-filled password's .value back."""
     cmd = agent_mod.build_cmd("sonnet", Path("C:/nowhere/.mcp-apply.json"),
                               session_id="11111111-1111-4111-8111-111111111111")
     i = cmd.index("--disallowedTools")
     assert cmd[i + 1] == "mcp__playwright__browser_run_code_unsafe"
+    assert cmd[i + 2] == "mcp__playwright__browser_evaluate"
     # variadic flag: the next element must be another flag, never a value
-    assert cmd[i + 2].startswith("--")
+    assert cmd[i + 3].startswith("--")
     assert cmd.count("--disallowedTools") == 1
-    assert "browser_evaluate" not in " ".join(cmd)
     assert cmd[cmd.index("--tools") + 1] == ""
 
 

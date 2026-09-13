@@ -60,6 +60,20 @@ def _no_live_apply_agent(monkeypatch):
     monkeypatch.setattr(ats, "_live_run_agent", _refuse)
     monkeypatch.setattr(chrome, "launch_chrome", _no_chrome)
     monkeypatch.setattr(subprocess, "Popen", _guarded_popen)
+
+    # No test attaches to a real Chrome over CDP either (apply/secret_fill.py
+    # types passwords into it): tests inject fake pages via _live_connect.
+    def _no_cdp(*a, **kw):
+        hits.append(("connect_over_cdp",))
+        raise RuntimeError("test reached a real CDP connection")
+
+    from career_agent.apply import secret_fill
+    monkeypatch.setattr(secret_fill, "_live_connect", _no_cdp)
+    try:
+        from playwright.sync_api import BrowserType
+        monkeypatch.setattr(BrowserType, "connect_over_cdp", _no_cdp)
+    except ImportError:
+        pass
     yield hits
     assert not hits, (f"test reached the live apply engine: {hits} -- "
                       "stub submit() or inject run_agent")

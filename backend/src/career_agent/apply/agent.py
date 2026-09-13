@@ -241,26 +241,28 @@ def _known_logins_section(logins: list[dict]) -> str:
     return (
         "== KNOWN LOGINS ==\n"
         f"{lines}\n"
-        "You do NOT have the password for any of these -- when a site in this list "
-        "asks you to sign in, do not guess or reuse a password from anywhere else. "
-        'Output an ASK of kind "need_password" naming the domain and the url of the page '
-        "you are on, and wait for the password to arrive in the ANSWER."
+        "You do NOT have, and will never receive, the password for any of these. On a "
+        "listed site's sign-in form, enter the email, then output an ASK of kind "
+        '"need_password" naming the domain and the url of the page you are on, and wait: '
+        'the backend fills the password field itself and answers "filled".' 
     )
 
 
-# S5's account wording, spliced into HARD RULES. The backend answers both
-# kinds (web/actions.answer_prompt): approve_account stores a generated
-# password before replying; need_password releases a stored one only when
-# the reported page url is on that domain.
+# S5's account wording, spliced into HARD RULES. The page is untrusted, so the
+# agent never holds a password: the backend fills it into the real page over
+# CDP (apply/secret_fill.py) and answers only "filled", "none" or "exists".
 ACCOUNT_RULES_S5 = (
     "Account creation, registration, or accepting Terms of Use / privacy consent is "
-    'allowed ONLY after an ASK of kind "approve_account" (with domain, email, the '
-    'sign-up page as login_url, and terms_summary) receives an answer of "approve" '
-    "carrying a password in the ANSWER. Never choose a password yourself -- the "
-    'backend supplies it. To sign in to a site in KNOWN LOGINS, ASK kind "need_password" '
-    "with domain and url (the exact address of the page you are on); the password "
-    'arrives in the ANSWER, and an answer of "none" means there is none you may use. '
-    "Never type a password into any field other than that site's own sign-in/sign-up form."
+    'allowed ONLY after an ASK of kind "approve_account" -- emitted while you are ON the '
+    "sign-up form, with domain, email, login_url (that form's exact address) and "
+    'terms_summary -- receives an answer of "approve" with "filled": true. The backend '
+    "has then typed the password into the form's password fields itself: click the "
+    'create/register button. An answer of "exists" means a login is already saved: '
+    "sign in with it instead. To sign in to a site in KNOWN LOGINS, open its sign-in "
+    'form, enter the email, and ASK kind "need_password" with domain and url (the page '
+    'you are on); on "filled": true click sign in; "none" means there is no login you '
+    "may use. You never type, read, or ask for a password -- never choose one, never "
+    "type into a password field, and never ask the human for one."
 )
 
 
@@ -386,7 +388,8 @@ def _steps_section(mode, can_submit) -> str:
         "then END YOUR TURN and do nothing until a line beginning ANSWER: arrives.\n"
         'Account kinds (see HARD RULES) add "domain"; approve_account also "email", '
         '"login_url" and "terms_summary"; need_password also "url" -- the exact address '
-        "of the page you are on.\n"
+        "of the page you are on. Emit them while ON that form and wait for the answer; "
+        "never type a password yourself.\n"
         "The JSON stays on that one line -- escape any newline inside a value as \\n. kind \"choice\" needs a non-empty options "
         "list. A KNOWN ANSWER marked stale is asked too, with that answer as default. "
         "Use memory_key for facts that recur across applications (notice_period, "
@@ -597,7 +600,7 @@ def _allowed_url(url) -> bool:
     if not isinstance(url, str):
         return False
     try:
-        parts = urlsplit(url.strip())
+        parts = urlsplit(url.strip().replace("\\", "/"))   # a browser ends the host at "\\"
         host = parts.hostname
     except ValueError:
         return False
@@ -606,19 +609,21 @@ def _allowed_url(url) -> bool:
 
 
 def _account_ask_ok(p: dict) -> bool:
-    """approve_account: domain + email (+ optional https login_url);
+    """approve_account: an account_domain + email + https login_url;
     need_password: domain + the https url of the page the agent is on, which
     answer_prompt checks against the stored domain. The domain is normalized
     in place, so the card and the store key agree."""
     try:
-        p["domain"] = credentials.normalize_domain(p["domain"])
+        norm = (credentials.account_domain if p["kind"] == "approve_account"
+                else credentials.normalize_domain)
+        p["domain"] = norm(p["domain"])
     except (KeyError, AttributeError, ValueError):
         return False
     if p["kind"] == "approve_account":
         email = p.get("email")
         if not (isinstance(email, str) and "@" in email):
             return False
-        if p.get("login_url") and not _allowed_url(p["login_url"]):
+        if not _allowed_url(p.get("login_url")):
             return False
         p.setdefault("question", f"Create an account at {p['domain']} as {email}?")
     else:
@@ -667,6 +672,7 @@ def parse_ask(line: str, nonce: str) -> dict | None:
     # answer_prompt answers that card WITHOUT the live run -- an agent-sent one
     # would skip the relay and unpark a job mid-run.
     p.pop("origin", None)
+    p.pop("page_urls", None)    # ours too: the backend adds the browser's real urls
     for key, default in (("options", []), ("why", ""), ("memory_key", None),
                          ("default", None), ("sensitive", False)):
         p.setdefault(key, default)
@@ -839,11 +845,13 @@ def build_cmd(model: str, mcp_path, session_id: str,
                         all other MCP configurations" -- excludes every MCP
                         server except the one in --mcp-config.
       --disallowedTools mcp__playwright__browser_run_code_unsafe
-                        that tool runs code in Playwright's Node process
-                        (host access, outside the page sandbox) and the
-                        server has no flag to turn it off; browser_evaluate
-                        (page sandbox) stays allowed. The flag is variadic,
-                        so it is followed by another flag, never a value.
+                        mcp__playwright__browser_evaluate
+                        run_code_unsafe runs code in Playwright's Node
+                        process (host access, outside the page sandbox) and
+                        the server has no flag to turn it off; evaluate could
+                        read a backend-filled password's .value back (Task
+                        15). The flag is variadic, so it is followed by
+                        another flag, never a value.
     Together with WORK_DIR being outside the repo, an injected "run
     `cat ../../.env`" has no tool to run it with and nothing to read.
 
@@ -868,6 +876,7 @@ def build_cmd(model: str, mcp_path, session_id: str,
             "--mcp-config", str(mcp_path), "--strict-mcp-config",
             "--tools", "",
             "--disallowedTools", "mcp__playwright__browser_run_code_unsafe",
+            "mcp__playwright__browser_evaluate",
             "--permission-mode", "bypassPermissions",
             "--input-format", "stream-json",
             "--output-format", "stream-json", "--verbose",
