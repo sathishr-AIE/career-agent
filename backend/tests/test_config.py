@@ -230,3 +230,63 @@ def test_save_candidate_profile_creates_a_file_that_does_not_exist(tmp_path):
     save_candidate_profile(p, CandidateProfile(
         candidate_name="X", candidate_email="x@y.com", candidate_phone="1"))
     assert load_candidate_profile(p).candidate_name == "X"
+
+
+def _full_profile(**kw):
+    from career_agent.config import Address, EduEntry, WorkEntry
+    d = dict(candidate_name="Jane Doe", candidate_email="jane@example.com",
+             candidate_phone="+91-1", gender="female",
+             address=Address(line1="1 Main St", city="Chennai", state="TN",
+                             postal_code="600001", country="India"),
+             work_history=[WorkEntry(company="Acme", title="Engineer",
+                                     start="2022-01", current=True,
+                                     description="Built things"),
+                           WorkEntry(company="Old Co", title="Intern",
+                                     start="2020-06", end="2021-12")],
+             education=[EduEntry(institution="IIT", degree="B.Tech",
+                                 field="CS", start="2016", end="2020")])
+    d.update(kw)
+    return CandidateProfile(**d)
+
+
+def test_full_profile_round_trips(tmp_path):
+    p = tmp_path / "candidate_profile.toml"
+    profile = _full_profile()
+    save_candidate_profile(p, profile)
+    assert load_candidate_profile(p) == profile
+
+
+def test_flat_profile_loads_defaults_and_save_adds_sections_keeping_comments(tmp_path):
+    p = tmp_path / "candidate_profile.toml"
+    p.write_text("# keep me\n" + CANDIDATE, encoding="utf-8")
+    loaded = load_candidate_profile(p)
+    assert loaded.gender == "decline"
+    assert loaded.address.city == ""
+    assert loaded.work_history == [] and loaded.education == []
+
+    save_candidate_profile(p, _full_profile())
+    text = p.read_text(encoding="utf-8")
+    assert text.startswith("# keep me\n")
+    assert "[address]" in text and "[[work_history]]" in text
+    assert load_candidate_profile(p) == _full_profile()
+
+
+def test_replacing_work_history_writes_exactly_one_entry(tmp_path):
+    from career_agent.config import WorkEntry
+    p = tmp_path / "candidate_profile.toml"
+    three = [WorkEntry(company=f"C{i}", title="T") for i in range(3)]
+    save_candidate_profile(p, _full_profile(work_history=three))
+    assert p.read_text(encoding="utf-8").count("[[work_history]]") == 3
+    save_candidate_profile(p, _full_profile(work_history=[WorkEntry(company="Z", title="T")]))
+    assert p.read_text(encoding="utf-8").count("[[work_history]]") == 1
+    assert [w.company for w in load_candidate_profile(p).work_history] == ["Z"]
+
+
+def test_unchanged_sections_keep_their_formatting(tmp_path):
+    p = tmp_path / "candidate_profile.toml"
+    save_candidate_profile(p, _full_profile())
+    text = p.read_text(encoding="utf-8").replace(
+        '[address]\n', '[address]  # home\n')
+    p.write_text(text, encoding="utf-8")
+    save_candidate_profile(p, _full_profile(candidate_phone="+91-2"))
+    assert "[address]  # home" in p.read_text(encoding="utf-8")

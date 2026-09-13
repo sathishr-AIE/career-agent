@@ -8,3 +8,32 @@ candidate_email = "jane@example.com"
 candidate_phone = "+91-90000-00000"
 linkedin_url = ""
 portfolio_url = ""
+
+# Everything below is optional. The apply agent uses it to fill address,
+# gender and previous-experience fields instead of leaving them blank.
+# "decline" means decline to self-identify.
+# gender = "decline"
+
+# [address]
+# line1 = "12 Example Street"
+# city = "Chennai"
+# state = "Tamil Nadu"
+# postal_code = "600001"
+# country = "India"
+
+# One [[work_history]] block per role. Dates are YYYY-MM; leave end = ""
+# and set current = true for the role you hold now.
+# [[work_history]]
+# company = "Acme Corp"
+# title = "Software Engineer"
+# start = "2022-01"
+# end = ""
+# current = true
+# description = "Built the payments API."
+
+# [[education]]
+# institution = "Anna University"
+# degree = "B.E."
+# field = "Computer Science"
+# start = "2016"
+# end = "2020"

@@ -134,6 +134,21 @@ def _files_section(resume_path) -> str:
 
 def _profile_section(profile) -> str:
     first, _, last = profile.candidate_name.strip().partition(" ")
+    gender = ("decline to self-identify" if profile.gender == "decline"
+              else profile.gender)
+    a = profile.address
+    address = ", ".join(p for p in (a.line1, a.city, a.state, a.postal_code,
+                                    a.country) if p) or "(not provided)"
+    # Newest first: current roles, then by start (YYYY-MM sorts as text).
+    work = sorted(profile.work_history, key=lambda w: (w.current, w.start),
+                  reverse=True)
+    work_lines = "\n".join(
+        f"- {w.company} — {w.title} ({w.start}–{w.end or 'present'})"
+        + (f": {w.description}" if w.description else "")
+        for w in work) or "(none recorded)"
+    edu_lines = "\n".join(
+        f"- {e.institution} — {e.degree} in {e.field} ({e.start}–{e.end})"
+        for e in profile.education) or "(none recorded)"
     return (
         "== APPLICANT PROFILE ==\n"
         f"Full name: {profile.candidate_name} (first: {first}, last: {last or '(none)'})\n"
@@ -141,6 +156,10 @@ def _profile_section(profile) -> str:
         f"Phone: {profile.candidate_phone}\n"
         f"LinkedIn: {profile.linkedin_url or 'not provided'}\n"
         f"Portfolio/GitHub: {profile.portfolio_url or 'not provided'}\n"
+        f"Gender: {gender}\n"
+        f"Address: {address}\n"
+        f"Work history:\n{work_lines}\n"
+        f"Education:\n{edu_lines}\n"
         "\n"
         "Standard defaults -- use these unless a KNOWN ANSWER below overrides them:\n"
         "- Age 18 or over: Yes\n"

@@ -11,6 +11,7 @@ import datetime as dt
 import json
 import os
 import sqlite3
+import tomllib
 from pathlib import Path
 
 import docx
@@ -465,13 +466,23 @@ def save_settings(conn: sqlite3.Connection, form: dict, brief_path: Path,
                        form.get("candidate_phone", ""), form.get("linkedin_url", ""),
                        form.get("portfolio_url", ""))
     if form.get("candidate_present") and any(candidate_fields):
+        # The form carries only the five flat fields. Merge them onto the
+        # saved file's raw values so a Settings save never resets gender,
+        # address, work_history or education to their defaults. Raw TOML,
+        # not load_candidate_profile: an invalid flat field on disk must
+        # stay fixable from this form.
+        existing = {}
+        if candidate_path.exists():
+            with open(candidate_path, "rb") as f:
+                existing = tomllib.load(f)
         try:
-            candidate = CandidateProfile(
-                candidate_name=form.get("candidate_name", ""),
-                candidate_email=form.get("candidate_email", ""),
-                candidate_phone=form.get("candidate_phone", ""),
-                linkedin_url=form.get("linkedin_url") or None,
-                portfolio_url=form.get("portfolio_url") or None)
+            candidate = CandidateProfile(**{
+                **existing,
+                "candidate_name": form.get("candidate_name", ""),
+                "candidate_email": form.get("candidate_email", ""),
+                "candidate_phone": form.get("candidate_phone", ""),
+                "linkedin_url": form.get("linkedin_url") or None,
+                "portfolio_url": form.get("portfolio_url") or None})
         except ValidationError as exc:
             for err in exc.errors():
                 field = err["loc"][0] if err["loc"] else "form"

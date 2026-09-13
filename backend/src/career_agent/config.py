@@ -44,6 +44,31 @@ class Board(BaseModel):
     tier: int = 2
 
 
+class Address(BaseModel):
+    line1: str = ""
+    city: str = ""
+    state: str = ""
+    postal_code: str = ""
+    country: str = ""
+
+
+class WorkEntry(BaseModel):
+    company: str
+    title: str
+    start: str = ""  # YYYY-MM
+    end: str = ""    # YYYY-MM, "" when current
+    current: bool = False
+    description: str = ""
+
+
+class EduEntry(BaseModel):
+    institution: str
+    degree: str = ""
+    field: str = ""
+    start: str = ""
+    end: str = ""
+
+
 class CandidateProfile(BaseModel):
     """PII, deliberately kept out of CareerBrief/career_brief.toml, which is
     version-controlled. See candidate_profile.toml.example."""
@@ -52,6 +77,10 @@ class CandidateProfile(BaseModel):
     candidate_phone: str = Field(min_length=1)
     linkedin_url: str | None = None
     portfolio_url: str | None = None
+    gender: str = "decline"
+    address: Address = Field(default_factory=lambda: Address())
+    work_history: list[WorkEntry] = Field(default_factory=list)
+    education: list[EduEntry] = Field(default_factory=list)
 
 
 def load_brief(path: Path) -> CareerBrief:
