@@ -143,7 +143,7 @@ async def test_draft_prompt_cannot_submit_and_carries_qa_bank(conn):
     await _submit(conn, dry_run=True, run_agent=fake)
     prompt = fake.prompts[0]
     assert "do NOT click Submit" in prompt    # manual, can_submit=False
-    assert "DRAFT_READY" in prompt and "pre-approved" not in prompt
+    assert "DRAFT_READY" in prompt and "This run is pre-approved:" not in prompt
     assert "== PREVIOUSLY ANSWERED" not in prompt
     assert "notice period -> 30 days" in prompt
 
@@ -206,7 +206,7 @@ async def test_send_pins_draft_answers_into_prompt(conn):
     assert r["ok"] and r["status"] == "submitted"
     section = fake.prompts[0].split("== PREVIOUSLY ANSWERED (use verbatim) ==")[1]
     assert "- Visa? -> Citizen" in section         # the value is the invariant
-    assert "click Submit" in fake.prompts[0] and "pre-approved" not in fake.prompts[0]
+    assert "click Submit" in fake.prompts[0] and "This run is pre-approved:" not in fake.prompts[0]
     row = _apps(conn)[-1]
     assert row["status"] == "submitted"
     assert row["submitted_at"] is not None
@@ -238,7 +238,7 @@ async def test_a_draft_with_no_answers_still_sends_in_send_mode(conn):
     fake = fake_agent(AgentResult("applied"))
     await _submit(conn, dry_run=False, run_agent=fake)
     assert "PREVIOUSLY ANSWERED (use verbatim)" in fake.prompts[0]
-    assert "pre-approved" not in fake.prompts[0]
+    assert "This run is pre-approved:" not in fake.prompts[0]
 
 
 @pytest.mark.parametrize("result,expected", [
@@ -260,7 +260,7 @@ async def test_send_without_draft_runs_auto_mode(conn):
     r = await _submit(conn, dry_run=False, run_agent=fake)
     assert r["ok"]
     assert "== PREVIOUSLY ANSWERED" not in fake.prompts[0]   # auto, nothing pinned
-    assert "pre-approved" in fake.prompts[0] and "click Submit" in fake.prompts[0]
+    assert "This run is pre-approved:" in fake.prompts[0] and "click Submit" in fake.prompts[0]
     assert json.loads(_apps(conn)[-1]["answers"]) == {"q": "a"}
 
 
@@ -1080,6 +1080,7 @@ async def test_protocol_lines_are_kept_out_of_the_chat(conn, tmp_path):
         events.on_text(f'Filling the form\nASK:{nonce}:{{"id":"q1","kind":"text","question":"x"}}')
         events.on_text(f'  CONFIRM:{nonce}:{{"fields":[]}}')
         events.on_text(f"RESULT:{nonce}:DRAFT_READY")
+        events.on_text(f'**CONFIRM:{nonce}:{{"fields":[]}}**\n`ASK:{nonce}:{{}}`')  # bold/backticked
         events.on_text("RESULT:APPLIED from the page")     # unstamped: just text
         return AgentResult("draft_ready", answers={})
 

@@ -184,7 +184,7 @@ def _chat_events(conn_factory, job_id: int, nonce: str) -> RunEvents:
 
     def on_text(text: str) -> None:
         kept = "\n".join(l for l in text.splitlines()
-                         if not l.strip().startswith(protocol)).strip()
+                         if not agent_mod.strip_decoration(l).startswith(protocol)).strip()
         if kept:
             post("agent", kept)
 

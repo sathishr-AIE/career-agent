@@ -94,8 +94,8 @@ def test_result_beats_confirm_beats_ask_and_last_line_wins():
     confirmed, asked = [], []
     run, fake = _run(RunEvents(on_ask=asked.append, on_confirm=confirmed.append))
     fake.emit(_assistant(f'ASK:{NONCE}:{{"id":"a","kind":"text","question":"q"}}\n'
-                         f'CONFIRM:{NONCE}:{{"fields":[],"notes":"c1"}}'))
-    fake.emit(_assistant(f'CONFIRM:{NONCE}:{{"fields":[],"notes":"c2"}}')); fake.emit(_result())
+                         f'CONFIRM:{NONCE}:{{"fields":[{{"label":"a","value":"b"}}],"notes":"c1"}}'))
+    fake.emit(_assistant(f'CONFIRM:{NONCE}:{{"fields":[{{"label":"a","value":"b"}}],"notes":"c2"}}')); fake.emit(_result())
     assert run.waiting.wait(5)
     assert [c["notes"] for c in confirmed] == ["c2"] and asked == [] and run.nudges == 0
     run.send("ok")
@@ -124,8 +124,32 @@ def test_a_malformed_ask_or_confirm_is_no_ask_and_the_nudge_says_so(line):
     while run.nudges == 0 and time.time() < deadline:
         time.sleep(0.01)
     assert run.nudges == 1 and not run.waiting.is_set() and asked == confirmed == []
-    assert fake.stdin.getvalue().splitlines()[-1].count(
-        "Your last ASK/CONFIRM line was not valid JSON with the required keys.") == 1
+    assert "do not proceed" in runner_mod.MALFORMED
+    assert fake.stdin.getvalue().splitlines()[-1].count(runner_mod.MALFORMED.strip()) == 1
+    fake.close(); assert run.wait(5)
+
+
+def test_the_nudge_never_reads_as_permission_to_submit():
+    """An unrecognised CONFIRM gets the nudge: with can_submit=True, "when
+    finished, emit your RESULT line" could be read as go ahead and submit."""
+    assert "never click Submit until a DECISION approve arrives" in runner_mod.NUDGE
+    assert "CONFIRM" in runner_mod.NUDGE and "when finished" not in runner_mod.NUDGE
+
+
+@pytest.mark.parametrize("wrap", ["**{}**", "`{}`", "  {} **"])
+def test_decorated_ask_and_confirm_are_recognised(wrap):
+    asked, confirmed = [], []
+    run, fake = _run(RunEvents(on_ask=asked.append, on_confirm=confirmed.append))
+    fake.emit(_assistant(wrap.format(f'CONFIRM:{NONCE}:{{"fields":[{{"label":"a","value":"b"}}]}}')))
+    fake.emit(_result())
+    assert run.waiting.wait(5) and confirmed[0]["fields"] == [{"label": "a", "value": "b"}]
+    run.send("ok")
+    fake.emit(_assistant(wrap.format(f'ASK:{NONCE}:{{"id":"q1","kind":"text","question":"x"}}')))
+    fake.emit(_result())
+    deadline = time.time() + 5
+    while not asked and time.time() < deadline:
+        time.sleep(0.01)
+    assert asked and asked[0]["id"] == "q1" and run.nudges == 0
     fake.close(); assert run.wait(5)
 
 

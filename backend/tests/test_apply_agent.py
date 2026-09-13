@@ -153,12 +153,49 @@ def test_parse_ask_requires_nonce_and_shape():
 
 def test_parse_confirm_normalises_fields():
     from career_agent.apply.agent import parse_confirm
-    c = parse_confirm('CONFIRM:n1:{"fields":[{"label":"Name","value":"Asha"},"junk"],"files":["r.docx"]}', "n1")
-    assert c["fields"] == [{"label": "Name", "value": "Asha"}] and c["account_actions"] == []
+    c = parse_confirm('CONFIRM:n1:{"fields":[{"label":"Name","value":"Asha"},{"label":"Years","value":6}],"files":["r.docx"]}', "n1")
+    assert c["fields"] == [{"label": "Name", "value": "Asha"}, {"label": "Years", "value": "6"}]
+    assert c["account_actions"] == []
     assert c["files"] == ["r.docx"] and c["memory_used"] == [] and c["notes"] == ""
     assert parse_confirm('CONFIRM:n1:{"fields":"nope"}', "n1") is None
-    assert parse_confirm('CONFIRM:zz:{"fields":[]}', "n1") is None
-    assert parse_confirm('CONFIRM:n1:{"fields":[],"files":"r.docx"}', "n1")["files"] == []
+    assert parse_confirm('CONFIRM:zz:{"fields":[{"label":"a","value":"b"}]}', "n1") is None
+    one = '{"label":"a","value":"b"}'
+    assert parse_confirm('CONFIRM:n1:{"fields":[%s],"files":"r.docx"}' % one, "n1")["files"] == []
+
+
+def test_parse_confirm_refuses_a_summary_missing_a_field():
+    """A dropped field is one the human approves without seeing -- the whole
+    CONFIRM is invalid instead, so the agent is told to re-emit it."""
+    from career_agent.apply.agent import parse_confirm
+    assert parse_confirm('CONFIRM:n1:{"fields":[{"label":"Visa","value":"Citizen"},'
+                         '{"name":"Salary","value":"40L"}]}', "n1") is None
+    assert parse_confirm('CONFIRM:n1:{"fields":[{"label":"Visa","value":"Citizen"},"junk"]}',
+                         "n1") is None
+    assert parse_confirm('CONFIRM:n1:{"fields":[]}', "n1") is None
+
+
+def test_parsers_see_through_markdown_decoration():
+    from career_agent.apply.agent import parse_ask, parse_confirm, strip_decoration
+    c = parse_confirm('**CONFIRM:n1:{"fields":[{"label":"a","value":"b"}]}**', "n1")
+    assert c["fields"] == [{"label": "a", "value": "b"}]
+    a = parse_ask('`ASK:n1:{"id":"q1","kind":"text","question":"x"}`', "n1")
+    assert a["id"] == "q1"
+    assert strip_decoration("  **`RESULT:n1:APPLIED`** ") == "RESULT:n1:APPLIED"
+
+
+def test_before_applying_forbids_submit_without_an_approve_decision():
+    for mode in ("manual", "auto"):
+        p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode=mode,
+                         can_submit=True, nonce=N)
+        before = p.split("== BEFORE APPLYING ==")[1].split("== BROWSER EFFICIENCY ==")[0]
+        assert ("Never click Submit/Apply unless a DECISION with decision approve has "
+                "arrived for your latest CONFIRM (or this run is pre-approved)") in before
+        assert "escape any newline inside a value as \\n" in before
+    assert "as the final line of the whole run" in p
+    ask = p.split("== HOW TO ASK THE HUMAN ==")[1].split("== BEFORE APPLYING ==")[0]
+    step8 = next(l for l in _steps(p).splitlines() if l.startswith("8."))
+    assert "excepted" not in ask and "SCREENING STRATEGY" in ask
+    assert "SCREENING STRATEGY" in step8 and "as that section says" in step8
 
 
 def test_prompt_teaches_ask_and_confirm_with_nonce():
@@ -182,11 +219,11 @@ def test_end_your_turn_follows_both_ask_and_confirm():
 def test_prompt_submits_only_when_allowed_and_auto_preapproves():
     p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="auto",
                      can_submit=True, nonce="n1")
-    assert "click Submit" in p and "pre-approved" in p
+    assert "click Submit" in p and "This run is pre-approved:" in p
     assert "RESULT:n1:APPLIED" in p.split("== RESULT CODES")[0]
     m = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual",
                      can_submit=True, nonce="n1")
-    assert "pre-approved" not in m
+    assert "This run is pre-approved:" not in m
 
 
 @pytest.mark.parametrize("mode", ["manual", "auto"])
@@ -197,7 +234,8 @@ def test_a_prompt_that_cannot_submit_never_instructs_clicking_submit(mode):
     p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode=mode,
                      can_submit=False, nonce=N)
     lines = [l for l in p.splitlines() if re.search(r"click\w*\W+(the\W+)?submit", l, re.I)]
-    assert lines and all("do NOT click Submit" in l for l in lines)
+    assert lines and all("do NOT click Submit" in l
+                         or l.startswith("Never click Submit/Apply unless") for l in lines)
     assert f"{R}APPLIED" not in p.split("== RESULT CODES")[0]
 
 
@@ -540,7 +578,7 @@ def test_auto_mode_without_pinned_answers_has_no_previously_answered():
     """Nothing was reviewed in auto mode -- deciding a field IS the job."""
     p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx",
                      mode="auto", can_submit=True, nonce=N)
-    assert "PREVIOUSLY ANSWERED (use verbatim)" not in p and "pre-approved" in p
+    assert "PREVIOUSLY ANSWERED (use verbatim)" not in p and "This run is pre-approved:" in p
 
 
 # -- F8: the sentinel is attacker-reachable without a per-run nonce --------

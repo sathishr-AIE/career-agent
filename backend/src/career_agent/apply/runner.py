@@ -9,12 +9,19 @@ from dataclasses import dataclass
 from typing import Callable
 
 from career_agent.apply.agent import (_USAGE_KEYS, _kill_tree, parse_ask,
-                                      parse_confirm, summarize_tool_input,
-                                      user_message)
+                                      parse_confirm, strip_decoration,
+                                      summarize_tool_input, user_message)
 
-NUDGE = ("Continue. If you need something from the human, emit an ASK line; "
-         "when finished, emit your RESULT line.")
-MALFORMED = " Your last ASK/CONFIRM line was not valid JSON with the required keys."
+# Sent when a turn ends with no recognised line -- often a CONFIRM the parser
+# refused. It must never read as "go ahead": with submission enabled, that
+# would send an application nobody reviewed.
+NUDGE = ("Continue. If you need something from the human, emit an ASK line. If you "
+         "have filled the form, emit a CONFIRM line (one line, escape newlines as "
+         "\\n) and wait -- never click Submit until a DECISION approve arrives "
+         "(unless this run is pre-approved). Emit your RESULT line only when the run "
+         "is finished.")
+MALFORMED = (" Your last ASK/CONFIRM line was not valid JSON with the required keys "
+             "-- re-emit it as one valid line; do not proceed.")
 MAX_NUDGES = 3
 
 
@@ -146,7 +153,7 @@ class AgentRun:
         """RESULT beats CONFIRM beats ASK within a turn; the last line of a
         kind wins. Only nonce-stamped lines count (see agent.result_prefix)."""
         turn, self._turn_buf = self._turn_buf, []
-        lines = [l.strip() for t in turn for l in t.splitlines()]
+        lines = [strip_decoration(l) for t in turn for l in t.splitlines()]
 
         def last(kind):
             prefix = f"{kind}:{self.nonce}:"
