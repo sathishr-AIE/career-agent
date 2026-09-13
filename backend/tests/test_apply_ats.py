@@ -1286,6 +1286,120 @@ def test_a_refused_send_leaves_the_prompt_open(conn, runs, state):
     assert chat.open_prompt_for_job(conn, 1)["id"] == pid
 
 
+# -- Task 13: answer_prompt remembers choice/text answers -------------------
+
+def test_answer_prompt_remembers_a_choice_answer_by_default(conn, runs):
+    from career_agent.web import actions
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    pid = _open(conn, "choice", {"id": "q", "kind": "choice", "question": "Notice period?",
+                                 "options": ["30", "60"], "memory_key": "notice_period",
+                                 "sensitive": False})
+    assert actions.answer_prompt(conn, pid, {"answer": "30"})["ok"]
+    assert store.qa_lookup(conn, "Notice period?")["answer"] == "30"
+    keyed = store.qa_by_key(conn, "notice_period")
+    assert keyed is not None and keyed["answer"] == "30"
+    assert keyed["source_job_id"] == 1
+
+
+def test_answer_prompt_remember_false_writes_nothing(conn, runs):
+    from career_agent.web import actions
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    pid = _open(conn, "text", {"id": "q", "kind": "text", "question": "Why?",
+                               "memory_key": None, "sensitive": False})
+    assert actions.answer_prompt(conn, pid, {"answer": "because", "remember": False})["ok"]
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 0
+
+
+def test_answer_prompt_sensitive_card_is_never_remembered(conn, runs):
+    from career_agent.web import actions
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    pid = _open(conn, "text", {"id": "q", "kind": "text", "question": "SSN?",
+                               "memory_key": "ssn", "sensitive": True})
+    assert actions.answer_prompt(conn, pid, {"answer": "123-45-6789"})["ok"]
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 0
+
+
+class RefusingRun(FakeRun):
+    """A run that always refuses send() -- same as a run that ended between
+    the waiting-check and the send call."""
+    def send(self, text):
+        return False
+
+
+def test_answer_prompt_a_refused_send_remembers_nothing(conn, runs):
+    from career_agent.web import actions
+    run = runs[1] = RefusingRun("n")
+    run.waiting.set()
+    pid = _open(conn, "choice", {"id": "q", "kind": "choice", "question": "Notice period?",
+                                 "options": ["30", "60"], "memory_key": "notice_period"})
+    r = actions.answer_prompt(conn, pid, {"answer": "30"})
+    assert not r["ok"] and r["code"] == 409
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 0
+
+
+def test_answer_prompt_confirm_approve_bumps_memory_use_count(conn, runs):
+    from career_agent.web import actions
+    store.qa_remember(conn, "Notice period?", "30 days", memory_key="notice_period")
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    pid = _open(conn, "confirm", {**_confirm(Name="Asha"), "memory_used": ["notice_period"]})
+    assert actions.answer_prompt(conn, pid, {"decision": "approve"})["ok"]
+    assert store.qa_by_key(conn, "notice_period")["use_count"] == 1
+
+
+# -- Fix round 1 -------------------------------------------------------------
+
+def test_answer_relayed_to_the_agent_defaults_remember_true(conn, runs):
+    """The relay's own default must match the storage default (both True) --
+    a review found the relay still defaulting to False while storage
+    defaulted to True."""
+    from career_agent.web import actions
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    pid = _open(conn, "text", {"id": "q", "kind": "text", "question": "Why?"})
+    assert actions.answer_prompt(conn, pid, {"answer": "because"})["ok"]
+    assert json.loads(run.sent[0].split(":", 2)[2])["remember"] is True
+
+
+def test_answer_prompt_survives_a_qa_remember_failure(conn, runs, monkeypatch):
+    """A DB hiccup in qa_remember (e.g. 'database is locked') must not turn
+    an already-delivered answer into a 500/refusal -- the send already
+    happened and the summary must still post."""
+    from career_agent.web import actions
+
+    def boom(*a, **kw):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(store, "qa_remember", boom)
+
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    pid = _open(conn, "choice", {"id": "q", "kind": "choice", "question": "Notice period?",
+                                 "options": ["30", "60"], "memory_key": "notice_period"})
+    r = actions.answer_prompt(conn, pid, {"answer": "30"})
+    assert r["ok"], r
+    texts = [m["content"] for m in chat.messages_after(conn, chat.conversation_for_job(conn, 1))]
+    assert "Notice period? → 30" in texts
+
+
+def test_answer_prompt_survives_a_qa_touch_failure(conn, runs, monkeypatch):
+    from career_agent.web import actions
+
+    def boom(*a, **kw):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(store, "qa_touch", boom)
+
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    pid = _open(conn, "confirm", {**_confirm(Name="Asha"), "memory_used": ["notice_period"]})
+    r = actions.answer_prompt(conn, pid, {"decision": "approve"})
+    assert r["ok"], r
+    texts = [m["content"] for m in chat.messages_after(conn, chat.conversation_for_job(conn, 1))]
+    assert "Approved the application" in texts
+
+
 def _in_flight(conn):
     conn.execute("INSERT INTO application (job_id, resume_version, status, started_at)"
                  " VALUES (1, 'base-v1', 'in_flight', datetime('now'))")
