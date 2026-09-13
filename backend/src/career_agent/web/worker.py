@@ -86,7 +86,11 @@ def next_candidate(conn: sqlite3.Connection) -> sqlite3.Row | None:
 def guard(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
           brief_path: Path) -> str | None:
     """Dashboard-side guardrail. The partial unique index is the real
-    guarantee; this exists to produce a readable message."""
+    guarantee; this exists to produce a readable message.
+
+    Every denial returned here pauses the WHOLE run from apply_tick. Don't
+    add a per-job denial without changing that branch, or one bad job
+    stops the queue."""
     a = conn.execute("SELECT verdict FROM assessment WHERE job_id = ?"
                      " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
     if a is None:

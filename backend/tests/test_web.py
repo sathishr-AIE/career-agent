@@ -2186,3 +2186,24 @@ def test_do_apply_expires_a_stale_card_before_tailoring_and_posts_refusals(clien
     assert r.status_code == 422 and seen == [None]
     texts = [m["content"] for m in chat.messages_after(conn, chat.conversation_for_job(conn, 1))]
     assert "Apply refused: tailor boom" in texts
+
+
+def test_do_apply_never_expires_a_live_runs_card(client, monkeypatch):
+    """Apply on a job whose run is waiting on an ASK must refuse BEFORE the
+    stale-card expiry, or the live run's card closes and the agent times out."""
+    from career_agent import chat
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status, started_at)"
+                 " VALUES (1, 'base-v1', 'in_flight', datetime('now'))")
+    conn.commit()
+    pid = chat.open_prompt(conn, 1, "text", {"id": "q1", "kind": "text", "question": "Notice?"})
+
+    async def no_tailor(*a, **kw):
+        raise AssertionError("must refuse before tailoring")
+
+    monkeypatch.setattr(web.worker, "tailor_for_apply", no_tailor)
+    r = client.post("/api/apply/1")
+    assert r.status_code == 422 and "in_flight" in r.json()["message"]
+    assert conn.execute("SELECT status FROM agent_prompt WHERE id = ?", (pid,)).fetchone()[0] == "open"
+    texts = [m["content"] for m in chat.messages_after(conn, chat.conversation_for_job(conn, 1))]
+    assert any(t.startswith("Apply refused:") and "in_flight" in t for t in texts)

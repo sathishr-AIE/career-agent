@@ -121,6 +121,16 @@ async def _do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
     if denial:
         return {"ok": False, "message": denial}
 
+    # Checked BEFORE the expiry below: a run already live on this job owns
+    # its open cards, and expiring them would strand it waiting on an answer
+    # that can no longer be given (submit() would refuse this apply anyway).
+    live = ats_apply._blocking_status(conn, job_id)
+    if live:
+        return {"ok": False, "message": ats_apply._blocked(job_id, live)["reason"]}
+    run = agent_mod.RUNS.get(job_id)
+    if run is not None and not run.done.is_set():
+        return {"ok": False, "message": f"job {job_id} already has a live agent run"}
+
     # Before any await: a stale needs_answer card answered while this job is
     # tailoring would unpark it and let the worker run it a second time.
     chat.expire_open_prompts(conn, job_id)
