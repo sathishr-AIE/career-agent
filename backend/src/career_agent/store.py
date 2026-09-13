@@ -172,9 +172,13 @@ _MEMORY_KEY_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)+$")
 # that forgot to mark a card sensitive must not still get a password/SSN/PIN
 # shaped answer written into qa_bank, where it would be rendered back into a
 # future application's KNOWN ANSWERS/PREFERENCES prompt in plain text.
+# Short tokens (pan/pin/otp/ssn/cvv) carry \b on BOTH sides -- an unanchored
+# `pan\b` matches inside "Japan", and unanchored `pin`/`otp`/`ssn` match
+# inside ordinary words too. `pin` additionally excludes the routine
+# "PIN code" (India's postal code) sense via a negative lookahead.
 _SECRET_QA_RE = re.compile(
-    r"(?i)password|passcode|ssn|social security|pan\b|aadhaar|otp|cvv|pin\b"
-    r"|bank account|card number")
+    r"(?i)password|passcode|\bssn\b|social security|\bpan\b|aadhaar|\botp\b"
+    r"|\bcvv\b|\bpin\b(?!\s*code)|bank account|card number")
 
 
 def qa_remember(conn, question: str, answer: str, *, kind: str = "text",

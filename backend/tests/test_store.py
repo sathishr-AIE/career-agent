@@ -563,3 +563,23 @@ def test_qa_remember_refuses_a_secret_shaped_memory_key(conn):
     store.qa_remember(conn, "What should we use to log in?", "hunter2",
                       memory_key="account_password")
     assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 0
+
+
+# -- Fix round 2: the secrets regex must not over-match ordinary questions --
+# ("pan" inside "Japan", "pin" inside the routine "PIN code" postal-code
+# question, unanchored "otp"/"ssn") -- those must still be remembered.
+
+@pytest.mark.parametrize("question", [
+    "Password", "Enter your PAN", "SSN", "Bank account number",
+])
+def test_qa_remember_still_refuses_real_secret_questions(conn, question):
+    store.qa_remember(conn, question, "x")
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 0
+
+
+@pytest.mark.parametrize("question", [
+    "Are you authorized to work in Japan?", "What is your PIN code?", "Company name",
+])
+def test_qa_remember_does_not_over_match_ordinary_questions(conn, question):
+    store.qa_remember(conn, question, "x")
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 1
