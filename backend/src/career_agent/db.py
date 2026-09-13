@@ -154,6 +154,18 @@ CREATE TABLE IF NOT EXISTS agent_prompt (
     answered_at     TEXT
 );
 
+CREATE TABLE IF NOT EXISTS apply_checkpoint (
+    job_id         INTEGER PRIMARY KEY REFERENCES job(id),
+    session_id     TEXT NOT NULL,
+    nonce          TEXT NOT NULL,
+    step           TEXT NOT NULL DEFAULT 'start',
+    answers        TEXT NOT NULL DEFAULT '{}',
+    form_url       TEXT,
+    open_prompt_id INTEGER,
+    status         TEXT NOT NULL CHECK (status IN ('running','waiting','resumable','done')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS site_credential (
     id            INTEGER PRIMARY KEY,
     domain        TEXT NOT NULL UNIQUE,

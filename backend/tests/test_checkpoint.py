@@ -1,0 +1,72 @@
+import json
+
+import pytest
+
+from career_agent import db
+from career_agent.apply import checkpoint
+
+
+@pytest.fixture
+def conn(tmp_path):
+    c = db.connect(tmp_path / "t.db")
+    db.init_schema(c)
+    c.execute("INSERT INTO job (fingerprint, source, external_id, company, company_normalized,"
+              " title, title_normalized, url) VALUES ('fp','ats','1','Acme','acme','AI',"
+              " 'ai','https://x')")
+    c.commit()
+    return c
+
+
+def test_transitions_start_waiting_running_done(conn):
+    assert checkpoint.get(conn, 1) is None
+    checkpoint.start(conn, 1, "sess-1", "n0nce")
+    cp = checkpoint.get(conn, 1)
+    assert (cp["status"], cp["step"], cp["answers"], cp["session_id"], cp["nonce"]) == (
+        "running", "start", {}, "sess-1", "n0nce")
+
+    checkpoint.mark_waiting(conn, 1, 7)
+    cp = checkpoint.get(conn, 1)
+    assert (cp["status"], cp["open_prompt_id"]) == ("waiting", 7)
+
+    checkpoint.mark_running(conn, 1, "answered q1", {"Notice?": "30"})
+    checkpoint.mark_running(conn, 1, "answered q2", {"Visa?": "Citizen", "Notice?": "60"})
+    cp = checkpoint.get(conn, 1)
+    assert cp["status"] == "running" and cp["step"] == "answered q2"
+    assert cp["answers"] == {"Notice?": "60", "Visa?": "Citizen"}    # merged
+    assert cp["open_prompt_id"] is None
+
+    checkpoint.finish(conn, 1)
+    assert checkpoint.get(conn, 1)["status"] == "done"
+
+
+def test_a_fresh_start_resets_the_previous_run(conn):
+    checkpoint.start(conn, 1, "old", "n1")
+    checkpoint.mark_running(conn, 1, "answered q1", {"a": "b"})
+    checkpoint.mark_resumable(conn, 1)
+    checkpoint.start(conn, 1, "new", "n2")
+    cp = checkpoint.get(conn, 1)
+    assert (cp["session_id"], cp["nonce"], cp["answers"], cp["status"]) == ("new", "n2", {}, "running")
+
+
+def test_resumable_and_sweep_orphans(conn):
+    conn.execute("INSERT INTO job (fingerprint, source, external_id, company, company_normalized,"
+                 " title, title_normalized, url) VALUES ('fp2','ats','2','B','b','AI','ai','https://y')")
+    checkpoint.start(conn, 1, "s1", "n")
+    checkpoint.start(conn, 2, "s2", "n")
+    checkpoint.mark_waiting(conn, 2, 3)
+    assert checkpoint.sweep_orphans(conn, live_job_ids={2}) == 1     # 2 is still driven
+    assert checkpoint.get(conn, 1)["status"] == "resumable"
+    assert checkpoint.get(conn, 2)["status"] == "waiting"
+    checkpoint.finish(conn, 2)
+    assert checkpoint.sweep_orphans(conn, set()) == 0                # done is never swept
+
+
+def test_continue_message(conn):
+    checkpoint.start(conn, 1, "s1", "abc")
+    checkpoint.mark_running(conn, 1, "answered q1", {"Notice?": "30"})
+    msg = checkpoint.continue_message(checkpoint.get(conn, 1), "abc")
+    first, rest = msg.split("\n", 1)
+    assert first.startswith("CONTINUE:abc:")
+    assert json.loads(first.split(":", 2)[2]) == {"step": "answered q1", "answers": {"Notice?": "30"}}
+    assert "You were interrupted" in rest and "emit it again now" in rest
+    assert "PREVIOUSLY ANSWERED" in rest
