@@ -1091,8 +1091,11 @@ def test_the_sweep_skips_a_job_whose_run_is_still_live(conn, monkeypatch):
 # -- S2: the two-way relay (Task 7) ----------------------------------------
 
 class FakeRun:
-    """Stands in for agent.RUNS[job_id]: same send() contract as AgentRun."""
-    def __init__(self, nonce):
+    """Stands in for agent.RUNS[job_id]: same send() contract as AgentRun, and
+    the same `events` (whose prompt_baseline binds cards to this run)."""
+    def __init__(self, nonce, events=None):
+        from career_agent.apply.runner import RunEvents
+        self.events = events or RunEvents()
         self.nonce, self.sent = nonce, []
         self.waiting, self.done = threading.Event(), threading.Event()
 
@@ -1135,7 +1138,7 @@ async def test_ask_opens_a_prompt_and_answer_reaches_the_run(conn, runs, factory
     from career_agent.web import actions
 
     async def fake(prompt, jid, nonce, events):
-        run = runs[jid] = FakeRun(nonce)
+        run = runs[jid] = FakeRun(nonce, events)
         _waiting_on(run, events, "ask", {
             "id": "q1", "kind": "choice", "question": "Notice?", "options": ["30", "60"],
             "why": "", "memory_key": "notice_period", "default": None, "sensitive": False})
@@ -1155,7 +1158,7 @@ async def test_ask_opens_a_prompt_and_answer_reaches_the_run(conn, runs, factory
 
 async def test_confirm_in_auto_mode_is_auto_approved_and_recorded(conn, runs, factory):
     async def fake(prompt, jid, nonce, events):
-        run = runs[jid] = FakeRun(nonce)
+        run = runs[jid] = FakeRun(nonce, events)
         _waiting_on(run, events, "confirm", _confirm(Name="Asha"))
         assert run.sent == [f'DECISION:{nonce}:{{"decision": "approve"}}']
         return AgentResult("applied")
@@ -1173,7 +1176,7 @@ async def test_auto_approval_of_a_confirm_in_the_result_turn_still_records(conn,
     """The pre-approved agent CONFIRMs and submits without ending its turn:
     the run is not waiting, nothing is sent, and the CONFIRM still counts."""
     async def fake(prompt, jid, nonce, events):
-        run = runs[jid] = FakeRun(nonce)
+        run = runs[jid] = FakeRun(nonce, events)
         events.on_confirm(_confirm(Name="Asha"))          # not waiting
         assert run.sent == []
         return AgentResult("applied")
@@ -1186,7 +1189,7 @@ async def test_confirm_in_manual_mode_waits_for_a_decision(conn, runs, factory):
     from career_agent.web import actions
 
     async def fake(prompt, jid, nonce, events):
-        run = runs[jid] = FakeRun(nonce)
+        run = runs[jid] = FakeRun(nonce, events)
         _waiting_on(run, events, "confirm", _confirm(Name="Asha", Phone="+1"))
         await asyncio.sleep(0.05)
         first = chat.open_prompt_for_job(factory(), jid)
@@ -1210,14 +1213,15 @@ async def test_confirm_in_manual_mode_waits_for_a_decision(conn, runs, factory):
 
 async def test_a_manual_run_with_no_approved_confirm_records_no_answers(conn, runs, factory):
     async def fake(prompt, jid, nonce, events):
-        run = runs[jid] = FakeRun(nonce)
+        run = runs[jid] = FakeRun(nonce, events)
         _waiting_on(run, events, "confirm", _confirm(Name="Asha"))   # never approved
         return AgentResult("draft_ready")
 
     r = await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory)
     assert r["ok"] and r["status"] == "draft"
     assert json.loads(_apps(conn)[-1]["answers"]) == {}
-    assert "confirm_missing" in _event_types(conn)
+    # a CONFIRM was shown but never approved; confirm_missing means none at all
+    assert "draft_without_decision" in _event_types(conn)
     assert chat.open_prompt_for_job(conn, 1) is None, "a finished run leaves no open card"
 
 
@@ -1285,20 +1289,194 @@ def test_a_refused_send_leaves_the_prompt_open(conn, runs, state):
     assert chat.open_prompt_for_job(conn, 1)["id"] == pid
 
 
-def test_a_send_refused_after_recording_reopens_the_prompt(conn, runs):
-    """The run can finish between the live check and the send."""
+def _in_flight(conn):
+    conn.execute("INSERT INTO application (job_id, resume_version, status, started_at)"
+                 " VALUES (1, 'base-v1', 'in_flight', datetime('now'))")
+    conn.commit()
+
+
+def _prompt_status(conn, pid):
+    return conn.execute("SELECT status, answer FROM agent_prompt WHERE id = ?", (pid,)).fetchone()
+
+
+def test_a_send_refused_after_recording_reopens_a_live_runs_card(conn, runs):
+    """The agent can leave the wait between the live check and the send."""
     from career_agent.web import actions
 
     class Racing(FakeRun):
         def send(self, text):
-            self.done.set()
+            self.waiting.clear()
             return super().send(text)
     run = runs[1] = Racing("n")
     run.waiting.set()
+    _in_flight(conn)
     pid = _open(conn, "confirm", _confirm(Name="A"))
     assert not actions.answer_prompt(conn, pid, {"decision": "approve"})["ok"]
-    row = chat.open_prompt_for_job(conn, 1)
-    assert row["id"] == pid and row["answer"] is None
+    row = _prompt_status(conn, pid)
+    assert row["status"] == "open" and row["answer"] is None
+
+
+@pytest.mark.parametrize("ended", ["run_done", "no_in_flight_row"])
+def test_a_refused_card_of_an_ended_run_is_never_reopened(conn, runs, ended):
+    """I5: reopening after the run's expire_open_prompts leaves a zombie card
+    a later run could receive."""
+    from career_agent.web import actions
+
+    class Racing(FakeRun):
+        def send(self, text):
+            if ended == "run_done":
+                self.done.set()
+            else:
+                self.waiting.clear()
+            return super().send(text)
+    run = runs[1] = Racing("n")
+    run.waiting.set()
+    if ended == "run_done":
+        _in_flight(conn)
+    pid = _open(conn, "confirm", _confirm(Name="A"))
+    assert not actions.answer_prompt(conn, pid, {"decision": "approve"})["ok"]
+    assert _prompt_status(conn, pid)["status"] == "expired"
+    assert chat.open_prompt_for_job(conn, 1) is None
+
+
+def test_a_card_older_than_the_live_run_is_refused(conn, runs):
+    """I5(b): a crash leftover must never answer a later run's wait."""
+    from career_agent.apply.runner import RunEvents
+    from career_agent.web import actions
+    stale = _open(conn, "confirm", _confirm(Name="old"))
+    run = runs[1] = FakeRun("n", RunEvents(prompt_baseline=stale))
+    run.waiting.set()
+    r = actions.answer_prompt(conn, stale, {"decision": "approve"})
+    assert r == {"ok": False, "code": 409, "message": "That question is no longer open"}
+    assert run.sent == []
+
+
+def test_only_the_newest_open_card_is_answerable(conn, runs):
+    from career_agent.web import actions
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    older = _open(conn, "text", {"id": "a", "question": "Old?"})
+    newer = _open(conn, "text", {"id": "b", "question": "New?"})
+    assert actions.answer_prompt(conn, older, {"answer": "x"})["code"] == 409
+    assert run.sent == []
+    assert actions.answer_prompt(conn, newer, {"answer": "y"})["ok"]
+
+
+async def test_a_stale_card_after_a_requeue_never_reaches_the_new_run(conn, runs, factory):
+    """I5(a): a crashed run's CONFIRM stays open; the requeued run waiting on
+    an ASK must not receive DECISION approve from it."""
+    from career_agent.web import actions
+    stale = _open(conn, "confirm", _confirm(Name="old"))
+
+    async def fake(prompt, jid, nonce, events):
+        run = runs[jid] = FakeRun(nonce, events)
+        assert _prompt_status(factory(), stale)["status"] == "expired"
+        _waiting_on(run, events, "ask", {"id": "q", "kind": "text", "question": "Notice?",
+                                          "options": [], "why": "", "memory_key": None,
+                                          "default": None, "sensitive": False})
+        r = actions.answer_prompt(factory(), stale, {"decision": "approve"})
+        assert not r["ok"] and run.sent == []
+        return AgentResult("draft_ready")
+
+    r = await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory)
+    assert r["ok"], r
+
+
+@pytest.mark.parametrize("code,status,event", [
+    ("applied", "submitted", "submitted_without_decision"),
+    ("draft_ready", "draft", "draft_without_decision")])
+async def test_a_later_unapproved_confirm_is_not_recorded_as_approved(
+        conn, runs, factory, code, status, event):
+    """I1: the human approved CONFIRM #1; the agent then changed a field and
+    emitted CONFIRM #2 with its RESULT in the same turn. #2's values went out
+    and nobody approved them -- #1 must not be recorded as their review."""
+    from career_agent.web import actions
+
+    async def fake(prompt, jid, nonce, events):
+        run = runs[jid] = FakeRun(nonce, events)
+        _waiting_on(run, events, "confirm", _confirm(Name="Asha", Phone="+1"))
+        first = chat.open_prompt_for_job(factory(), jid)["id"]
+        assert actions.answer_prompt(factory(), first, {"decision": "approve"}, factory)["ok"]
+        events.on_confirm(_confirm(Name="Asha", Phone="+91"))   # RESULT turn: not waiting
+        return AgentResult(code)
+
+    await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory)
+    row = _apps(conn)[-1]
+    assert row["status"] == status and json.loads(row["answers"]) == {}
+    assert event in _event_types(conn) and "confirm_missing" not in _event_types(conn)
+    if code == "applied":
+        assert row["failure_reason"] == "submitted_without_decision"
+
+
+async def test_confirm_missing_means_no_confirm_at_all(conn, runs, factory):
+    await _submit(conn, mode="manual", run_agent=fake_agent(AgentResult("applied")),
+                  conn_factory=factory)
+    assert _apps(conn)[-1]["failure_reason"] == "confirm_missing"
+
+
+async def test_auto_approval_never_overrides_a_human_decision(conn, runs, factory, monkeypatch):
+    """I3: if the human's answer lands first, the auto path must not send
+    approve (nor claim it approved)."""
+    real_open = chat.open_prompt
+
+    def human_cancels_first(c, job_id, kind, payload):
+        pid = real_open(c, job_id, kind, payload)
+        chat.answer_prompt_row(c, pid, {"decision": "cancel"})
+        return pid
+    monkeypatch.setattr(ats_apply.chat, "open_prompt", human_cancels_first)
+
+    async def fake(prompt, jid, nonce, events):
+        run = runs[jid] = FakeRun(nonce, events)
+        _waiting_on(run, events, "confirm", _confirm(Name="Asha"))
+        assert run.sent == [], "auto-approve overrode the human's cancel"
+        return AgentResult("draft_ready")
+
+    await _submit(conn, mode="auto", run_agent=fake, conn_factory=factory)
+    texts = [m["content"] for m in chat.messages_after(conn, chat.conversation_for_job(conn, 1))]
+    assert not any("approved without review" in t for t in texts)
+
+
+@pytest.mark.parametrize("can_submit,expected", [(True, "held_unknown"), (False, "failed")])
+async def test_answer_timeout_after_an_approve_holds_when_it_could_have_submitted(
+        conn, runs, factory, monkeypatch, can_submit, expected):
+    """I4: approve -> Submit -> a post-submit questionnaire ASKs -> silence.
+    That run may have submitted; requeueing it would apply twice."""
+    from career_agent.web import actions
+
+    async def fake(prompt, jid, nonce, events):
+        run = runs[jid] = FakeRun(nonce, events)
+        _waiting_on(run, events, "confirm", _confirm(Name="Asha"))
+        pid = chat.open_prompt_for_job(factory(), jid)["id"]
+        assert actions.answer_prompt(factory(), pid, {"decision": "approve"}, factory)["ok"]
+        return AgentResult("failed", "answer_timeout")
+
+    if can_submit:
+        await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory)
+    else:
+        monkeypatch.setattr(ats_apply, "_live_run_agent", fake)
+        monkeypatch.setattr(ats_apply, "preflight", lambda: None)
+        await _submit(conn, mode="manual", conn_factory=factory)
+    row = _apps(conn)[-1]
+    assert (row["status"], row["failure_reason"]) == (expected, "answer_timeout")
+
+
+async def test_a_cancel_before_the_run_registers_marks_it_cancelled(conn, runs):
+    """Fold: cancellation can land before run_session registers in RUNS; the
+    run's own cancel flag is what stops it spawning claude."""
+    got = {}
+    started = asyncio.Event()
+
+    async def hangs(prompt, jid, nonce, events):
+        got["events"] = events
+        started.set()
+        await asyncio.sleep(30)
+
+    task = asyncio.create_task(_submit(conn, mode="manual", run_agent=hangs))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert got["events"].cancelled.is_set()
 
 
 # -- outcomes by can_submit ------------------------------------------------
@@ -1340,7 +1518,7 @@ async def test_cancelling_the_awaiting_task_kills_the_live_run(conn, runs):
     started = asyncio.Event()
 
     async def hangs(prompt, jid, nonce, events):
-        runs[jid] = FakeRun(nonce)
+        runs[jid] = FakeRun(nonce, events)
         started.set()
         await asyncio.sleep(30)
 

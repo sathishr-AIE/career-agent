@@ -94,6 +94,8 @@ class _LiveRun:
     """A registered run waiting on its prompt: same send() contract as AgentRun."""
     def __init__(self):
         import threading
+        from career_agent.apply.runner import RunEvents
+        self.events = RunEvents()
         self.nonce, self.sent = "n0nce", []
         self.waiting, self.done = threading.Event(), threading.Event()
         self.waiting.set()

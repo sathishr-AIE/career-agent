@@ -559,6 +559,38 @@ def test_an_unanswered_prompt_times_out_as_answer_timeout(child):
     assert child.returncode == -9 and 7 not in agent_mod.RUNS
 
 
+def test_a_writer_blocked_on_a_dead_child_never_wedges_the_session(child):
+    """I2: the child stopped reading, so the prompt write blocks until the
+    process is killed. run_session must kill the tree BEFORE joining the
+    writer, or it hangs forever holding RUNS and the agent lock."""
+    class _BlocksUntilKilled(_KeptStdin):
+        def write(self, s):
+            while child.returncode is None:
+                time.sleep(0.01)
+            raise BrokenPipeError("child is gone")
+    child.stdin = _BlocksUntilKilled()
+    child.emit(_asst("m2", f"{R}APPLIED"))
+    child.emit(_result_msg(0.01))
+
+    out = {}
+    t = threading.Thread(target=lambda: out.setdefault("r", _session(child)), daemon=True)
+    t.start()
+    t.join(20)
+    assert not t.is_alive(), "run_session wedged on a blocked stdin write"
+    assert out["r"].code == "applied" and 7 not in agent_mod.RUNS
+
+
+def test_a_run_cancelled_before_it_spawns_never_spawns(sandboxed):
+    """Fold: the cancel flag is set before run_session registers the run."""
+    spawned = []
+    ev = RunEvents()
+    ev.cancelled.set()
+    r = agent_mod.run_session("prompt", job_id=7, nonce=N, session_id="s-1", events=ev,
+                              timeout_s=5, popen=lambda *a, **kw: spawned.append(1))
+    assert spawned == [] and 7 not in agent_mod.RUNS
+    assert r.code == "failed"
+
+
 async def test_run_agent_names_a_fresh_session_per_run(monkeypatch):
     seen = []
     monkeypatch.setattr(agent_mod, "run_session",

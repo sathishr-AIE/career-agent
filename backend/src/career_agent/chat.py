@@ -133,11 +133,21 @@ def answer_prompt_row(conn, prompt_id: int, answer: dict):
     return conn.execute("SELECT * FROM agent_prompt WHERE id = ?", (prompt_id,)).fetchone()
 
 
-def reopen_prompt_row(conn, prompt_id: int) -> None:
+def reopen_prompt_row(conn, prompt_id: int, run_ended: bool) -> None:
     """Undo answer_prompt_row when the live run refused the answer: an answer
-    the agent never received must not read as given."""
-    conn.execute("UPDATE agent_prompt SET status = 'open', answer = NULL,"
-                 " answered_at = NULL WHERE id = ? AND status = 'answered'", (prompt_id,))
+    the agent never received must not read as given. The card reopens only
+    while its run is live (an in_flight row for the job): reopened after the
+    run's expire_open_prompts it would be a zombie a later run could receive,
+    so it is expired instead. The run's outcome is recorded before its cards
+    expire, which closes the window between the two."""
+    params = (prompt_id,)
+    if not run_ended:
+        conn.execute(
+            "UPDATE agent_prompt SET status = 'open', answer = NULL, answered_at = NULL"
+            " WHERE id = ? AND status = 'answered' AND EXISTS (SELECT 1 FROM application a"
+            "   WHERE a.job_id = agent_prompt.job_id AND a.status = 'in_flight')", params)
+    conn.execute("UPDATE agent_prompt SET status = 'expired', answer = NULL,"
+                 " answered_at = NULL WHERE id = ? AND status = 'answered'", params)
     conn.commit()
 
 

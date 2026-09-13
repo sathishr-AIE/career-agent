@@ -6,7 +6,7 @@ import json
 import queue
 import subprocess
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from career_agent.apply.agent import (_USAGE_KEYS, _kill_tree, parse_ask,
@@ -33,6 +33,10 @@ class RunEvents:
     on_turn_end: Callable[[float | None, dict], None] = lambda c, u: None
     on_ask: Callable[[dict], None] = lambda p: None
     on_confirm: Callable[[dict], None] = lambda p: None
+    # agent_prompt ids <= this belong to earlier runs: the answer API refuses them.
+    prompt_baseline: int = 0
+    # Set when the awaiting task is cancelled, possibly before the run exists.
+    cancelled: threading.Event = field(default_factory=threading.Event)
 
 
 class AgentRun:
@@ -61,6 +65,8 @@ class AgentRun:
 
     # -- process ------------------------------------------------------------
     def start(self, first_message: str) -> None:
+        if self.done.is_set():
+            return          # killed (cancelled) before it spawned: never spawn
         self.proc = self._popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                                 errors="replace", env=self.env, cwd=str(self.cwd), shell=False)
@@ -120,7 +126,9 @@ class AgentRun:
         if not self.done.wait(timeout_s):
             return False
         if self._writer_thread is not None:
-            self._writer_thread.join(timeout_s)
+            # Bounded: a writer blocked on a child that stopped reading only
+            # ends when the process is killed.
+            self._writer_thread.join(10 if timeout_s is None else timeout_s)
         return True
 
     # -- stream (same parsing rules as agent.consume_stream) ----------------

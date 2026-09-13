@@ -224,10 +224,16 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
     run = agent_mod.RUNS.get(row["job_id"])
     if run is None or run.done.is_set() or not run.waiting.is_set():
         return _refuse(409, _NO_RUN)
+    # The card must belong to THIS run and be the one it is waiting on: a
+    # crashed run's leftover (or an older card) must never answer a later wait.
+    newest = chat.open_prompt_for_job(conn, row["job_id"])
+    if (prompt_id <= getattr(getattr(run, "events", None), "prompt_baseline", float("inf"))
+            or newest is None or newest["id"] != prompt_id):
+        return _refuse(409, _CLOSED)
     if chat.answer_prompt_row(conn, prompt_id, body) is None:
         return _refuse(409, _CLOSED)            # answered concurrently
     if not run.send(agent_mod.answer_line(run.nonce, kind, body)):
-        chat.reopen_prompt_row(conn, prompt_id)
+        chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
         return _refuse(409, _NO_RUN)
     chat.post_message(conn, row["conversation_id"], "user", summary)
     return {"ok": True, "message": "Answer sent"}

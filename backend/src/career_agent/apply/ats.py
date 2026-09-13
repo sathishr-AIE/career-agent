@@ -150,17 +150,20 @@ async def _live_run_agent(prompt: str, job_id: int, nonce: str,
         return await agent_mod.run_agent(prompt, job_id=job_id, nonce=nonce,
                                          events=events)
     except asyncio.CancelledError:
-        _kill_live(job_id)     # before cleanup: never leave claude driving a dead Chrome
+        _kill_live(job_id, events)   # before cleanup: never leave claude driving a dead Chrome
         raise
     finally:
         chrome_mod.cleanup(proc)
 
 
-def _kill_live(job_id: int) -> None:
+def _kill_live(job_id: int, events: RunEvents) -> None:
     """A cancelled await does not stop the to_thread worker: the claude
-    session would keep running unobserved. Kill it."""
+    session would keep running unobserved. Flag the run FIRST (run_session
+    checks the flag after registering, so a run not yet registered never
+    spawns), then kill it if it is registered -- only if it is this run."""
+    events.cancelled.set()
     run = agent_mod.RUNS.get(job_id)
-    if run is not None:
+    if run is not None and getattr(run, "events", events) is events:
         run.kill()
 
 
@@ -169,7 +172,8 @@ _NARRATED_TOOLS = {"browser_navigate", "browser_file_upload", "browser_click",
                    "browser_fill_form"}
 
 
-def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual") -> RunEvents:
+def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual",
+                 prompt_baseline: int = 0) -> RunEvents:
     """RunEvents that narrate a run into the job's conversation, or no-ops
     when there is no conn_factory.
 
@@ -186,18 +190,20 @@ def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual") ->
     ASK and CONFIRM open an agent_prompt card. In auto mode a CONFIRM is
     approved on the spot (the prompt pre-approves it) and DECISION approve
     is sent if the run is waiting -- the ONLY approval not given by a human
-    through actions.answer_prompt."""
-    def with_conn(fn, what: str) -> None:
+    through actions.answer_prompt, and only when that approval is the one
+    recorded: a human answer that landed first wins."""
+    def with_conn(fn, what: str):
         if conn_factory is None:
-            return
+            return None
         try:
             c = conn_factory()
             try:
-                fn(c)
+                return fn(c)
             finally:
                 c.close()
         except Exception:
             log.warning("could not record %s for job %s", what, job_id, exc_info=True)
+            return None
 
     def post(role: str, content: str) -> None:
         with_conn(lambda c: chat.post_message(
@@ -209,12 +215,12 @@ def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual") ->
     def on_confirm(payload: dict) -> None:
         def record(c):
             pid = chat.open_prompt(c, job_id, "confirm", payload)
-            if mode == "auto":
-                chat.answer_prompt_row(c, pid, {"decision": "approve"})
-                chat.post_message(c, chat.conversation_for_job(c, job_id), "system",
-                                  "Auto mode: application summary approved without review")
-        with_conn(record, "a CONFIRM")
-        if mode == "auto":
+            if mode != "auto" or chat.answer_prompt_row(c, pid, {"decision": "approve"}) is None:
+                return False
+            chat.post_message(c, chat.conversation_for_job(c, job_id), "system",
+                              "Auto mode: application summary approved without review")
+            return True
+        if with_conn(record, "a CONFIRM"):
             run = agent_mod.RUNS.get(job_id)
             if run is not None:     # False when not waiting: the pre-approved agent went on
                 run.send(agent_mod.answer_line(nonce, "confirm", {"decision": "approve"}))
@@ -232,7 +238,8 @@ def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual") ->
         if kept:
             post("agent", kept)
 
-    return RunEvents(on_text=on_text, on_tool=on_tool, on_ask=on_ask, on_confirm=on_confirm)
+    return RunEvents(on_text=on_text, on_tool=on_tool, on_ask=on_ask, on_confirm=on_confirm,
+                     prompt_baseline=prompt_baseline)
 
 
 def _resume_text(row) -> str:
@@ -330,45 +337,55 @@ def _prior_failures(conn, job_id: int) -> int:
         " WHERE job_id = ? AND status = 'failed'", (job_id,)).fetchone()["n"]
 
 
-def _approved_answers(conn, job_id: int, after_prompt_id: int) -> dict | None:
-    """{label: value} from this run's last APPROVED CONFIRM, or None when no
-    CONFIRM was approved -- answers are never fabricated."""
-    row = conn.execute(
-        "SELECT payload FROM agent_prompt WHERE job_id = ? AND id > ?"
-        " AND kind = 'confirm' AND status = 'answered'"
-        " AND json_extract(answer, '$.decision') = 'approve'"
-        " ORDER BY id DESC LIMIT 1", (job_id, after_prompt_id)).fetchone()
-    if row is None:
-        return None
-    return {f["label"]: f["value"] for f in json.loads(row["payload"])["fields"]}
+def _confirm_outcome(conn, job_id: int, baseline: int) -> tuple[dict, str | None, bool]:
+    """(answers, gap, approved_any) for this run's cards (ids > baseline).
+
+    Answers are the fields of the run's LATEST CONFIRM, and only if that very
+    card was approved: a later unapproved CONFIRM (a field changed after an
+    approval) must never be recorded under the earlier approval. gap is
+    `confirm_missing` for no CONFIRM at all, `unapproved` for a latest CONFIRM
+    nobody approved. approved_any: any DECISION approve went out this run."""
+    rows = conn.execute(
+        "SELECT payload, status, json_extract(answer, '$.decision') AS decision"
+        " FROM agent_prompt WHERE job_id = ? AND id > ? AND kind = 'confirm'"
+        " ORDER BY id", (job_id, baseline)).fetchall()
+    approved_any = any(r["status"] == "answered" and r["decision"] == "approve" for r in rows)
+    if not rows:
+        return {}, "confirm_missing", approved_any
+    latest = rows[-1]
+    if latest["status"] != "answered" or latest["decision"] != "approve":
+        return {}, "unapproved", approved_any
+    return ({f["label"]: f["value"] for f in json.loads(latest["payload"])["fields"]},
+            None, approved_any)
 
 
 def _record_outcome(conn, job_id: int, app_id: int, url: str, result,
-                    detail: str, can_submit: bool, answers: dict | None) -> dict:
+                    detail: str, can_submit: bool, confirm: tuple) -> dict:
     """The one outcome recorder: turns this run's in_flight row into what
     happened. Every non-submitted UPDATE/DELETE is guarded on
     `status = 'in_flight'`: a run can outlive sweep_stale_in_flight and come
     back to find its row held_unknown, and downgrading that re-admits a job
     this run may already have submitted."""
     code = result.code
+    answers, gap, approved_any = confirm
     event = lambda type_, payload: conn.execute(
         "INSERT INTO event (job_id, type, payload) VALUES (?, ?, ?)",
         (job_id, type_, payload))
 
     if code == "applied" and can_submit:
-        # Recorded regardless of a missing approved CONFIRM -- the send
+        # Recorded regardless of a missing/unapproved CONFIRM -- the send
         # happened, that is the irreversible truth -- but never silently:
         # failure_reason on a 'submitted' row is the gap marker. Unguarded on
         # purpose: held_unknown -> submitted is the truthful upgrade.
-        gap = "confirm_missing" if answers is None else None
+        slug = {"unapproved": "submitted_without_decision"}.get(gap, gap)
         conn.execute(
             "UPDATE application SET status = 'submitted', answers = ?,"
             " submitted_at = datetime('now'), transcript_path = ?,"
             " failure_reason = ? WHERE id = ?",
-            (json.dumps(answers or {}), result.transcript_path or None, gap, app_id))
+            (json.dumps(answers), result.transcript_path or None, slug, app_id))
         event("submitted", url)
-        if gap:
-            event(gap, f"submitted with no approved CONFIRM: {result.transcript_path or url}")
+        if slug:
+            event(slug, f"submitted without an approved latest CONFIRM: {result.transcript_path or url}")
         conn.commit()
         return {"ok": True, "job_id": job_id, "status": "submitted"}
 
@@ -376,9 +393,10 @@ def _record_outcome(conn, job_id: int, app_id: int, url: str, result,
         conn.execute(
             "UPDATE application SET status = 'draft', answers = ?, transcript_path = ?"
             " WHERE id = ? AND status = 'in_flight'",
-            (json.dumps(answers or {}), result.transcript_path or None, app_id))
-        if answers is None:
-            event("confirm_missing", f"draft with no approved CONFIRM: {result.transcript_path or url}")
+            (json.dumps(answers), result.transcript_path or None, app_id))
+        if gap:
+            slug = {"unapproved": "draft_without_decision"}.get(gap, gap)
+            event(slug, f"draft without an approved latest CONFIRM: {result.transcript_path or url}")
         conn.commit()
         return {"ok": True, "job_id": job_id, "status": "draft"}
 
@@ -403,10 +421,12 @@ def _record_outcome(conn, job_id: int, app_id: int, url: str, result,
         status, reason = "held_unknown", "applied_during_draft"
     else:
         reason = _reason_of(result)
-        # answer_timeout: the agent only waits at ASK/CONFIRM and CONFIRM
-        # precedes Submit, so a wait-kill cannot have submitted. Unknown-state
-        # reasons hold only when a submit was possible at all.
-        if can_submit and is_unknown_state(reason):
+        # Unknown-state reasons hold only when a submit was possible at all.
+        # answer_timeout is retryable unless a DECISION approve went out in a
+        # run that could submit: a post-submit questionnaire can ASK after the
+        # Submit click, and requeueing that would apply twice.
+        if can_submit and (is_unknown_state(reason)
+                           or (reason == "answer_timeout" and approved_any)):
             status = "held_unknown"
         else:
             status = classify_failure(reason, _prior_failures(conn, job_id))
@@ -441,7 +461,7 @@ async def _run(runner, prompt: str, job_id: int, nonce: str,
                  result.duration_ms, result.transcript_path or "none")
         return result, ""
     except asyncio.CancelledError:
-        _kill_live(job_id)
+        _kill_live(job_id, events)
         raise
     except agent_mod.PreconditionError as exc:
         # submit()'s preflight normally catches this first; reaching here
@@ -555,7 +575,6 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
     # prompt teaches and the only one the parsers accept back -- a job page
     # cannot guess it, so it cannot forge an outcome, a CONFIRM, or an ASK.
     nonce = agent_mod.new_nonce()
-    events = _chat_events(conn_factory, job_id, nonce, mode)
     prompt = agent_mod.build_prompt(*prompt_args, mode=mode, can_submit=can_submit,
                                     nonce=nonce, score=score)
 
@@ -571,8 +590,11 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
         live = _blocking_status(conn, job_id)
         if live:
             return _blocked(job_id, live)
-        # This run's cards are the ones created after this point.
-        before = conn.execute("SELECT COALESCE(MAX(id), 0) m FROM agent_prompt").fetchone()["m"]
+        # A crashed run's cards can never be answered; this run's cards are
+        # the ones created after `baseline` (the answer API refuses older).
+        chat.expire_open_prompts(conn, job_id)
+        baseline = conn.execute("SELECT COALESCE(MAX(id), 0) m FROM agent_prompt").fetchone()["m"]
+        events = _chat_events(conn_factory, job_id, nonce, mode, baseline)
         cur = conn.execute(
             "INSERT INTO application (job_id, resume_version, status, started_at)"
             " VALUES (?, ?, 'in_flight', datetime('now'))",
@@ -580,6 +602,9 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
         app_id = cur.lastrowid
         conn.commit()
         result, detail = await _run(runner, prompt, job_id, nonce, events)
+    # Outcome first, cards second: once the in_flight row is gone a refused
+    # answer can no longer reopen a card (chat.reopen_prompt_row).
+    outcome = _record_outcome(conn, job_id, app_id, row["url"], result, detail,
+                              can_submit, _confirm_outcome(conn, job_id, baseline))
     chat.expire_open_prompts(conn, job_id)
-    return _record_outcome(conn, job_id, app_id, row["url"], result, detail,
-                           can_submit, _approved_answers(conn, job_id, before))
+    return outcome

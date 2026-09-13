@@ -460,7 +460,8 @@ def build_prompt(job, profile, brief, qa_rows, resume_text, resume_path, *,
 def parse_result(output: str, nonce: str) -> AgentResult:
     """Last RESULT line wins -- the agent may hit a failure, recover, and end
     on a different code. The answers of a draft or a send come from the
-    run's approved CONFIRM (ats._approved_answers), not from this line.
+    run's latest CONFIRM if it was approved (ats._confirm_outcome), not from
+    this line.
 
     Only lines carrying this run's token count (see result_prefix): a
     `RESULT:` line without it, or with someone else's, is not a result at
@@ -771,6 +772,10 @@ def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events
     RUNS[job_id] = run
     start = time.time()
     try:
+        # Registered first, flag checked second; ats._kill_live sets the flag
+        # first and reads RUNS second -- so a cancel is never missed.
+        if events.cancelled.is_set():
+            run.kill()
         run.start(prompt)
         worked = waited = 0.0
         last = time.monotonic()
@@ -789,9 +794,10 @@ def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events
             if killed_for:
                 run.kill()
                 break
-        run.wait(None)
     finally:
         RUNS.pop(job_id, None)
+        # Kill BEFORE joining the threads: a writer blocked on a child that
+        # stopped reading only returns once the child is gone.
         if run.proc is not None:
             if run.proc.poll() is None:
                 _kill_tree(run.proc.pid)
@@ -801,8 +807,9 @@ def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events
                 pass
         # `done` is set at the RESULT turn, before the reader has drained
         # the pipe: wait for it, or trailing output misses the transcript.
-        if run._reader_thread is not None:
-            run._reader_thread.join(timeout=10)
+        for thread in (run._reader_thread, run._writer_thread):
+            if thread is not None:
+                thread.join(timeout=10)
 
     duration_ms = int((time.time() - start) * 1000)
     transcript = _write_transcript(log_dir, job_id, run.transcript, run.cost_total,
