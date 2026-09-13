@@ -72,6 +72,14 @@ def set_auto_resumed(conn, job_id: int, flag: bool) -> None:
     _set(conn, job_id, "auto_resumed = ?", int(flag))
 
 
+def release_claim(conn, job_id: int) -> None:
+    """Undo a human Continue's claim -- only while it is still that claim: a
+    checkpoint the worker's own session has since taken is left alone."""
+    conn.execute("UPDATE apply_checkpoint SET auto_resumed = 0, updated_at = datetime('now')"
+                 " WHERE job_id = ? AND status = 'resumable' AND auto_resumed = 1", (job_id,))
+    conn.commit()
+
+
 def next_auto_resume(conn) -> int | None:
     """Only an auto session: a manual one (an "Apply anyway" on a gate skip
     included) restarted by the auto worker would submit what nobody reviewed."""
