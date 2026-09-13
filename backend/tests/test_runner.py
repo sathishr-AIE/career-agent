@@ -153,3 +153,28 @@ def test_start_does_not_deadlock_against_a_child_that_writes_before_reading():
     fake.emit(_assistant(f"RESULT:{NONCE}:APPLIED")); fake.emit(_result()); fake.close()
     assert run.wait(5) and run.result_line == f"RESULT:{NONCE}:APPLIED"
     assert "hello agent" in fake.stdin.getvalue()
+
+
+def test_default_popen_is_resolved_at_call_time_so_the_guard_catches_it(_no_live_apply_agent):
+    """popen bound as a default at import time could not be reached by a
+    later patch of subprocess.Popen -- a Task 5-7 test would spawn a paid
+    `claude`. The path doesn't exist, so even an unguarded spawn fails."""
+    import pytest
+    run = AgentRun(cmd=[r"C:\nonexistent\claude.exe", "-p"], cwd=".", env={},
+                   nonce=NONCE, events=RunEvents())
+    with pytest.raises(RuntimeError, match="spawn"):
+        run.start("hello")
+    assert _no_live_apply_agent == [("popen", r"C:\nonexistent\claude.exe")]
+    _no_live_apply_agent.clear()
+
+
+def test_a_raising_callback_closes_stdin_so_the_session_ends():
+    def boom(payload):
+        raise ValueError("handler bug")
+    run, fake = _run(RunEvents(on_ask=boom))
+    fake.emit(_assistant(f'ASK:{NONCE}:{{"id":"q1"}}')); fake.emit(_result())
+    assert run.wait(5)
+    assert getattr(fake.stdin, "was_closed", False)
+    run._reader_thread.join(5)
+    assert not run._reader_thread.is_alive()
+    fake.close()

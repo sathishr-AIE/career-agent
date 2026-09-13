@@ -186,7 +186,14 @@ def test_dismiss_records_the_human_decision(client):
     assert "human_dismissed" in types
 
 
-def test_override_on_a_skip_records_the_override(client):
+def test_override_on_a_skip_records_the_override(client, monkeypatch):
+    # Without a stub this ran the real apply engine (Chrome + a paid
+    # `claude` session) on every suite run; the event is all it checks.
+    async def fake_submit(conn, job_id, dry_run, brief=None, profile=None,
+                          resume_version=None):
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
     r = client.post("/override/2")
     assert r.status_code == 200
     conn = db.connect(web.DB_PATH)

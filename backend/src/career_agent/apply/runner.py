@@ -35,9 +35,12 @@ def _parse_payload(line: str, prefix: str) -> dict:
 
 class AgentRun:
     def __init__(self, cmd, cwd, env, nonce: str, events: RunEvents,
-                 popen=subprocess.Popen):
+                 popen=None):
         self.cmd, self.cwd, self.env, self.nonce, self.events = cmd, cwd, env, nonce, events
-        self._popen = popen
+        # Resolved per instance, not bound as a default at import time, so
+        # a later patch of subprocess.Popen (tests/conftest.py's guard) wins.
+        self._popen = popen or subprocess.Popen
+        self._reader_thread: threading.Thread | None = None
         self.proc = None
         self.transcript = ""
         self._turn_buf: list[str] = []
@@ -58,7 +61,8 @@ class AgentRun:
         # Reader FIRST: the CLI writes a large --verbose init line before it
         # reads stdin, so a write that waits on it with nobody draining
         # stdout deadlocks both processes on full pipes.
-        threading.Thread(target=self._reader, daemon=True).start()
+        self._reader_thread = threading.Thread(target=self._reader, daemon=True)
+        self._reader_thread.start()
         self._write_user(first_message)
 
     def _write_user(self, text: str) -> None:
@@ -118,6 +122,7 @@ class AgentRun:
                             self.events.on_tool(name, summary)
                 elif t == "result":
                     cost = msg.get("total_cost_usd")
+                    # ponytail: sums per-turn total_cost_usd per spec §3; if the CLI reports a process-cumulative total in multi-turn stream-json, take the LAST value per process instead (and sum across --resume processes) -- verify on the first live run.
                     if cost is not None:
                         self.cost_total = (self.cost_total or 0.0) + cost
                     if msg.get("result"):
@@ -125,6 +130,10 @@ class AgentRun:
                     self.events.on_turn_end(cost, dict(self.usage_total))
                     self._end_of_turn()
         finally:
+            # A raising callback ends this reader early: without EOF on
+            # stdin, `claude` (and its Chrome) would idle on forever.
+            if self.result_line is None and self.proc.poll() is None:
+                self._close_stdin()
             self.done.set()
 
     def _add_usage(self, message: dict) -> None:
