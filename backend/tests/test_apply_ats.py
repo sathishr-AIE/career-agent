@@ -1016,3 +1016,23 @@ async def test_two_jobs_do_not_share_one_staged_resume(conn, tmp_path):
     assert staged[1].name == staged[job2].name == "Jane_Doe_Resume.docx"
     assert staged[1].read_text(encoding="utf-8") == "resume for job 1"
     assert staged[job2].read_text(encoding="utf-8") == "resume for job 2"
+
+
+# -- live-safety FIX 1: account_required is a one-time human fix -----------
+
+def test_account_required_is_retryable_not_permanent_nor_unknown():
+    assert "account_required" not in ats_apply.PERMANENT_REASONS
+    assert not ats_apply.is_unknown_state("account_required")
+    assert ats_apply.classify_failure("account_required", 0) == "failed"
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+async def test_account_required_records_a_retryable_failure(conn, dry_run):
+    """The human creates the account (or gives the consent) in the agent's
+    Chrome profile once, then the same job is re-attempted."""
+    r = await _submit(conn, dry_run=dry_run,
+                      run_agent=fake_agent(AgentResult("failed", "account_required")))
+    assert not r["ok"]
+    row = _apps(conn)[-1]
+    assert row["status"] == "failed"
+    assert row["failure_reason"] == "account_required"

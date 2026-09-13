@@ -476,3 +476,23 @@ def test_platform_refusals_require_seeing_the_button():
     assert "no Apply button is visible" in rules
     assert "do not guess" in rules
     assert "RESULT:LOGIN_ISSUE" in rules
+
+
+# -- live-safety FIX 1: no accounts, no legal consent, in any mode ----------
+
+@pytest.mark.parametrize("mode,kw", [("auto", {}), ("draft", {}),
+                                     ("send", {"pinned_answers": {"Visa?": "Citizen"}})])
+def test_the_prompt_forbids_creating_accounts_and_accepting_terms(mode, kw):
+    """Live draft run on SuccessFactors: it registered an account in the
+    candidate's name and accepted Terms + a data-consent statement, because
+    nothing said not to and LOGIN_ISSUE read 'could not sign in or register'."""
+    p = _prompt(N, mode=mode, **kw)
+    assert "Never create an account" in p
+    assert "Never accept Terms of Use" in p
+    assert f"RESULT:{N}:FAILED:account_required" in p
+    login_line = next(l for l in p.splitlines()
+                      if l.startswith(f"RESULT:{N}:LOGIN_ISSUE"))
+    assert "register" not in login_line.lower()
+    # the login-wall step must route to account_required, not LOGIN_ISSUE
+    step5 = next(l for l in _steps(p).splitlines() if l.startswith("5."))
+    assert "account_required" in step5

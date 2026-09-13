@@ -31,7 +31,10 @@ SUBMISSION_IMPLEMENTED = False
 # Reasons a retry can never fix: the posting is gone, the platform is one
 # we refuse on principle, or the candidate is not eligible. Anything else
 # (stuck, page_error, login_issue, free text) is retryable until
-# MAX_ATTEMPTS. See docs/lld-apply-button-v2.md section 5.2.
+# MAX_ATTEMPTS -- account_required included on purpose: it needs one human
+# action (create the account / give the consent in the agent's Chrome
+# profile), after which the same job should be re-attempted. See
+# docs/lld-apply-button-v2.md section 5.2.
 PERMANENT_REASONS = {
     "expired", "sso_required", "easy_apply", "naukri_platform",
     "not_eligible_location", "already_applied", "not_a_job_application",

@@ -128,7 +128,16 @@ def _hard_rules_section() -> str:
         "is not covered by either, do NOT guess -- stop and output "
         "RESULT:NEEDS_ANSWER:<the exact question text> as your final line.\n"
         "Use the candidate's name exactly as given in PROFILE on every field asking for "
-        "a legal or full name -- do not shorten, expand, or otherwise \"clean up\" it."
+        "a legal or full name -- do not shorten, expand, or otherwise \"clean up\" it.\n"
+        "Never create an account, register, or sign up on any site. If an application "
+        "requires an account and none is already signed in, stop and output "
+        "RESULT:FAILED:account_required as your final line.\n"
+        "Never accept Terms of Use, privacy/data-consent statements, or any other legal "
+        "agreement on the candidate's behalf -- do not tick such a checkbox or click an "
+        "\"I agree\"/\"Accept\" button for one. If proceeding requires accepting one, "
+        "stop and output RESULT:FAILED:account_required as your final line. The "
+        "candidate creates the account or gives the consent themselves, then this job "
+        "is retried."
     )
 
 
@@ -242,7 +251,8 @@ def _steps_section(mode) -> str:
         "3. Run the LOCATION CHECK. Stop now if it fails.\n"
         "4. Find and click the real Apply button (not \"Save\" or \"Share\").\n"
         "5. If a login wall appears: check PLATFORM RULES for SSO first; otherwise look "
-        "for a guest/no-account path. If none exists, output RESULT:LOGIN_ISSUE.\n"
+        "for a guest/no-account path. If none exists, do NOT register -- output "
+        "RESULT:FAILED:account_required (see HARD RULES).\n"
         "6. Upload the resume from FILES. If the form auto-parsed and pre-filled fields "
         "from a different, previously uploaded resume, delete that upload first and "
         "upload the correct file fresh.\n"
@@ -320,13 +330,14 @@ def _result_codes_section() -> str:
         "output ANSWERS_JSON first)\n"
         "RESULT:EXPIRED -- posting closed / no longer accepting applications\n"
         "RESULT:CAPTCHA -- a CAPTCHA blocks progress (do not try to solve it)\n"
-        "RESULT:LOGIN_ISSUE -- could not sign in or register\n"
+        "RESULT:LOGIN_ISSUE -- an existing sign-in failed, or the page stays signed out\n"
         "RESULT:NEEDS_ANSWER:<question> -- a hard-fact question not covered by PROFILE "
         "or KNOWN ANSWERS\n"
         "RESULT:FAILED:<reason> -- anything else; use slugs sso_required, easy_apply,\n"
         "    naukri_platform, not_eligible_location, already_applied, "
         "not_a_job_application,\n"
-        "    unsafe_permissions, unsafe_verification, stuck, page_error when they fit"
+        "    unsafe_permissions, unsafe_verification, account_required, stuck, page_error\n"
+        "    when they fit (account_required: an account or a legal agreement is needed)"
     )
 
 
