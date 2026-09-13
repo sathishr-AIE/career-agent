@@ -66,6 +66,21 @@ def list_conversations(conn) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def jobs_needing_backfill(conn) -> list[int]:
+    """Job ids with pre-chat history whose conversation has no marker yet.
+    The conversations endpoint polls every 3s, so it asks this one question
+    instead of asking backfill_job (a query per job) about every job."""
+    rows = conn.execute(
+        "SELECT DISTINCT h.job_id FROM ("
+        "  SELECT job_id FROM application WHERE job_id IS NOT NULL"
+        "  UNION SELECT job_id FROM event WHERE job_id IS NOT NULL) h"
+        " LEFT JOIN conversation c ON c.job_id = h.job_id"
+        " WHERE c.id IS NULL OR NOT EXISTS ("
+        "   SELECT 1 FROM message m WHERE m.conversation_id = c.id AND m.content = ?)",
+        (_BACKFILL_MARK,)).fetchall()
+    return [r["job_id"] for r in rows]
+
+
 def backfill_job(conn, job_id: int) -> int:
     """Render a job's pre-chat history (events, application rows) as system
     messages, once. The marker message is hidden by messages_after."""

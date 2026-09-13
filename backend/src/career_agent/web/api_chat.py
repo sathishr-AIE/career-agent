@@ -17,10 +17,8 @@ def _app():
 def api_conversations():
     conn = _app()._conn()
     home_id = chat.home_conversation(conn)
-    for r in conn.execute("SELECT DISTINCT job_id FROM ("
-                          "SELECT job_id FROM application UNION SELECT job_id FROM event"
-                          " WHERE job_id IS NOT NULL)"):
-        chat.backfill_job(conn, r["job_id"])
+    for job_id in chat.jobs_needing_backfill(conn):
+        chat.backfill_job(conn, job_id)
     return {"conversations": chat.list_conversations(conn), "home_id": home_id}
 
 

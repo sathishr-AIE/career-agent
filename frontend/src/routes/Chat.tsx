@@ -27,6 +27,7 @@ export function Chat() {
   // already in flight when you switched conversations must not append its
   // messages (or move the cursor) into the new one.
   const shown = useRef<number | null>(null)
+  const inFlight = useRef(false)
   const cid = id ? Number(id) : homeId
 
   const loadConvs = useCallback(() => {
@@ -41,20 +42,29 @@ export function Chat() {
   }, [])
 
   const loadMessages = useCallback(() => {
-    if (!cid) return Promise.resolve()
+    // One request at a time: the interval and send()'s follow-up would
+    // otherwise read the same cursor and append the same messages twice.
+    if (!cid || inFlight.current) return Promise.resolve()
+    inFlight.current = true
     return get<{ messages: ChatMessage[]; open_prompt: OpenPrompt | null }>(
       `/api/chat/${cid}/messages?after=${lastId.current}`,
     )
       .then((r) => {
         if (shown.current !== cid) return
         if (r.messages.length) {
-          lastId.current = r.messages[r.messages.length - 1].id
-          setMessages((m) => [...m, ...r.messages])
+          lastId.current = Math.max(lastId.current, r.messages[r.messages.length - 1].id)
+          setMessages((m) => {
+            const seen = new Set(m.map((x) => x.id))
+            return [...m, ...r.messages.filter((x) => !seen.has(x.id))]
+          })
         }
         setOpenPrompt(r.open_prompt)
       })
       .catch(() => {
         /* transient poll failure -- the next tick re-asks from the same cursor */
+      })
+      .finally(() => {
+        inFlight.current = false
       })
   }, [cid])
 
@@ -68,6 +78,7 @@ export function Chat() {
   // cursor and empties the pane so the other transcript can't bleed in.
   useEffect(() => {
     shown.current = cid
+    inFlight.current = false // the old conversation's request is discarded by `shown`
     lastId.current = 0
     setMessages([])
     setOpenPrompt(null)

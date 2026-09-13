@@ -77,3 +77,14 @@ def test_post_blank_message_is_422(client, conn):
     home = client.get("/api/chat/conversations").json()["home_id"]
     r = client.post(f"/api/chat/{home}/messages", json={"text": "   "})
     assert r.status_code == 422
+
+
+def test_second_conversations_poll_does_no_backfill(client, conn):
+    conn.execute("INSERT INTO event (job_id, type, payload) VALUES (1, 'human_applied', NULL)")
+    conn.commit()
+    assert chat.jobs_needing_backfill(conn) == [1]
+    client.get("/api/chat/conversations")
+    assert chat.jobs_needing_backfill(conn) == []
+    before = conn.execute("SELECT COUNT(*) FROM message").fetchone()[0]
+    client.get("/api/chat/conversations")
+    assert conn.execute("SELECT COUNT(*) FROM message").fetchone()[0] == before
