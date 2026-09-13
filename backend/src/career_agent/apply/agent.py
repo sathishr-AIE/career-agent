@@ -510,6 +510,12 @@ def build_cmd(model: str, mcp_path) -> list[str]:
                         "Only use MCP servers from --mcp-config, ignoring
                         all other MCP configurations" -- excludes every MCP
                         server except the one in --mcp-config.
+      --disallowedTools mcp__playwright__browser_run_code_unsafe
+                        that tool runs code in Playwright's Node process
+                        (host access, outside the page sandbox) and the
+                        server has no flag to turn it off; browser_evaluate
+                        (page sandbox) stays allowed. The flag is variadic,
+                        so it is followed by another flag, never a value.
     Together with WORK_DIR being outside the repo, an injected "run
     `cat ../../.env`" has no tool to run it with and nothing to read.
 
@@ -533,6 +539,7 @@ def build_cmd(model: str, mcp_path) -> list[str]:
     return ["claude", "--model", model, "-p",
             "--mcp-config", str(mcp_path), "--strict-mcp-config",
             "--tools", "",
+            "--disallowedTools", "mcp__playwright__browser_run_code_unsafe",
             "--permission-mode", "bypassPermissions",
             "--no-session-persistence",
             "--output-format", "stream-json", "--verbose", "-"]

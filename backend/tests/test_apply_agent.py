@@ -496,3 +496,19 @@ def test_the_prompt_forbids_creating_accounts_and_accepting_terms(mode, kw):
     # the login-wall step must route to account_required, not LOGIN_ISSUE
     step5 = next(l for l in _steps(p).splitlines() if l.startswith("5."))
     assert "account_required" in step5
+
+
+# -- live-safety FIX 5: browser_run_code_unsafe is blocked -----------------
+
+def test_browser_run_code_unsafe_is_disallowed_at_the_cli():
+    """It runs code in Playwright's own Node process, outside the page
+    sandbox; the live draft run called it 32 times. browser_evaluate (page
+    sandbox) stays allowed."""
+    cmd = agent_mod.build_cmd("sonnet", Path("C:/nowhere/.mcp-apply.json"))
+    i = cmd.index("--disallowedTools")
+    assert cmd[i + 1] == "mcp__playwright__browser_run_code_unsafe"
+    # variadic flag: the next element must be another flag, never a value
+    assert cmd[i + 2].startswith("--")
+    assert cmd.count("--disallowedTools") == 1
+    assert "browser_evaluate" not in " ".join(cmd)
+    assert cmd[cmd.index("--tools") + 1] == ""

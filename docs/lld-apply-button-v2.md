@@ -143,7 +143,7 @@ its source is AGPL):
   (no Gmail MCP — email-code login flows are out of scope; the agent bails with
   `login_issue` instead).
 - Spawns:
-  `claude --model <APPLY_MODEL> -p --mcp-config <path> --strict-mcp-config --tools "" --permission-mode bypassPermissions --no-session-persistence --output-format stream-json --verbose -`
+  `claude --model <APPLY_MODEL> -p --mcp-config <path> --strict-mcp-config --tools "" --disallowedTools mcp__playwright__browser_run_code_unsafe --permission-mode bypassPermissions --no-session-persistence --output-format stream-json --verbose -`
   with the prompt on stdin, `CLAUDECODE`/`CLAUDE_CODE_ENTRYPOINT` scrubbed from env, cwd =
   a per-job wiped `<system temp>/career-agent-apply/session/` dir. `--tools ""` disables
   every built-in tool (Bash/Read/Write/WebFetch); `--strict-mcp-config` keeps the
@@ -152,7 +152,10 @@ its source is AGPL):
   (`--restricted` is the flag that ignores those files, but it refuses
   `bypassPermissions`, which this design requires, so it's unusable here; open residual,
   tracked in §6). The Playwright server's `browser_*` tools are a separate namespace,
-  unaffected by either flag.
+  unaffected by either flag. `--disallowedTools` blocks the one exception:
+  `browser_run_code_unsafe` runs code in Playwright's own Node process (host access, outside
+  the page sandbox) and the server has no flag to disable it; `browser_evaluate` (page
+  sandbox) stays allowed.
 - Streams stdout line-by-line: `assistant` text and humanized `tool_use` lines append to a
   per-job transcript `data/logs/apply_<ts>_job<id>.txt`; the final `result` message yields
   `cost_usd`. Wall-clock timeout 600 s → process-tree kill → `AgentResult("failed", "timeout")`.
