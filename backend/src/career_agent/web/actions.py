@@ -91,7 +91,7 @@ async def upload_master_resume(file) -> dict:
 
 async def do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
                    event: str | None, brief_path: Path,
-                   candidate_profile_path: Path) -> dict:
+                   candidate_profile_path: Path, conn_factory=None) -> dict:
     parked = worker.get_run_state(conn, "apply")["current_job_id"]
     if parked is not None and parked != job_id:
         # Drafting job_id would set current_job_id to it below, silently
@@ -118,7 +118,8 @@ async def do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
     try:
         result = await ats_apply.submit(conn, job_id, dry_run=True,
                                         brief=brief, profile=profile,
-                                        resume_version=resume_version)
+                                        resume_version=resume_version,
+                                        conn_factory=conn_factory)
     except Exception as exc:
         return {"ok": False, "message": str(exc)}
     if result.get("needs_answer"):
@@ -155,7 +156,7 @@ def answer_question(conn: sqlite3.Connection, job_id: int, question: str,
 
 
 async def send(conn: sqlite3.Connection, job_id: int, brief_path: Path,
-               candidate_profile_path: Path) -> dict:
+               candidate_profile_path: Path, conn_factory=None) -> dict:
     draft = conn.execute(
         "SELECT id FROM application WHERE job_id = ? AND status = 'draft'"
         " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
@@ -173,7 +174,8 @@ async def send(conn: sqlite3.Connection, job_id: int, brief_path: Path,
     try:
         result = await ats_apply.submit(
             conn, job_id, dry_run=False, brief=brief, profile=profile,
-            resume_version=store.resume_version_for(conn, job_id))
+            resume_version=store.resume_version_for(conn, job_id),
+            conn_factory=conn_factory)
     except Exception as exc:
         return {"ok": False, "message": str(exc)}
     if not result["ok"]:

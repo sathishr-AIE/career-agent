@@ -643,3 +643,23 @@ async def test_loop_marks_run_errored_on_exception_apply_tick_doesnt_catch(
     assert "candidate query exploded" in state["last_error"]
     types = {e["type"] for e in conn.execute("SELECT type FROM event")}
     assert "run_error" in types
+
+
+async def test_apply_tick_hands_its_conn_factory_to_submit(
+        conn, brief_path, profile_path, monkeypatch):
+    """Without it the run's narration never reaches the job's chat -- a
+    silent loss, so it is pinned here."""
+    _job(conn, "fp1")
+    conn.execute("INSERT INTO resume (version, path) VALUES ('base-v1', 'r.docx')")
+    conn.commit()
+    worker.set_run_state(conn, "apply", status="running", mode="manual")
+    captured = {}
+
+    async def fake_submit(conn, job_id, dry_run, conn_factory=None, **kw):
+        captured["conn_factory"] = conn_factory
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
+    factory = lambda: conn
+    await worker.apply_tick(conn, brief_path, profile_path, factory)
+    assert captured["conn_factory"] is factory

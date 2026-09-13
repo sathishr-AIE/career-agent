@@ -458,9 +458,9 @@ def parse_result(output: str, nonce: str) -> AgentResult:
 
 
 # -- subprocess shell: spawn one `claude -p` session per job, over a real
-# Chrome via the Playwright MCP server on CDP. Not unit-tested past
-# consume_stream (pure) by house convention -- see CLAUDE.md testing
-# conventions and this task's brief. --------------------------------------
+# Chrome via the Playwright MCP server on CDP. Tested only through
+# run_session's popen seam, never a real child -- see CLAUDE.md testing
+# conventions. --------------------------------------------------------------
 
 # Short tokens only on letter boundaries: bare "pin" would hit "Shipping"
 # and "pincode" (an Indian postal code, not a secret).
@@ -619,13 +619,37 @@ def build_cmd(model: str, mcp_path, session_id: str,
             "--resume" if resume else "--session-id", session_id]
 
 
-def _run_agent_blocking(prompt, job_id, cdp_port, timeout_s, model,
-                        nonce) -> AgentResult:
+RUNS: dict = {}   # job_id -> its live AgentRun; the answer API sends into it (Task 7)
+
+
+def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events,
+                cdp_port: int = 9222, timeout_s: float = 1200,
+                model: str = APPLY_MODEL, resume: bool = False,
+                popen=None) -> AgentResult:
+    """One apply session on apply/runner.py's AgentRun, stdin kept open so
+    the human's answers reach the same session. `events` (a RunEvents) fire
+    on AgentRun's reader thread. `popen` is the test seam for the child.
+
+    timeout_s (20 min) is paired with ats.sweep_stale_in_flight's window
+    (30 min) and must stay strictly under it: this deadline is armed at
+    spawn, so it always fires FIRST and a timing-out run resolves its own
+    in_flight row before the sweep can touch it -- the sweep-vs-returning-run
+    race never opens. Raise one of the two and you must raise the other
+    (tests/test_apply_ats.py
+    ::test_the_agent_deadline_fires_before_the_sweep_window enforces it).
+    20 min, not 10: a multi-page ATS form (Workday/iCIMS/SuccessFactors) can
+    run past ten minutes -- a live SuccessFactors draft did -- and killing a
+    healthy run costs a `failed:timeout` toward MAX_ATTEMPTS on the draft
+    path and a `held_unknown` on the send path.
+
+    `nonce` must be the one build_prompt stamped into `prompt`; it is the
+    only thing parse_result will accept a result line under."""
+    from career_agent.apply.runner import AgentRun   # runner imports this module
+
     require_binaries()  # backstop; ats.submit() checks this before any write
-    # Popen below runs with cwd=session_dir, so every path handed to the
-    # child (the --mcp-config value especially) must be absolute -- a
-    # relative one resolves against the child's cwd, not ours, and the MCP
-    # server config silently fails to load.
+    # The child runs with cwd=session_dir, so every path handed to it (the
+    # --mcp-config value especially) must be absolute -- a relative one
+    # resolves against the child's cwd and the MCP config silently fails.
     work_dir = WORK_DIR.resolve()
     log_dir = LOG_DIR.resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -641,66 +665,51 @@ def _run_agent_blocking(prompt, job_id, cdp_port, timeout_s, model,
     env.pop("CLAUDECODE", None)
     env.pop("CLAUDE_CODE_ENTRYPOINT", None)
 
-    cmd = build_cmd(model, mcp_path, session_id=str(uuid.uuid4()))
-
-    start = time.time()
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True,
-                            encoding="utf-8", errors="replace", env=env,
-                            cwd=str(session_dir), shell=False)
-
-    # timeout_s is a wall-clock deadline, enforced by a watchdog rather than
-    # by proc.wait: consume_stream(proc.stdout) below blocks until stdout
-    # CLOSES, so a session that hangs with stdout open never reaches a wait
-    # at all -- it held the asyncio.to_thread worker forever, left
-    # _live_run_agent's `finally: cleanup(proc)` unreached (Chrome orphaned
-    # on port 9222) and wedged the apply worker. Killing the tree closes
-    # stdout, so consume_stream hits EOF naturally and the transcript
-    # collected so far survives.
+    run = AgentRun(build_cmd(model, mcp_path, session_id, resume=resume),
+                   session_dir, env, nonce, events, popen=popen)
+    # A wall-clock watchdog, not a wait timeout: a session that hangs with
+    # stdout open would otherwise hold the to_thread worker forever and
+    # orphan Chrome on port 9222. Killing the tree closes stdout, so the
+    # transcript collected so far survives.
     timed_out = threading.Event()
 
     def _watchdog():
         timed_out.set()
-        _kill_tree(proc.pid)
+        run.kill()
 
     alarm = threading.Timer(timeout_s, _watchdog)
     alarm.daemon = True
+    RUNS[job_id] = run
+    start = time.time()
     alarm.start()
     try:
-        # stdin is stream-json now (build_cmd): one user message, then EOF
-        # ends the session after its turn -- still a one-shot run. Fed from
-        # its own thread: the CLI writes a large --verbose init line before
-        # it reads stdin, so writing here, before consume_stream drains
-        # stdout, deadlocked both processes on full pipes.
-        def _feed():
-            try:
-                proc.stdin.write(user_message(prompt))
-                proc.stdin.close()
-            except (OSError, ValueError):
-                pass    # the child died or was killed; stdout shows why
-        feeder = threading.Thread(target=_feed, daemon=True)
-        feeder.start()
-        text, cost, usage = consume_stream(proc.stdout)
-        feeder.join(timeout=10)
-        try:
-            proc.wait(timeout=10)   # stdout is at EOF; this only reaps
-        except subprocess.TimeoutExpired:
-            _kill_tree(proc.pid)
+        run.start(prompt)
+        run.wait(None)
     finally:
         alarm.cancel()
-        if proc.poll() is None:
-            _kill_tree(proc.pid)
+        RUNS.pop(job_id, None)
+        if run.proc is not None:
+            if run.proc.poll() is None:
+                _kill_tree(run.proc.pid)
+            try:
+                run.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+        # `done` is set at the RESULT turn, before the reader has drained
+        # the pipe: wait for it, or trailing output misses the transcript.
+        if run._reader_thread is not None:
+            run._reader_thread.join(timeout=10)
 
     duration_ms = int((time.time() - start) * 1000)
-    transcript = _write_transcript(log_dir, job_id, text, cost, duration_ms,
-                                   usage)
+    transcript = _write_transcript(log_dir, job_id, run.transcript, run.cost_total,
+                                   duration_ms, run.usage_total)
     if timed_out.is_set():
         result = AgentResult("failed", "timeout")
     else:
-        result = parse_result(text, nonce)
+        result = parse_result(run.transcript, nonce)
     result.transcript_path = str(transcript)
-    result.cost_usd = cost or 0.0
-    result.usage = usage if cost is None else None
+    result.cost_usd = run.cost_total or 0.0
+    result.usage = run.usage_total if run.cost_total is None else None
     result.duration_ms = duration_ms
     return result
 
@@ -746,26 +755,11 @@ def _kill_tree(pid: int) -> None:
             pass
 
 
-async def run_agent(prompt: str, *, job_id: int, nonce: str,
-                    cdp_port: int = 9222, timeout_s: int = 1200,
-                    model: str = APPLY_MODEL) -> AgentResult:
-    """asyncio.to_thread wrapper: the same event-loop rule as
-    web/pipeline.py's run_once -- the dashboard must stay responsive.
-
-    timeout_s (20 min) is paired with ats.sweep_stale_in_flight's window
-    (30 min) and must stay strictly under it: this deadline is armed at
-    spawn, so it always fires FIRST and a timing-out run resolves its own
-    in_flight row before the sweep can touch it -- the sweep-vs-returning-run
-    race never opens. Raise one of the two and you must raise the other
-    (tests/test_apply_ats.py
-    ::test_the_agent_deadline_fires_before_the_sweep_window enforces it).
-    20 min, not 10: a multi-page ATS form (Workday/iCIMS/SuccessFactors --
-    snapshot, upload, parse, several screens of screening questions) can run
-    past ten minutes -- a live SuccessFactors draft did -- and killing a
-    healthy run costs a `failed:timeout` toward MAX_ATTEMPTS on the draft
-    path and a `held_unknown` on the send path.
-
-    `nonce` must be the one build_prompt stamped into `prompt`; it is the
-    only thing parse_result will accept a result line under."""
-    return await asyncio.to_thread(_run_agent_blocking, prompt, job_id,
-                                   cdp_port, timeout_s, model, nonce)
+async def run_agent(prompt: str, *, job_id: int, nonce: str, events,
+                    session_id: str | None = None, **kw) -> AgentResult:
+    """asyncio.to_thread wrapper over run_session: the same event-loop rule
+    as web/pipeline.py's run_once -- the dashboard must stay responsive. A
+    fresh session id per run unless one is given (--resume, Task 7)."""
+    return await asyncio.to_thread(run_session, prompt, job_id=job_id, nonce=nonce,
+                                   session_id=session_id or str(uuid.uuid4()),
+                                   events=events, **kw)

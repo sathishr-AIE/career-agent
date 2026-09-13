@@ -1,6 +1,7 @@
 # backend/tests/test_apply_agent.py
 import io
 import json as _json
+import os
 import subprocess
 import threading
 import time
@@ -9,7 +10,9 @@ from pathlib import Path
 import pytest
 
 from career_agent.apply import agent as agent_mod
+from career_agent.apply import runner as runner_mod
 from career_agent.apply.agent import AgentResult, build_prompt, consume_stream, parse_result
+from career_agent.apply.runner import RunEvents
 from career_agent.config import CandidateProfile, CareerBrief
 from career_agent.models import Job
 
@@ -271,36 +274,46 @@ def test_transcripts_stay_in_the_repos_data_logs():
     assert not agent_mod.LOG_DIR.is_absolute()
 
 
-# -- F2/F3: the run watchdog, and what the transcript records --------------
+# -- F2/F3: run_session -- watchdog, registry, what the transcript records --
 # No test here spawns a subprocess (house convention): `claude` is stood in
-# for by a pure-Python fake whose stdout is a generator.
+# for by a fake whose stdout is a real pipe the test writes to, handed to
+# AgentRun through run_session's popen seam.
 
-class _FakeProc:
-    """A `claude -p` session that never exits on its own. `block` is the
-    event its stdout waits on after the lines run out -- exactly the hang
-    the watchdog exists for: stdout stays OPEN, so consume_stream never
-    reaches EOF and proc.wait() is never even called."""
+class _KeptStdin(io.StringIO):
+    def close(self):
+        pass
 
-    def __init__(self, lines, block=None):
+
+class _Child:
+    """A `claude` session that never exits on its own: stdout stays open
+    until it is killed. `last_words` are emitted at the kill, i.e. after
+    the run is already done -- output the reader drains late."""
+
+    def __init__(self):
+        r, w = os.pipe()
+        self.stdout = os.fdopen(r, "r", encoding="utf-8")
+        self._w = os.fdopen(w, "w", encoding="utf-8")
+        self.stdin = _KeptStdin()
         self.pid = 424242
-        self.stdin = io.StringIO()
-        self.stdout = self._gen(lines, block)
         self.returncode = None
+        self.last_words = []
 
-    def _gen(self, lines, block):
-        yield from lines
-        if block is not None:
-            block.wait(10)
-            self._block_released = True
-        else:
-            self.returncode = 0
+    def emit(self, line):
+        self._w.write(line + "\n")
+        self._w.flush()
+
+    def die(self):
+        if self.returncode is None:
+            for line in self.last_words:
+                time.sleep(0.05)       # late, on purpose
+                self.emit(line)
+            self.returncode = -9
+            self._w.close()
 
     def poll(self):
         return self.returncode
 
     def wait(self, timeout=None):
-        if self.returncode is None:
-            raise subprocess.TimeoutExpired("claude", timeout)
         return self.returncode
 
 
@@ -311,98 +324,92 @@ def sandboxed(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_mod, "require_binaries", lambda: None)
 
 
-def _install(monkeypatch, proc, block=None):
-    """Wire the fake process in, and make _kill_tree actually kill it."""
-    killed = []
-
-    def fake_kill(pid):
-        killed.append(pid)
-        proc.returncode = -9
-        if block is not None:
-            block.set()
-
-    monkeypatch.setattr(agent_mod.subprocess, "Popen", lambda *a, **k: proc)
-    monkeypatch.setattr(agent_mod, "_kill_tree", fake_kill)
-    return killed
+@pytest.fixture
+def child(sandboxed, monkeypatch):
+    proc = _Child()
+    kill = lambda pid: proc.die()
+    monkeypatch.setattr(agent_mod, "_kill_tree", kill)
+    monkeypatch.setattr(runner_mod, "_kill_tree", kill)
+    return proc
 
 
-def test_a_hung_agent_is_killed_at_the_deadline(sandboxed, monkeypatch):
-    """consume_stream(proc.stdout) blocks until stdout closes, so proc.wait
-    only ever bounded the tail: a session that hangs with stdout open held
-    the worker thread forever and orphaned Chrome on port 9222."""
-    block = threading.Event()
-    proc = _FakeProc(['{"type": "assistant", "message": {"content":'
-                      ' [{"type": "text", "text": "working on it"}]}}'], block)
-    killed = _install(monkeypatch, proc, block)
-
-    started = time.monotonic()
-    r = agent_mod._run_agent_blocking("prompt", 7, 9222, 0.2, "sonnet", N)
-    elapsed = time.monotonic() - started
-
-    assert elapsed < 3, f"the deadline was not wall-clock ({elapsed:.1f}s)"
-    assert killed == [proc.pid], "the process tree must be killed on expiry"
-    assert r.code == "failed" and r.reason == "timeout"
-    assert r.duration_ms > 0
-    # the transcript is kept: a timed-out run is exactly when someone wants
-    # to see what the agent was doing
-    assert "working on it" in Path(r.transcript_path).read_text(encoding="utf-8")
+def _session(proc, timeout_s=30, events=None):
+    return agent_mod.run_session("prompt", job_id=7, nonce=N, session_id="s-1",
+                                 events=events or RunEvents(), timeout_s=timeout_s,
+                                 popen=lambda *a, **kw: proc)
 
 
-def test_the_transcript_foots_the_run_cost_and_duration(sandboxed, monkeypatch):
+def _result_msg(cost):
+    return _json.dumps({"type": "result", "total_cost_usd": cost, "result": ""})
+
+
+def test_a_result_line_ends_the_session_and_the_transcript_foots_the_cost(child):
     """Nothing else persists cost_usd/duration_ms -- there is no DB column --
     so without this footer there would be no record of what a run cost next
     to the transcript of what it did."""
-    proc = _FakeProc([
-        _json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "filling the form"}]}}),
-        _json.dumps({"type": "result", "total_cost_usd": 0.0421,
-                     "result": f"{R}APPLIED"}),
-    ])
-    _install(monkeypatch, proc)
+    registered = []
+    ev = RunEvents(on_text=lambda s: registered.append(7 in agent_mod.RUNS))
+    child.emit(_asst("m1", "filling the form"))
+    child.emit(_asst("m2", f"{R}APPLIED"))
+    child.emit(_result_msg(0.0421))
 
-    class _KeptStdin(io.StringIO):
-        def close(self): pass
-    proc.stdin = _KeptStdin()
-    r = agent_mod._run_agent_blocking("prompt", 7, 9222, 30, "sonnet", N)
+    r = _session(child, events=ev)
 
-    # stdin is stream-json now: the prompt goes in as one user message line
-    msg = _json.loads(proc.stdin.getvalue())
-    assert msg == {"type": "user", "message": {"role": "user",
-                   "content": [{"type": "text", "text": "prompt"}]}}
+    first = _json.loads(child.stdin.getvalue().splitlines()[0])
+    assert first == {"type": "user", "message": {"role": "user",
+                     "content": [{"type": "text", "text": "prompt"}]}}
     assert r.code == "applied"
-    assert r.cost_usd == 0.0421 and r.duration_ms >= 0
+    assert r.cost_usd == 0.0421 and r.usage is None and r.duration_ms >= 0
     footer = Path(r.transcript_path).read_text(encoding="utf-8").strip().splitlines()[-1]
     assert "job 7" in footer and "$0.0421" in footer and "ms" in footer
+    assert registered and all(registered), "the live run is in RUNS while it runs"
+    assert 7 not in agent_mod.RUNS, "... and removed when it ends"
 
 
-def test_the_prompt_write_cannot_deadlock_against_a_chatty_child(sandboxed, monkeypatch):
-    """Under --input-format stream-json the real CLI emits its (large)
-    --verbose init line before it reads stdin. Writing the whole prompt on
-    the thread that later reads stdout leaves both processes blocked on
-    full pipes -- it hung a web test at proc.stdin.write."""
-    reading = threading.Event()
+def test_a_hung_agent_is_killed_at_the_deadline(child):
+    """A session that hangs with stdout open must not hold the worker
+    thread forever (and orphan Chrome on port 9222). The transcript is
+    kept: a timed-out run is exactly when someone wants to see it -- with
+    tokens, not a made-up $0.0000, since no result message ever came."""
+    child.emit(_asst("m1", "working on it", input_tokens=1234,
+                     output_tokens=56, cache_read_input_tokens=7890))
 
-    class _WaitsForReader(io.StringIO):
-        def write(self, s):
-            assert reading.wait(5), "prompt written before stdout was read"
-            return super().write(s)
+    started = time.monotonic()
+    r = _session(child, timeout_s=0.3)
+    elapsed = time.monotonic() - started
 
-        def close(self):
-            pass
+    assert elapsed < 5, f"the deadline was not wall-clock ({elapsed:.1f}s)"
+    assert child.returncode == -9, "the process tree must be killed on expiry"
+    assert r.code == "failed" and r.reason == "timeout"
+    assert r.usage["input_tokens"] == 1234
+    text = Path(r.transcript_path).read_text(encoding="utf-8")
+    assert "working on it" in text
+    footer = text.strip().splitlines()[-1]
+    assert "$0.0000" not in footer and "no result message" in footer
+    assert "input=1234" in footer and "output=56" in footer and "cache_read=7890" in footer
+    assert 7 not in agent_mod.RUNS
 
-    def stdout():
-        reading.set()
-        yield _json.dumps({"type": "result", "total_cost_usd": 0.01,
-                           "result": f"{R}APPLIED"})
 
-    proc = _FakeProc([])
-    proc.stdout, proc.returncode, proc.stdin = stdout(), 0, _WaitsForReader()
-    _install(monkeypatch, proc)
+def test_output_after_the_result_still_lands_in_the_transcript(child):
+    """`done` is set at the RESULT turn, before the reader has drained the
+    pipe: the transcript must wait for the reader, not race it."""
+    child.last_words = [_asst("m3", "closing the tab")]
+    child.emit(_asst("m2", f"{R}APPLIED"))
+    child.emit(_result_msg(0.01))
 
-    r = agent_mod._run_agent_blocking("prompt", 7, 9222, 30, "sonnet", N)
+    r = _session(child)
 
     assert r.code == "applied"
-    assert '"text": "prompt"' in proc.stdin.getvalue()
+    assert "closing the tab" in Path(r.transcript_path).read_text(encoding="utf-8")
+
+
+async def test_run_agent_names_a_fresh_session_per_run(monkeypatch):
+    seen = []
+    monkeypatch.setattr(agent_mod, "run_session",
+                        lambda prompt, **kw: seen.append(kw["session_id"]) or AgentResult("applied"))
+    for _ in range(2):
+        await agent_mod.run_agent("p", job_id=7, nonce=N, events=RunEvents())
+    assert len(set(seen)) == 2 and all(seen)
 
 
 # -- F5: "what was reviewed is what gets sent", prompt-enforced ------------
@@ -632,20 +639,3 @@ def test_consume_stream_accumulates_usage_per_message_not_per_block():
     assert usage == {"input_tokens": 150, "output_tokens": 27,
                      "cache_creation_input_tokens": 300,
                      "cache_read_input_tokens": 1000}
-
-
-def test_a_timed_out_run_foots_tokens_not_a_zero_cost(sandboxed, monkeypatch):
-    block = threading.Event()
-    proc = _FakeProc([_asst("m1", "filling", input_tokens=1234,
-                            output_tokens=56, cache_read_input_tokens=7890)],
-                     block)
-    _install(monkeypatch, proc, block)
-
-    r = agent_mod._run_agent_blocking("prompt", 7, 9222, 0.2, "sonnet", N)
-
-    assert r.reason == "timeout"
-    assert r.usage["input_tokens"] == 1234
-    footer = Path(r.transcript_path).read_text(encoding="utf-8").strip().splitlines()[-1]
-    assert "$0.0000" not in footer
-    assert "no result message" in footer
-    assert "input=1234" in footer and "output=56" in footer and "cache_read=7890" in footer

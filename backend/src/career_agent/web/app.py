@@ -155,7 +155,8 @@ async def apply(job_id: int):
     conn = _conn()
     return _span(await actions.do_apply(
         conn, job_id, allow_skip=False, event="human_applied",
-        brief_path=BRIEF_PATH, candidate_profile_path=CANDIDATE_PROFILE_PATH))
+        brief_path=BRIEF_PATH, candidate_profile_path=CANDIDATE_PROFILE_PATH,
+        conn_factory=_conn))
 
 
 @app.post("/override/{job_id}", response_class=HTMLResponse)
@@ -165,7 +166,8 @@ async def override(job_id: int):
     conn = _conn()
     return _span(await actions.do_apply(
         conn, job_id, allow_skip=True, event="human_override",
-        brief_path=BRIEF_PATH, candidate_profile_path=CANDIDATE_PROFILE_PATH))
+        brief_path=BRIEF_PATH, candidate_profile_path=CANDIDATE_PROFILE_PATH,
+        conn_factory=_conn))
 
 
 @app.post("/answer/{job_id}", response_class=HTMLResponse)
@@ -182,7 +184,7 @@ async def send(job_id: int):
     conn = _conn()
     return _span(await actions.send(
         conn, job_id, brief_path=BRIEF_PATH,
-        candidate_profile_path=CANDIDATE_PROFILE_PATH))
+        candidate_profile_path=CANDIDATE_PROFILE_PATH, conn_factory=_conn))
 
 
 @app.post("/dismiss/{job_id}", response_class=HTMLResponse)

@@ -97,7 +97,8 @@ async def api_apply(job_id: int):
     m = _app()
     result = await actions.do_apply(
         m._conn(), job_id, allow_skip=False, event="human_applied",
-        brief_path=m.BRIEF_PATH, candidate_profile_path=m.CANDIDATE_PROFILE_PATH)
+        brief_path=m.BRIEF_PATH, candidate_profile_path=m.CANDIDATE_PROFILE_PATH,
+        conn_factory=m._conn)
     return _result(result)
 
 
@@ -106,7 +107,8 @@ async def api_override(job_id: int):
     m = _app()
     result = await actions.do_apply(
         m._conn(), job_id, allow_skip=True, event="human_override",
-        brief_path=m.BRIEF_PATH, candidate_profile_path=m.CANDIDATE_PROFILE_PATH)
+        brief_path=m.BRIEF_PATH, candidate_profile_path=m.CANDIDATE_PROFILE_PATH,
+        conn_factory=m._conn)
     return _result(result)
 
 
@@ -123,7 +125,8 @@ def api_answer(job_id: int, question: str = Body(...), answer: str = Body(...),
 async def api_send(job_id: int):
     m = _app()
     result = await actions.send(m._conn(), job_id, brief_path=m.BRIEF_PATH,
-                                candidate_profile_path=m.CANDIDATE_PROFILE_PATH)
+                                candidate_profile_path=m.CANDIDATE_PROFILE_PATH,
+                                conn_factory=m._conn)
     return _result(result)
 
 

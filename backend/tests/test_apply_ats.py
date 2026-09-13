@@ -1,12 +1,13 @@
 import asyncio
 import json
 import logging
+import threading
 from pathlib import Path
 
 import docx
 import pytest
 
-from career_agent import db, store
+from career_agent import chat, db, store
 from career_agent.apply import agent as agent_mod
 from career_agent.apply import ats as ats_apply
 from career_agent.apply.agent import AgentResult
@@ -55,7 +56,7 @@ def fake_agent(result: AgentResult):
     """The one test seam. Nothing in this file may launch Chrome, spawn a
     subprocess, or need the `claude`/`npx` binaries -- every case injects
     this instead of letting submit() reach _live_run_agent."""
-    async def _fake(prompt, job_id, nonce):
+    async def _fake(prompt, job_id, nonce, events):
         _fake.prompts.append(prompt)
         _fake.job_ids.append(job_id)
         _fake.nonces.append(nonce)
@@ -316,7 +317,7 @@ async def test_an_unknown_state_send_holds_instead_of_retrying(conn, reason):
     have clicked Submit before it died. Retrying would be a double-submit
     the moment SUBMISSION_IMPLEMENTED flips, so the row must BLOCK."""
     if reason == "agent_error":
-        async def runner(prompt, job_id, nonce):
+        async def runner(prompt, job_id, nonce, events):
             raise RuntimeError("claude CLI not on PATH")
     else:
         runner = fake_agent(AgentResult("failed", reason))
@@ -336,7 +337,7 @@ async def test_an_unknown_state_send_holds_instead_of_retrying(conn, reason):
 async def test_the_same_reasons_stay_retryable_on_a_draft(conn, reason):
     """A draft submits nothing, so re-drafting is free and correct."""
     if reason == "agent_error":
-        async def runner(prompt, job_id, nonce):
+        async def runner(prompt, job_id, nonce, events):
             raise RuntimeError("nope")
     else:
         runner = fake_agent(AgentResult("failed", reason))
@@ -351,7 +352,7 @@ async def test_the_same_reasons_stay_retryable_on_a_draft(conn, reason):
 async def test_an_agent_crash_keeps_the_slug_and_logs_the_detail(conn):
     """failure_reason stays a queryable taxonomy slug (spec 5.3); the
     exception text lands in the event payload instead."""
-    async def boom(prompt, job_id, nonce):
+    async def boom(prompt, job_id, nonce, events):
         raise RuntimeError("claude CLI not on PATH")
 
     r = await _submit(conn, dry_run=False, run_agent=boom)
@@ -510,7 +511,7 @@ def no_live_runner(monkeypatch):
     """Belt and braces for the tests below, which are the only ones that
     reach submit() with run_agent=None on a path that could otherwise
     launch Chrome."""
-    async def _never(prompt, job_id, nonce):
+    async def _never(prompt, job_id, nonce, events):
         raise AssertionError("the live runner must never run in a test")
     monkeypatch.setattr(ats_apply, "_live_run_agent", _never)
 
@@ -549,9 +550,9 @@ async def test_preflight_is_skipped_when_a_runner_is_injected(conn, monkeypatch)
 
 
 async def test_a_precondition_escaping_mid_run_is_not_unknown_state(conn):
-    """The backstop check inside _run_agent_blocking: nothing launched, so
+    """The backstop check inside run_session: nothing launched, so
     the send path must not hold it as 'possibly submitted'."""
-    async def boom(prompt, job_id, nonce):
+    async def boom(prompt, job_id, nonce, events):
         raise agent_mod.PreconditionError("Chrome not found -- set CHROME_PATH")
 
     r = await _submit(conn, dry_run=False, run_agent=boom)
@@ -567,7 +568,7 @@ def _sweeping_agent(conn, result):
     """A run that outlives sweep_stale_in_flight's window:
     if the deadline's kill fails to land, the sweep flips the row to
     held_unknown while the agent is still driving the browser."""
-    async def _fake(prompt, job_id, nonce):
+    async def _fake(prompt, job_id, nonce, events):
         conn.execute("UPDATE application SET started_at ="
                      " datetime('now', '-45 minutes') WHERE status = 'in_flight'")
         conn.commit()
@@ -750,7 +751,7 @@ def _second_job(conn):
 
 async def test_two_agent_runs_never_overlap(conn):
     """chrome.launch_chrome _kill_port(9222)s before every launch, and
-    _run_agent_blocking wipes the shared session dir and rewrites the shared
+    run_session wipes the shared session dir and rewrites the shared
     .mcp-apply.json -- one port, one profile, one session dir. A dashboard
     click during an auto-worker run would taskkill the in-flight Chrome
     mid-submission."""
@@ -758,7 +759,7 @@ async def test_two_agent_runs_never_overlap(conn):
     live = 0
     peak = 0
 
-    async def runner(prompt, job_id, nonce):
+    async def runner(prompt, job_id, nonce, events):
         nonlocal live, peak
         live += 1
         peak = max(peak, live)
@@ -783,7 +784,7 @@ async def test_a_queued_send_does_not_age_its_own_in_flight_row(conn):
     job2 = _second_job(conn)
     started = []
 
-    async def runner(prompt, job_id, nonce):
+    async def runner(prompt, job_id, nonce, events):
         row = conn.execute("SELECT COUNT(*) n FROM application"
                            " WHERE status = 'in_flight'").fetchone()
         started.append(row["n"])
@@ -809,12 +810,12 @@ async def test_two_same_job_sends_produce_one_row_and_one_refusal(conn):
     job2 = _second_job(conn)
     holding = asyncio.Event()
 
-    async def holder(prompt, job_id, nonce):
+    async def holder(prompt, job_id, nonce, events):
         holding.set()
         await asyncio.sleep(0.05)
         return AgentResult("draft_ready", answers={})
 
-    async def runner(prompt, job_id, nonce):
+    async def runner(prompt, job_id, nonce, events):
         await asyncio.sleep(0.01)
         return AgentResult("applied", answers={"q": "a"})
 
@@ -844,7 +845,7 @@ def test_the_agent_deadline_fires_before_the_sweep_window():
     import inspect
 
     deadline_s = inspect.signature(
-        agent_mod.run_agent).parameters["timeout_s"].default
+        agent_mod.run_session).parameters["timeout_s"].default
     sweep_s = inspect.signature(
         ats_apply.sweep_stale_in_flight).parameters["minutes"].default * 60
     assert deadline_s >= 1200, (
@@ -1003,7 +1004,7 @@ async def test_two_jobs_do_not_share_one_staged_resume(conn, tmp_path):
 
     staged = {}
 
-    async def runner(prompt, job_id, nonce):
+    async def runner(prompt, job_id, nonce, events):
         staged[job_id] = _upload_path(prompt)
         await asyncio.sleep(0.01)
         return AgentResult("draft_ready", answers={})
@@ -1038,3 +1039,60 @@ async def test_account_required_records_a_retryable_failure(conn, dry_run):
     row = _apps(conn)[-1]
     assert row["status"] == "failed"
     assert row["failure_reason"] == "account_required"
+
+
+# -- S1: the agent's narration streams into the job conversation -----------
+
+async def test_live_events_post_agent_messages(conn, tmp_path):
+    """Events fire on AgentRun's reader thread, where a connection made on
+    the event-loop thread is unusable (sqlite3 check_same_thread) -- so the
+    fake narrates from its own thread, and only a per-event conn_factory
+    connection gets the messages in."""
+    factory = lambda: db.connect(tmp_path / "t.db")   # the conn fixture's file
+
+    async def fake(prompt, job_id, nonce, events):
+        def narrate():
+            events.on_text("Navigating to the posting")
+            events.on_tool("browser_navigate", '{"url":"https://x"}')
+            events.on_tool("browser_snapshot", "{}")     # noise: not posted
+        t = threading.Thread(target=narrate)
+        t.start()
+        t.join()
+        return AgentResult("draft_ready", answers={})
+
+    r = await _submit(conn, dry_run=True, run_agent=fake, conn_factory=factory)
+    assert r["ok"]
+    msgs = chat.messages_after(conn, chat.conversation_for_job(conn, 1))
+    assert [(m["role"], m["content"]) for m in msgs] == [
+        ("agent", "Navigating to the posting"),
+        ("system", 'browser_navigate {"url":"https://x"}')]
+
+
+async def test_a_failing_chat_write_does_not_change_the_outcome(conn, tmp_path):
+    """A DB hiccup while narrating must never stop an application mid-form:
+    the events are called inline here, so an escaping exception would turn
+    this draft into an agent_error."""
+    def broken():
+        c = db.connect(tmp_path / "t.db")
+        c.close()
+        return c
+
+    async def fake(prompt, job_id, nonce, events):
+        events.on_text("Navigating")
+        events.on_tool("browser_click", "{}")
+        return AgentResult("draft_ready", answers={})
+
+    r = await _submit(conn, dry_run=True, run_agent=fake, conn_factory=broken)
+    assert r["ok"] and _apps(conn)[-1]["status"] == "draft"
+
+
+async def test_without_a_conn_factory_the_runner_still_gets_events(conn):
+    got = []
+
+    async def fake(prompt, job_id, nonce, events):
+        events.on_text("hi")          # a no-op, not a crash
+        got.append(events)
+        return AgentResult("draft_ready", answers={})
+
+    r = await _submit(conn, dry_run=True, run_agent=fake)
+    assert r["ok"] and got

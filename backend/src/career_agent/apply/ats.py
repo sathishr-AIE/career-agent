@@ -10,7 +10,9 @@ import shutil
 import sqlite3
 from pathlib import Path
 
+from career_agent import chat
 from career_agent.apply import agent as agent_mod
+from career_agent.apply.runner import RunEvents
 from career_agent.config import CandidateProfile, CareerBrief
 from career_agent.models import Job
 
@@ -125,7 +127,8 @@ def preflight() -> None:
         raise agent_mod.PreconditionError(str(exc)) from exc
 
 
-async def _live_run_agent(prompt: str, job_id: int, nonce: str):
+async def _live_run_agent(prompt: str, job_id: int, nonce: str,
+                          events: RunEvents):
     """Default agent runner: a real Chrome around a real `claude` session.
     Tests inject their own run_agent instead -- nothing in the test suite
     ever reaches this, by house convention (no test spawns a browser or a
@@ -134,9 +137,45 @@ async def _live_run_agent(prompt: str, job_id: int, nonce: str):
 
     proc = chrome_mod.launch_chrome()
     try:
-        return await agent_mod.run_agent(prompt, job_id=job_id, nonce=nonce)
+        return await agent_mod.run_agent(prompt, job_id=job_id, nonce=nonce,
+                                         events=events)
     finally:
         chrome_mod.cleanup(proc)
+
+
+# Tool calls worth a line in the chat; snapshots, waits, evaluates are noise.
+_NARRATED_TOOLS = {"browser_navigate", "browser_file_upload", "browser_click",
+                   "browser_fill_form"}
+
+
+def _chat_events(conn_factory, job_id: int) -> RunEvents:
+    """RunEvents that narrate a run into the job's conversation, or no-ops
+    when there is no conn_factory.
+
+    The callbacks run on AgentRun's reader thread, and db.connect leaves
+    sqlite3's check_same_thread on: the caller's connection raises there. So
+    each event opens its own connection and closes it -- cheap at this
+    message volume. A failed write is logged and dropped: narration must
+    never stop an application mid-form."""
+    if conn_factory is None:
+        return RunEvents()
+
+    def post(role: str, content: str) -> None:
+        try:
+            c = conn_factory()
+            try:
+                chat.post_message(c, chat.conversation_for_job(c, job_id), role, content)
+            finally:
+                c.close()
+        except Exception:
+            log.warning("could not post a %s message for job %s", role, job_id,
+                        exc_info=True)
+
+    def on_tool(name: str, summary: str) -> None:
+        if name in _NARRATED_TOOLS:
+            post("system", f"{name} {summary}")
+
+    return RunEvents(on_text=lambda text: post("agent", text), on_tool=on_tool)
 
 
 def _resume_text(row) -> str:
@@ -175,7 +214,7 @@ def _resume_text(row) -> str:
 
 # ponytail: one global lock; per-port locks when P2 adds parallel workers.
 # chrome.py is a single-worker design -- one CDP port (9222), one profile
-# dir, and _run_agent_blocking wipes the shared session dir and rewrites the
+# dir, and run_session wipes the shared session dir and rewrites the
 # shared .mcp-apply.json per run -- and launch_chrome _kill_port()s 9222
 # before every launch. Without this, a dashboard Apply click during an
 # auto-worker run taskkills the in-flight Chrome mid-submission. The design
@@ -369,7 +408,8 @@ def _record_send_outcome(conn, job_id: int, app_id: int, url: str,
     return {"ok": False, "reason": f"submission {status}: {detail or reason}"}
 
 
-async def _run(runner, prompt: str, job_id: int, nonce: str) -> tuple:
+async def _run(runner, prompt: str, job_id: int, nonce: str,
+               events: RunEvents) -> tuple:
     """run_agent does not return an AgentResult on every path -- a broken
     stdin pipe or a missing `claude`/`npx` binary raises out of it. Turn
     that into a recordable result so the caller always has one, and never
@@ -379,7 +419,7 @@ async def _run(runner, prompt: str, job_id: int, nonce: str) -> tuple:
     event payload, so `failure_reason` stays the queryable taxonomy slug
     the schema promises (spec section 5.3)."""
     try:
-        result = await runner(prompt, job_id, nonce)
+        result = await runner(prompt, job_id, nonce, events)
         # The only place the run's price is recorded: AgentResult carries
         # cost_usd/duration_ms, there is no DB column for either (P0), and
         # the transcript footer is the other half of the record.
@@ -391,7 +431,7 @@ async def _run(runner, prompt: str, job_id: int, nonce: str) -> tuple:
         return result, ""
     except agent_mod.PreconditionError as exc:
         # submit()'s preflight normally catches this first; reaching here
-        # means the backstop inside _run_agent_blocking fired. Nothing
+        # means the backstop inside run_session fired. Nothing
         # launched, so it is a plain retryable failure -- never
         # 'agent_error', which would hold the row as possibly-submitted.
         log.warning("apply preconditions failed for job %s: %s", job_id, exc)
@@ -405,11 +445,14 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
                  brief: CareerBrief,
                  profile: CandidateProfile | None = None,
                  resume_version: str | None = None,
-                 run_agent=None) -> dict:
+                 run_agent=None, conn_factory=None) -> dict:
     """Draft (dry_run=True) or really send (dry_run=False) one application,
     by running one apply-agent session and translating its AgentResult into
     this module's state machine. `run_agent` is the only test seam:
-    `async (prompt: str, job_id: int, nonce: str) -> AgentResult`."""
+    `async (prompt: str, job_id: int, nonce: str, events: RunEvents)
+    -> AgentResult`. `conn_factory` is a zero-arg callable returning a NEW
+    connection; with it the run's narration streams into the job's
+    conversation (see _chat_events), without it events are no-ops."""
     row = conn.execute("SELECT * FROM job WHERE id = ?", (job_id,)).fetchone()
     if row is None:
         return {"ok": False, "reason": f"job {job_id} not found"}
@@ -500,12 +543,13 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
     # job page cannot guess it, so it cannot forge an outcome. The runner
     # carries it through to parse_result; nothing else ever sees it.
     nonce = agent_mod.new_nonce()
+    events = _chat_events(conn_factory, job_id)
 
     if dry_run:
         prompt = agent_mod.build_prompt(*prompt_args, mode="draft",
                                         nonce=nonce, score=score)
         async with _agent_lock():
-            result, detail = await _run(runner, prompt, job_id, nonce)
+            result, detail = await _run(runner, prompt, job_id, nonce, events)
         return _record_draft_outcome(conn, job_id, resume_version,
                                      row["url"], result, detail)
 
@@ -556,6 +600,6 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
             (job_id, resume_version))
         app_id = cur.lastrowid
         conn.commit()
-        result, detail = await _run(runner, prompt, job_id, nonce)
+        result, detail = await _run(runner, prompt, job_id, nonce, events)
     return _record_send_outcome(conn, job_id, app_id, row["url"], pinned,
                                 result, detail)

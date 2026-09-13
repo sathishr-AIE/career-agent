@@ -96,7 +96,8 @@ async def tailor_for_apply(conn: sqlite3.Connection, job_id: int,
     return await tailor.ensure_tailored(conn, job_id, job, brief, ask)
 
 
-async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path) -> None:
+async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
+                     conn_factory=None) -> None:
     """One step of the apply worker: pick a candidate, gate it, draft it,
     and in auto mode send it. Called by the control endpoints (for
     immediate feedback) and by the background loop (to keep going
@@ -147,7 +148,8 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path) -> None
         if state["mode"] == "manual":
             result = await ats_apply.submit(conn, job_id, dry_run=True,
                                             brief=brief, profile=profile,
-                                            resume_version=resume_version)
+                                            resume_version=resume_version,
+                                            conn_factory=conn_factory)
         else:
             # Auto mode used to draft then immediately send -- two browser
             # sessions seconds apart with no human in between. The agent
@@ -155,7 +157,8 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path) -> None
             # call auto mode makes.
             result = await ats_apply.submit(conn, job_id, dry_run=False,
                                             brief=brief, profile=profile,
-                                            resume_version=resume_version)
+                                            resume_version=resume_version,
+                                            conn_factory=conn_factory)
     except Exception as exc:
         set_run_state(conn, "apply", status="error", current_job_id=None,
                       last_error=str(exc))
@@ -203,7 +206,7 @@ async def apply_worker_loop(conn_factory, brief_path, profile_path) -> None:
         state = get_run_state(conn, "apply")
         if state["status"] == "running" and state["current_job_id"] is None:
             try:
-                await apply_tick(conn, brief_path, profile_path)
+                await apply_tick(conn, brief_path, profile_path, conn_factory)
             except Exception as exc:
                 set_run_state(conn, "apply", status="error", current_job_id=None,
                               last_error=str(exc))
