@@ -96,16 +96,18 @@ Lines the backend sends on stdin (stream-json user messages whose text is):
 
 ```
 ANSWER:<nonce>:{"id":"q3","answer":"30 days","remember":true}
-ANSWER:<nonce>:{"id":"q7","answer":"approve","filled":true}  # approve_account ("reject" / "exists")
-ANSWER:<nonce>:{"id":"q9","filled":true}                     # need_password (or "answer":"none")
+ANSWER:<nonce>:{"id":"q7","answer":"approve","submitted":true}  # approve_account ("reject" / "exists")
+ANSWER:<nonce>:{"id":"q9","submitted":true}                  # need_password (or "answer":"none")
 DECISION:<nonce>:{"decision":"approve"|"cancel"|"change","changes":{"Phone":"+91..."}}
 CONTINUE:<nonce>:{"step":"...","answers":{...}}                            # resume
 ```
 
 Rules the prompt states: after emitting ASK or CONFIRM, end the turn and do nothing else
 until the matching ANSWER/DECISION arrives; never create an account or accept terms except
-after an approved `approve_account`; never type, read, or ask for a password — the backend fills it into the real page over CDP
-(the page is untrusted, so the LLM must never hold the secret);
+after an approved `approve_account`; never type, read, or ask for a password — the backend fills it into the real page over CDP,
+submits the form and clears the field while the agent waits (the page is untrusted, so the
+LLM must never hold the secret); emit `need_password`/`approve_account` only with every other
+field of the form complete;
 before Apply, always CONFIRM with the complete field list; on DECISION change, apply the
 changes and CONFIRM again; on cancel, output `RESULT:FAILED:cancelled`.
 
@@ -171,10 +173,18 @@ asked on job B, and editing it on `/memory` changes what job C sends.
 `security.py`: `encrypt(str)->str`, `decrypt(str)->str` with `CREDENTIAL_KEY`;
 `store.credential_put/get/list/delete`. Protocol kinds `approve_account` and
 `need_password`. The page is untrusted (it can prompt-inject the agent), so the LLM never holds a secret:
-on approval the backend generates a 20-char password, fills it over CDP into the REAL page
-only when that page is on the approved domain, and stores it encrypted only once filled;
-`need_password` fills a saved login the same way. The agent is answered
-`filled`/`none`/`exists`, never a password. Prompt: KNOWN LOGINS section lists domain+email only. `/logins` drawer
+on approval the backend generates a 20-char password and, in one CDP session while the agent
+waits, fills it into the REAL https page only when that page is on the approved domain, submits
+the form (the Create click), stores it encrypted, and clears the field; `need_password` fills
+and submits a saved login the same way. The agent is answered `submitted`/`none`/`exists`,
+never a password, and continues from the resulting page. The Playwright MCP server is pinned
+(`@playwright/mcp@0.0.80`, whose snapshot renders a password input's value) and its evaluate,
+network and screenshot tools are disallowed.
+
+**Residual risk.** Not preventable from outside the page: a site that re-renders a failed
+login with the password still in the field after the clear (the agent's next snapshot would
+show it), and a show-password toggle the agent clicks against the prompt rules. A sign-up the
+site rejects after submit still leaves the stored row, which the user deletes in Logins. Prompt: KNOWN LOGINS section lists domain+email only. `/logins` drawer
 (list, delete, "created by"). Done when: an account-required site is handled with one
 Approve in chat and the password is retrievable from the drawer.
 

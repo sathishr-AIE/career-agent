@@ -96,9 +96,9 @@ export function PromptCard({ prompt, onAnswered }: { prompt: OpenPrompt; onAnswe
             </div>
           </div>
           <div className="qcard__note">
-            Approving lets the agent create this account and accept these terms. The password is
-            generated and typed into the page by the backend (never shown to the agent), then saved
-            to Logins.
+            Approving creates this account and accepts these terms: the backend generates a
+            password, types it in and submits the sign-up form (never shown to the agent), then
+            saves it to Logins.
           </div>
           <div className="qcard__actions">
             <button type="button" className="btn primary" disabled={busy} onClick={() => send({ answer: 'approve' })}>
@@ -117,8 +117,8 @@ export function PromptCard({ prompt, onAnswered }: { prompt: OpenPrompt; onAnswe
             {p.domain && <div><span>Domain</span>{p.domain}</div>}
           </div>
           <div className="qcard__note">
-            The saved password for this site is typed into the page by the backend when the browser
-            is really on it; the agent never sees it.
+            The backend types the saved password in and submits the sign-in form when the browser
+            is really on this site; the agent never sees it.
           </div>
         </>
       )}

@@ -248,14 +248,20 @@ def test_an_agent_put_never_overwrites_any_existing_login(conn):
 
 
 @pytest.mark.parametrize("domain", ["careers.ses.com", "ses.wd3.myworkdayjobs.com",
+                                    "acme.wd103.myworkdayjobs.com", "bbc.co.uk",
+                                    "acme.vercel.app", "boards.greenhouse.io",
                                     "https://www.careers.ses.com/join"])
 def test_account_domain_accepts_a_real_site(domain):
     assert credentials.account_domain(domain) == credentials.normalize_domain(domain)
 
 
-@pytest.mark.parametrize("domain", ["com", "localhost", "127.0.0.1", "[::1]", "co.in",
-                                    "www.co.in", "co.uk", "myworkdayjobs.com", "github.io",
-                                    "greenhouse.io", "lever.co", "successfactors.com"])
+@pytest.mark.parametrize("domain", [
+    "com", "localhost", "127.0.0.1", "[::1]", "127.1", "0x7f.1", "0x7f000001",
+    "co.in", "www.co.in", "co.uk", "ac.uk", "gov.in", "org.in", "gov.uk", "com.sg", "com.br",
+    "myworkdayjobs.com", "wd3.myworkdayjobs.com", "acme.jobs.myworkdayjobs.com",
+    "github.io", "greenhouse.io", "lever.co", "successfactors.com", "vercel.app",
+    "netlify.app", "pages.dev", "web.app", "firebaseapp.com", "herokuapp.com",
+    "azurewebsites.net", "blogspot.com"])
 def test_account_domain_refuses_bare_ip_and_shared_suffixes(domain):
     with pytest.raises(ValueError):
         credentials.account_domain(domain)

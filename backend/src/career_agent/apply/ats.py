@@ -269,7 +269,7 @@ def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual",
         otherwise it waits out answer_wait_s."""
         from career_agent.web import actions   # web imports this module
         try:
-            ok = actions.answer_prompt(c, pid, {}).get("ok")
+            ok = actions.answer_prompt(c, pid, {}, auto=True).get("ok")
         except Exception as exc:
             log.warning("need_password auto-answer failed for job %s: %s", job_id,
                         type(exc).__name__)

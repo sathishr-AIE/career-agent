@@ -1249,7 +1249,7 @@ def test_answer_prompt_validates_by_kind_and_refuses_closed(conn, runs):
     assert actions.answer_prompt(conn, 999, {})["code"] == 404
 
 
-# -- Task 15: approve_account / need_password (the backend fills over CDP) ---
+# -- Task 15: approve_account / need_password (backend fills and submits) ----
 
 @pytest.fixture
 def key(monkeypatch):
@@ -1259,9 +1259,11 @@ def key(monkeypatch):
 
 @pytest.fixture
 def browser_on(monkeypatch):
-    """Point secret_fill at fake CDP pages -- never a real Chrome."""
+    """Point secret_fill at fake CDP pages -- never a real Chrome -- with no
+    post-submit wait (an SPA fake never navigates)."""
     from test_secret_fill import connect_to
     from career_agent.apply import secret_fill
+    monkeypatch.setattr(secret_fill, "SUBMIT_WAIT_S", 0)
 
     def on(*pages):
         monkeypatch.setattr(secret_fill, "_live_connect", connect_to(*pages))
@@ -1299,7 +1301,7 @@ def _waiting_run(runs):
     return run
 
 
-def test_approve_account_fills_then_stores_and_never_sends_the_password(conn, runs, key, browser_on):
+def test_approve_account_fills_submits_then_stores_and_never_sends_the_password(conn, runs, key, browser_on):
     from test_secret_fill import Field, Page
     from career_agent import credentials
     from career_agent.web import actions
@@ -1308,9 +1310,10 @@ def test_approve_account_fills_then_stores_and_never_sends_the_password(conn, ru
     pid = _open(conn, "approve_account", _ACCT)
     assert actions.answer_prompt(conn, pid, {"answer": "approve"})["ok"]
 
-    pw = page.main.fields[0].value
-    assert len(pw) == 20 and page.main.fields[1].value == pw     # confirm field too
-    assert [_sent_body(s) for s in run.sent] == [{"id": "acct", "answer": "approve", "filled": True}]
+    pw = page.main.fields[0].fills[0]
+    assert len(pw) == 20 and page.main.fields[1].fills == [pw]  # confirm field too
+    assert page.main.submits == ["requestSubmit"]               # the backend's submit is Create
+    assert [_sent_body(s) for s in run.sent] == [{"id": "acct", "answer": "approve", "submitted": True}]
     assert pw not in "".join(run.sent)
     cred = credentials.get(conn, "careers.ses.com")
     assert cred["password"] == pw and cred["created_by"] == "agent"
@@ -1323,18 +1326,19 @@ def test_approve_account_fills_then_stores_and_never_sends_the_password(conn, ru
     assert answer == {"id": "acct", "answer": "approve"}
 
 
-def test_approve_account_on_a_foreign_real_page_fills_and_stores_nothing(conn, runs, key, browser_on):
+def test_approve_account_on_a_foreign_real_page_submits_and_stores_nothing(conn, runs, key, browser_on):
     from test_secret_fill import Field, Page
     from career_agent import credentials
     from career_agent.web import actions
-    [page] = browser_on(Page("https://evil.com/join", [Field()]))
+    [page] = browser_on(Page("https://evil.com/join?token=s3cr3t#frag", [Field()]))
     _in_flight(conn)
     run = _waiting_run(runs)
     pid = _open(conn, "approve_account", _ACCT)
     r = actions.answer_prompt(conn, pid, {"answer": "approve"})
     assert r["code"] == 409 and "https://evil.com/join" in r["message"]
+    assert "s3cr3t" not in r["message"]                          # scheme+host+path only
     assert run.sent == [] and credentials.list_(conn) == []
-    assert page.main.fields[0].value == ""
+    assert page.main.fields[0].fills == [] and page.main.submits == []
     assert chat.open_prompt_for_job(conn, 1)["id"] == pid
 
 
@@ -1347,11 +1351,12 @@ def test_approve_account_refuses_a_login_url_off_the_domain(conn, runs, key, bro
     pid = _open(conn, "approve_account", dict(_ACCT, login_url="https://evil.com/join"))
     r = actions.answer_prompt(conn, pid, {"answer": "approve"})
     assert r["code"] == 409 and run.sent == [] and credentials.list_(conn) == []
-    assert page.main.fields[0].value == ""
+    assert page.main.fields[0].fills == []
     assert chat.open_prompt_for_job(conn, 1)["id"] == pid
 
 
-@pytest.mark.parametrize("domain", ["co.in", "myworkdayjobs.com", "localhost", "com"])
+@pytest.mark.parametrize("domain", ["co.in", "myworkdayjobs.com", "wd3.myworkdayjobs.com",
+                                    "vercel.app", "localhost", "com"])
 def test_approve_account_refuses_shared_suffix_and_bare_domains(conn, runs, key, domain):
     from career_agent import credentials
     from career_agent.web import actions
@@ -1375,7 +1380,7 @@ def test_approve_account_with_an_existing_login_tells_the_agent_it_exists(conn, 
     assert r["message"] == ("a login already exists for careers.ses.com; use it, or delete "
                             "it in Logins first")
     assert [_sent_body(s) for s in run.sent] == [{"id": "acct", "answer": "exists"}]
-    assert page.main.fields[0].value == ""
+    assert page.main.fields[0].fills == []
     assert credentials.get(conn, "careers.ses.com")["password"] == "agent-made-pw"
 
 
@@ -1398,7 +1403,7 @@ def test_an_exception_after_the_approve_claim_reopens_the_card_with_503(conn, ru
 
     def boom(*a, **kw):
         raise RuntimeError("cdp went away")
-    monkeypatch.setattr(secret_fill, "fill_password", boom)
+    monkeypatch.setattr(secret_fill, "fill_and_submit", boom)
     _in_flight(conn)
     run = _waiting_run(runs)
     pid = _open(conn, "approve_account", _ACCT)
@@ -1407,26 +1412,53 @@ def test_an_exception_after_the_approve_claim_reopens_the_card_with_503(conn, ru
     assert chat.open_prompt_for_job(conn, 1)["id"] == pid
 
 
+def test_a_store_failure_after_submit_clears_the_field_and_reopens_the_card(conn, runs, key, browser_on, monkeypatch):
+    from test_secret_fill import Field, Page
+    from career_agent import credentials
+    from career_agent.web import actions
+    [page] = browser_on(Page("https://careers.ses.com/join", [Field()], navigates=False))
+
+    def boom(*a, **kw):
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(credentials, "put", boom)
+    _in_flight(conn)
+    run = _waiting_run(runs)
+    pid = _open(conn, "approve_account", _ACCT)
+    r = actions.answer_prompt(conn, pid, {"answer": "approve"})
+    assert r["code"] == 503 and run.sent == []
+    assert page.main.submits == ["requestSubmit"] and page.main.fields[0].value == ""
+    assert chat.open_prompt_for_job(conn, 1)["id"] == pid
+
+
 def _need(domain="careers.ses.com", url="https://careers.ses.com/login"):
     return {"id": "np", "kind": "need_password", "question": f"Password for {domain}",
             "domain": domain, "url": url}
 
 
-def test_need_password_fills_the_real_matching_page_and_answers_filled(conn, runs, key, browser_on):
+def test_need_password_is_refused_on_the_human_answer_path(conn, runs, key):
+    from career_agent.web import actions
+    run = _waiting_run(runs)
+    pid = _open(conn, "need_password", _need())
+    r = actions.answer_prompt(conn, pid, {"answer": "x"})
+    assert r["code"] == 422 and run.sent == []
+    assert chat.open_prompt_for_job(conn, 1)["id"] == pid
+
+
+def test_need_password_fills_and_submits_the_real_matching_page(conn, runs, key, browser_on):
     from test_secret_fill import Field, Page
     from career_agent import credentials
     from career_agent.web import actions
     pw = "Stored!Pass_4321abcd"
     credentials.put(conn, "careers.ses.com", "", "a@x.com", pw, "agent")
-    [page] = browser_on(Page("https://jobs.careers.ses.com/login", [Field()]))
+    [page] = browser_on(Page("https://jobs.careers.ses.com/login?next=%2Fhome", [Field()]))
     run = _waiting_run(runs)
     pid = _open(conn, "need_password", _need())
-    assert actions.answer_prompt(conn, pid, {})["ok"]
-    assert page.main.fields[0].value == pw
-    assert [_sent_body(s) for s in run.sent] == [{"id": "np", "filled": True}]
+    assert actions.answer_prompt(conn, pid, {}, auto=True)["ok"]
+    assert page.main.fields[0].fills == [pw] and page.main.submits == ["requestSubmit"]
+    assert [_sent_body(s) for s in run.sent] == [{"id": "np", "submitted": True}]
     assert pw not in "".join(run.sent) and pw not in _db_dump(conn)
-    assert ("Filled the saved login for careers.ses.com on https://jobs.careers.ses.com/login"
-            in _chat_texts(conn))
+    assert ("Submitted the saved login for careers.ses.com on "
+            "https://jobs.careers.ses.com/login") in _chat_texts(conn)
 
 
 def test_c1_a_claimed_url_never_releases_the_login_on_a_foreign_real_page(conn, runs, key, browser_on):
@@ -1440,22 +1472,35 @@ def test_c1_a_claimed_url_never_releases_the_login_on_a_foreign_real_page(conn, 
     [page] = browser_on(Page("https://evil.com/login", [Field()]))
     run = _waiting_run(runs)
     pid = _open(conn, "need_password", _need("linkedin.com", "https://www.linkedin.com/login"))
-    assert actions.answer_prompt(conn, pid, {})["ok"]
-    assert page.main.fields[0].value == ""
+    assert actions.answer_prompt(conn, pid, {}, auto=True)["ok"]
+    assert page.main.fields[0].fills == [] and page.main.submits == []
     assert [_sent_body(s) for s in run.sent] == [{"id": "np", "answer": "none"}]
     assert pw not in "".join(run.sent) and pw not in _db_dump(conn)
     assert any("https://evil.com/login" in t for t in _chat_texts(conn))
+
+
+def test_need_password_never_uses_a_stored_login_for_a_bare_suffix(conn, runs, key, browser_on):
+    from test_secret_fill import Field, Page
+    from career_agent import credentials
+    from career_agent.web import actions
+    credentials.put(conn, "co.in", "", "me@x.com", "Users!Own_Pass_9876", "user")
+    [page] = browser_on(Page("https://anything.co.in/login", [Field()]))
+    run = _waiting_run(runs)
+    pid = _open(conn, "need_password", _need("co.in", "https://anything.co.in/login"))
+    assert actions.answer_prompt(conn, pid, {}, auto=True)["ok"]
+    assert page.main.fields[0].fills == []
+    assert [_sent_body(s) for s in run.sent] == [{"id": "np", "answer": "none"}]
 
 
 def test_need_password_with_no_saved_login_answers_none(conn, runs, key):
     from career_agent.web import actions
     run = _waiting_run(runs)
     pid = _open(conn, "need_password", _need())
-    assert actions.answer_prompt(conn, pid, {})["ok"]
+    assert actions.answer_prompt(conn, pid, {}, auto=True)["ok"]
     assert _sent_body(run.sent[0]) == {"id": "np", "answer": "none"}
 
 
-async def test_need_password_is_filled_on_ask_and_logins_reach_the_prompt(conn, runs, factory, key, browser_on):
+async def test_need_password_is_submitted_on_ask_and_logins_reach_the_prompt(conn, runs, factory, key, browser_on):
     from test_secret_fill import Field, Page
     from career_agent import credentials
     pw = "Auto!Pass_1234wxyz"
@@ -1471,15 +1516,14 @@ async def test_need_password_is_filled_on_ask_and_logins_reach_the_prompt(conn, 
         return AgentResult("draft_ready")
 
     await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory)
-    assert [_sent_body(s) for s in seen["sent"]] == [{"id": "np", "filled": True}]
-    assert page.main.fields[0].value == pw
+    assert [_sent_body(s) for s in seen["sent"]] == [{"id": "np", "submitted": True}]
+    assert page.main.fields[0].fills == [pw]
     assert "careers.ses.com (sign in as a@x.com)" in seen["prompt"]
     assert pw not in seen["prompt"] and pw not in _db_dump(conn)
 
 
 async def test_a_failed_auto_need_password_answers_none_at_once(conn, runs, factory, key, monkeypatch):
     from career_agent import credentials
-    from career_agent.apply import secret_fill
     from career_agent.web import actions
     credentials.put(conn, "careers.ses.com", "", "a@x.com", "pw-Fail-123!", "agent")
     seen = {}
@@ -1501,7 +1545,7 @@ async def test_a_failed_auto_need_password_answers_none_at_once(conn, runs, fact
 
 def test_an_approve_account_card_carries_the_real_page_urls(conn, factory, browser_on):
     from test_secret_fill import Page
-    browser_on(Page("https://careers.ses.com/join"), Page("https://evil.com/x"))
+    browser_on(Page("https://careers.ses.com/join?invite=abc"), Page("https://evil.com/x"))
     ats_apply._chat_events(factory, 1, "nn").on_ask(dict(_ACCT, page_urls=["https://lie.example/"]))
     payload = json.loads(chat.open_prompt_for_job(conn, 1)["payload"])
     assert payload["page_urls"] == ["https://careers.ses.com/join", "https://evil.com/x"]

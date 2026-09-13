@@ -372,7 +372,8 @@ def test_build_prompt_carries_account_rules_and_known_logins():
     p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual",
                      can_submit=False, nonce=N, logins=logins)
     assert "approve_account" in p and "need_password" in p
-    assert "You never type, read, or ask for a password" in p and '"filled"' in p
+    assert "You never type, read, or ask for a password" in p and '"submitted"' in p
+    assert "show-password" in p and "screenshot" in p
     assert "== KNOWN LOGINS ==" in p and "careers.ses.com (sign in as asha@example.com)" in p
     assert "should-never-appear" not in p
     assert "Never create an account" not in p
@@ -910,12 +911,21 @@ def test_browser_run_code_unsafe_is_disallowed_at_the_cli():
     cmd = agent_mod.build_cmd("sonnet", Path("C:/nowhere/.mcp-apply.json"),
                               session_id="11111111-1111-4111-8111-111111111111")
     i = cmd.index("--disallowedTools")
-    assert cmd[i + 1] == "mcp__playwright__browser_run_code_unsafe"
-    assert cmd[i + 2] == "mcp__playwright__browser_evaluate"
+    blocked = ["mcp__playwright__browser_run_code_unsafe",
+               "mcp__playwright__browser_evaluate",          # could read a filled .value
+               "mcp__playwright__browser_network_request",   # the login POST body
+               "mcp__playwright__browser_network_requests",
+               "mcp__playwright__browser_take_screenshot"]
+    assert cmd[i + 1:i + 1 + len(blocked)] == blocked
     # variadic flag: the next element must be another flag, never a value
-    assert cmd[i + 3].startswith("--")
+    assert cmd[i + 1 + len(blocked)].startswith("--")
     assert cmd.count("--disallowedTools") == 1
     assert cmd[cmd.index("--tools") + 1] == ""
+
+
+def test_the_playwright_mcp_server_version_is_pinned():
+    args = agent_mod._mcp_config(9222)["mcpServers"]["playwright"]["args"]
+    assert args[0] == "@playwright/mcp@0.0.80"
 
 
 # -- live-safety FIX 2: transcripts record what was typed, secrets redacted --

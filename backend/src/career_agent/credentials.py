@@ -3,6 +3,7 @@
 Fernet-encrypted at rest via security.py; list_() never returns a password or
 ciphertext -- only put()/get() ever touch security.decrypt/encrypt."""
 import ipaddress
+import re
 import secrets
 import string
 from urllib.parse import urlsplit
@@ -69,27 +70,38 @@ class LoginExists(Exception):
     an approved account is only ever created, never re-keyed."""
 
 
-# Shared or public suffixes: a login saved under one would be offered to every
-# tenant on it -- on a shared ATS the key is the tenant's own host
-# (ses.wd3.myworkdayjobs.com). ponytail: a hand list, not the Public Suffix
-# List; add a suffix when a new shared platform shows up.
-_SHARED_SUFFIXES = {"co.in", "co.uk", "com.au", "github.io", "myworkdayjobs.com",
-                    "greenhouse.io", "lever.co", "icims.com", "smartrecruiters.com",
-                    "taleo.net", "successfactors.com", "ashbyhq.com"}
+# Public suffixes (a registrable name sits directly left of one) and shared
+# platforms (every tenant gets a subdomain): a login saved under either would
+# be offered to every site on it. A tenant host under a platform
+# (acme.vercel.app) is fine. ponytail: a hand-kept list; the upgrade path is
+# the Public Suffix List (publicsuffix.org) once a miss shows up.
+_SHARED_SUFFIXES = {
+    "co.in", "co.uk", "com.au", "ac.uk", "gov.in", "org.in", "gov.uk", "com.sg", "com.br",
+    "github.io", "myworkdayjobs.com", "greenhouse.io", "lever.co", "icims.com",
+    "smartrecruiters.com", "taleo.net", "successfactors.com", "ashbyhq.com",
+    "vercel.app", "netlify.app", "pages.dev", "web.app", "firebaseapp.com",
+    "herokuapp.com", "azurewebsites.net", "blogspot.com"}
+# Workday tenants live at <tenant>.wd<N>.myworkdayjobs.com; wd<N> alone is shared.
+_WORKDAY_TENANT = re.compile(r"[a-z0-9-]+\.wd\d+\.myworkdayjobs\.com")
+# A browser reads an all-numeric/hex host as an IPv4 address (127.1, 0x7f.1).
+_NUMERIC_LABEL = re.compile(r"\d+|0x[0-9a-f]*")
 
 
 def account_domain(value: str) -> str:
-    """normalize_domain, refusing a key no account may be saved under: a bare
-    label, an IP literal, localhost, or a shared suffix (checked after the
-    www. strip, so www.co.in is co.in). Raises ValueError."""
+    """normalize_domain, refusing a key no login may be saved or used under: a
+    bare label, localhost, an IP literal or any all-numeric/hex host, a shared
+    suffix itself (checked after the www. strip, so www.co.in is co.in), or a
+    Workday host that is not a tenant's. Raises ValueError."""
     d = normalize_domain(value)
+    labels = d.split(".")
     try:
         ipaddress.ip_address(d)
-        is_ip = True
+        numeric = True
     except ValueError:
-        is_ip = False
-    if (is_ip or "." not in d or d == "localhost" or d.endswith(".localhost")
-            or d in _SHARED_SUFFIXES):
+        numeric = all(_NUMERIC_LABEL.fullmatch(label) for label in labels)
+    workday = d == "myworkdayjobs.com" or d.endswith(".myworkdayjobs.com")
+    if (numeric or len(labels) < 2 or d == "localhost" or d.endswith(".localhost")
+            or d in _SHARED_SUFFIXES or (workday and not _WORKDAY_TENANT.fullmatch(d))):
         raise ValueError(f"not a site an account can be saved for: {d!r}")
     return d
 
@@ -103,6 +115,20 @@ def host_matches(page_url: str, domain: str) -> bool:
     except ValueError:
         return False
     return host == d or host.endswith("." + d)
+
+
+def secure_url(url) -> bool:
+    """https, or http only for a local server: never javascript:, file:, or a
+    bare host. A backslash ends the host, as in a browser (normalize_domain)."""
+    if not isinstance(url, str):
+        return False
+    try:
+        parts = urlsplit(url.strip().replace("\\", "/"))
+        host = parts.hostname
+    except ValueError:
+        return False
+    return bool(host) and (parts.scheme == "https" or (
+        parts.scheme == "http" and host in ("localhost", "127.0.0.1", "::1")))
 
 
 def put(conn, domain: str, login_url: str, email: str, password: str,
