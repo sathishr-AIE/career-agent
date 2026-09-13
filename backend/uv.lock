@@ -69,6 +69,7 @@ source = { editable = "." }
 dependencies = [
     { name = "apify-client" },
     { name = "claude-agent-sdk" },
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "jinja2" },
@@ -91,6 +92,7 @@ dev = [
 requires-dist = [
     { name = "apify-client" },
     { name = "claude-agent-sdk" },
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "jinja2" },

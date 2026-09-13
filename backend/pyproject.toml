@@ -5,7 +5,7 @@ requires-python = ">=3.13"
 dependencies = [
     "claude-agent-sdk", "httpx", "pydantic>=2", "apify-client",
     "playwright", "fastapi", "uvicorn[standard]", "jinja2", "python-dotenv",
-    "python-multipart", "tomlkit", "python-docx",
+    "python-multipart", "tomlkit", "python-docx", "cryptography",
 ]
 
 [project.optional-dependencies]

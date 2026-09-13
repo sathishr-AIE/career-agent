@@ -350,6 +350,30 @@ def test_location_check_states_remote_ok_explicitly():
     assert p_ok != p_not_ok
 
 
+# -- known logins / S5 account rules (Task 14: store only, not wired) -----
+
+def test_known_logins_section_renders_domain_and_email_never_password():
+    logins = [{"domain": "careers.ses.com", "email": "asha@example.com",
+               "password": "should-never-appear"}]
+    s = agent_mod._known_logins_section(logins)
+    assert "careers.ses.com" in s
+    assert "asha@example.com" in s
+    assert "should-never-appear" not in s
+    assert "need_password" in s
+
+
+def test_known_logins_section_empty_list_is_empty_string():
+    assert agent_mod._known_logins_section([]) == ""
+
+
+def test_account_rules_s5_constant_exists_and_is_not_wired_into_build_prompt():
+    assert "approve_account" in agent_mod.ACCOUNT_RULES_S5
+    assert "password" in agent_mod.ACCOUNT_RULES_S5.lower()
+    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual",
+                     can_submit=False, nonce=N)
+    assert agent_mod.ACCOUNT_RULES_S5 not in p
+
+
 # -- consume_stream -------------------------------------------------------
 
 def test_consume_stream_collects_text_and_cost():

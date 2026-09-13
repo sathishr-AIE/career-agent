@@ -153,6 +153,17 @@ CREATE TABLE IF NOT EXISTS agent_prompt (
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     answered_at     TEXT
 );
+
+CREATE TABLE IF NOT EXISTS site_credential (
+    id            INTEGER PRIMARY KEY,
+    domain        TEXT NOT NULL UNIQUE,
+    login_url     TEXT,
+    email         TEXT NOT NULL,
+    password_enc  TEXT NOT NULL,
+    created_by    TEXT NOT NULL CHECK (created_by IN ('agent','user')),
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at  TEXT
+);
 """
 
 
