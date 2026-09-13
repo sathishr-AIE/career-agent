@@ -366,13 +366,15 @@ def resume_job(conn: sqlite3.Connection, job_id: int, brief_path: Path,
         return _refuse(409, denial)
     # Claimed until the run returns: the auto worker must not resume it meanwhile.
     checkpoint.set_auto_resumed(conn, job_id, True)
-    worker.say(conn, job_id, "Continuing where it left off")
+    after = chat.post_message(conn, chat.conversation_for_job(conn, job_id), "system",
+                              "Continuing where it left off")
     task = asyncio.create_task(_resume_run(conn, job_id, brief_path, candidate_profile_path,
                                            conn_factory))
     if tasks is not None:
         tasks.add(task)
         task.add_done_callback(tasks.discard)
-    return {"ok": True, "message": "Continuing where it left off"}
+    # `after`: every outcome of the background run posts a newer chat line.
+    return {"ok": True, "message": "Continuing where it left off", "after": after}
 
 
 async def _resume_run(conn, job_id: int, brief_path: Path, candidate_profile_path: Path,
@@ -390,7 +392,7 @@ async def _resume_run(conn, job_id: int, brief_path: Path, candidate_profile_pat
         return
     finally:
         try:        # a human touch re-arms the worker's one auto-resume
-            checkpoint.set_auto_resumed(conn, job_id, False)
+            checkpoint.release_claim(conn, job_id)
         except Exception:
             log.warning("could not re-arm auto-resume for job %s", job_id, exc_info=True)
     worker.say(conn, job_id, worker._outcome_text(conn, job_id, result))

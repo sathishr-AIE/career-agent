@@ -278,12 +278,9 @@ async def apply_worker_loop(conn_factory, brief_path, profile_path,
     fresh connection, matching the rest of the app's per-call pattern.
     chat_conn_factory (default: conn_factory) is the lighter one handed to
     submit() for the agent's narration (see ats._chat_events)."""
-    # Idempotent: app.lifespan already ran it before the first _conn().
-    conn = conn_factory()
-    try:
-        startup_sweep(conn)
-    finally:
-        conn.close()
+    # No startup_sweep here: app.lifespan runs it once at boot, before any
+    # _conn(). By now a request may have started a submit() whose in_flight
+    # row exists but whose run is not yet in RUNS -- a sweep would drop it.
     while True:
         conn = conn_factory()
         state = get_run_state(conn, "apply")

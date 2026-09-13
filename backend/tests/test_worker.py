@@ -748,8 +748,7 @@ async def test_a_chat_write_failure_does_not_change_the_tick(
     assert state["status"] == "running" and state["current_job_id"] == job_id
 
 
-async def test_the_loop_sweeps_orphaned_checkpoints_on_start(conn, brief_path, profile_path, monkeypatch,
-                                                              tmp_path):
+def test_startup_sweep_makes_orphaned_checkpoints_resumable(conn, monkeypatch):
     """A running checkpoint with no live run (a crashed server) becomes resumable;
     one a live run is still driving is left alone."""
     from career_agent.apply import agent as agent_mod
@@ -762,22 +761,26 @@ async def test_the_loop_sweeps_orphaned_checkpoints_on_start(conn, brief_path, p
     class Live:
         done = asyncio.Event()      # has .is_set() -> False
     monkeypatch.setattr(agent_mod, "RUNS", {b: Live()})
-    opened = []
-
-    def factory():
-        opened.append(db.connect(tmp_path / "t.db"))
-        return opened[-1]
-    task = asyncio.create_task(worker.apply_worker_loop(factory, brief_path, profile_path))
-    await asyncio.sleep(0.05)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    worker.startup_sweep(conn)
     assert checkpoint.get(conn, a)["status"] == "resumable"
     assert checkpoint.get(conn, b)["status"] == "running"
-    with pytest.raises(sqlite3.ProgrammingError):      # M4: the sweep's connection is closed
-        opened[0].execute("SELECT 1")
+
+
+async def test_the_loop_itself_never_sweeps(conn, brief_path, profile_path, monkeypatch, tmp_path):
+    """Round 2 Minor 2: after boot a request-started submit can own an in_flight
+    row that is not yet in RUNS; only app.lifespan sweeps."""
+    from career_agent.apply import agent as agent_mod
+    from career_agent.apply import checkpoint
+
+    job_id = _job(conn, "starting")
+    checkpoint.start(conn, job_id, "s", "n", mode="manual", can_submit=False)
+    conn.execute("INSERT INTO application (job_id, resume_version, status, started_at)"
+                 " VALUES (?, 'v', 'in_flight', datetime('now'))", (job_id,))
+    conn.commit()
+    monkeypatch.setattr(agent_mod, "RUNS", {})
+    await _start_and_stop_loop(lambda: db.connect(tmp_path / "t.db"), brief_path, profile_path)
+    assert conn.execute("SELECT status FROM application").fetchone()["status"] == "in_flight"
+    assert checkpoint.get(conn, job_id)["status"] == "running"
 
 
 # -- Task 11: auto-resume, resume cap, orphan in_flight ------------------------
@@ -857,8 +860,8 @@ async def _start_and_stop_loop(factory, brief_path, profile_path):
 
 
 @pytest.mark.parametrize("implemented", [False, True])
-async def test_the_loop_drops_orphan_in_flight_rows_while_submission_is_off(
-        conn, brief_path, profile_path, monkeypatch, tmp_path, implemented):
+def test_startup_sweep_drops_orphan_in_flight_rows_while_submission_is_off(
+        conn, monkeypatch, implemented):
     from career_agent.apply import agent as agent_mod
 
     a, b = _job(conn, "orphan"), _job(conn, "live")
@@ -871,7 +874,7 @@ async def test_the_loop_drops_orphan_in_flight_rows_while_submission_is_off(
         done = asyncio.Event()
     monkeypatch.setattr(agent_mod, "RUNS", {b: Live()})
     monkeypatch.setattr(worker.ats_apply, "SUBMISSION_IMPLEMENTED", implemented)
-    await _start_and_stop_loop(lambda: db.connect(tmp_path / "t.db"), brief_path, profile_path)
+    worker.startup_sweep(conn)
     left = [r["job_id"] for r in conn.execute("SELECT job_id FROM application WHERE status = 'in_flight'")]
     dropped = [r["job_id"] for r in conn.execute("SELECT job_id FROM event WHERE type = 'orphan_in_flight_dropped'")]
     if implemented:

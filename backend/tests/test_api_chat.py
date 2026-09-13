@@ -303,6 +303,8 @@ async def test_resume_launches_a_resumed_submit_in_the_background(db_path, runs,
     tasks = set()
     r = actions.resume_job(c, 1, "brief", "profile", "factory", tasks)
     assert r["ok"] and r["message"]
+    continuing = c.execute("SELECT id FROM message WHERE content LIKE 'Continuing%'").fetchone()["id"]
+    assert r["after"] == continuing                         # the UI waits for a newer line
     await asyncio.gather(*tasks)
     job_id, kw, claimed = calls[0]
     assert claimed == 1                                         # I5b: claimed while it runs
@@ -380,3 +382,28 @@ async def test_lifespan_sweeps_before_the_first_conn(db_path, monkeypatch):
         pass
     await asyncio.sleep(0)
     assert order[:2] == ["startup_sweep", "_conn"]
+
+
+async def test_a_continue_never_re_arms_a_checkpoint_it_no_longer_holds(db_path, runs, monkeypatch):
+    """Round 2 Minor 3: the background resume was refused, and meanwhile the
+    worker's own session took the checkpoint -- its claim must stand."""
+    import asyncio
+
+    c = db.connect(db_path)
+    _resumable(c)
+
+    async def fake_tailor(conn, job_id, brief_path):
+        return "base-v1"
+
+    async def taken_by_the_worker(conn, job_id, **kw):
+        checkpoint.resume(conn, job_id)                     # the worker's session: running
+        return {"ok": False, "reason": "job 1 has no resumable checkpoint"}
+    monkeypatch.setattr(actions.worker, "tailor_for_apply", fake_tailor)
+    monkeypatch.setattr(actions.worker, "guard", lambda *a, **kw: None)
+    monkeypatch.setattr(actions.ats_apply, "submit", taken_by_the_worker)
+    monkeypatch.setattr(actions, "load_brief", lambda p: "BRIEF")
+    monkeypatch.setattr(actions.context, "load_candidate_profile_or_none", lambda p: "PROFILE")
+    tasks = set()
+    assert actions.resume_job(c, 1, "brief", "profile", None, tasks)["ok"]
+    await asyncio.gather(*tasks)
+    assert checkpoint.get(c, 1)["auto_resumed"] == 1

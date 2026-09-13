@@ -26,6 +26,9 @@ export function Chat() {
   const [resuming, setResuming] = useState(false)
   const [resumeError, setResumeError] = useState<string | null>(null)
   const lastId = useRef(0)
+  // A clicked Continue waits for the first chat line after its own: the resumed
+  // run either takes the job (resumable goes false) or reports why it didn't.
+  const resumeAfter = useRef<number | null>(null)
   // Which conversation the pane currently belongs to. A fetch that was
   // already in flight when you switched conversations must not append its
   // messages (or move the cursor) into the new one.
@@ -63,8 +66,11 @@ export function Chat() {
         }
         setOpenPrompt(r.open_prompt)
         setResumable(r.resumable)
-        // A clicked Continue stays disabled until a poll shows the run took it.
-        if (!r.resumable) setResuming(false)
+        const after = resumeAfter.current
+        if (!r.resumable || (after !== null && r.messages.some((x) => x.id > after))) {
+          resumeAfter.current = null
+          setResuming(false)
+        }
       })
       .catch(() => {
         /* transient poll failure -- the next tick re-asks from the same cursor */
@@ -90,6 +96,7 @@ export function Chat() {
     setOpenPrompt(null)
     setResumable(false)
     setResuming(false)
+    resumeAfter.current = null
     setResumeError(null)
     loadMessages()
     const t = setInterval(loadMessages, POLL_MS)
@@ -106,8 +113,11 @@ export function Chat() {
     if (!jobId) return
     setResuming(true)
     setResumeError(null)
-    post(`/api/chat/jobs/${jobId}/resume`)
-      .then(loadMessages)
+    post<{ ok: boolean; message: string; after: number }>(`/api/chat/jobs/${jobId}/resume`)
+      .then((r) => {
+        resumeAfter.current = r.after
+        return loadMessages()
+      })
       .catch((e) => {
         setResumeError(errorText(e))
         setResuming(false)
