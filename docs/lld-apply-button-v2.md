@@ -168,7 +168,11 @@ its source is AGPL):
   blocks until stdout *closes*, so a session that hangs with stdout open would never reach
   a wait at all. On expiry the process tree is killed, which closes stdout, and the
   transcript collected so far is kept. Every transcript is footed with
-  `-- job <id>: cost $<usd>, <ms> ms --`; `ats._run` logs the same at INFO. No DB column
+  `-- job <id>: cost $<usd>, <ms> ms --`; `ats._run` logs the same at INFO. A run with no
+  `result` message (timeout, crash) has no `total_cost_usd`, so the footer says
+  `cost unknown (no result message; tokens input=…, output=…, cache_write=…, cache_read=…)`
+  from the assistant messages' `usage` instead, and `AgentResult.usage` carries those
+  counts; there is no price table in code, so they are not converted to dollars. No DB column
   for cost in P0.
 - `shutil.which("claude")` / `which("npx")` checked up front (raising `PreconditionError`)
   as a backstop; `ats.preflight()` — claude + npx + Chrome — is the real check and runs in

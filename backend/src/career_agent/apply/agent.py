@@ -50,6 +50,11 @@ class AgentResult:
     transcript_path: str = ""
     cost_usd: float = 0.0
     duration_ms: int = 0
+    # Set ONLY when no `result` message arrived (a timeout, a crash): the
+    # real cost is then unknown and cost_usd's 0.0 is not a price. These
+    # are the token counts seen instead -- no per-model price table lives
+    # in this code, so they are not converted to dollars.
+    usage: dict | None = None
 
 
 _SIMPLE = {"APPLIED": "applied", "EXPIRED": "expired",
@@ -484,9 +489,20 @@ def summarize_tool_input(inp, limit: int = 300) -> str:
     return s if len(s) <= limit else s[:limit] + "…"
 
 
-def consume_stream(lines) -> tuple[str, float]:
-    """Fold claude's stream-json stdout into (text transcript, cost)."""
-    parts, cost = [], 0.0
+_USAGE_KEYS = ("input_tokens", "output_tokens",
+               "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
+def consume_stream(lines) -> tuple[str, float | None, dict]:
+    """Fold claude's stream-json stdout into (text transcript, cost, usage).
+
+    cost is None when no `result` message arrived (the watchdog killed the
+    run first): only that message carries total_cost_usd, so the cost is
+    unknown, not zero. usage is the token count summed over the assistant
+    messages seen, the one record of spend such a run leaves. stream-json
+    repeats a message's usage on each content block it emits, so it is
+    taken once per message id (the largest seen), not once per line."""
+    parts, cost, per_msg = [], None, {}
     for line in lines:
         line = line.strip()
         if not line:
@@ -497,6 +513,12 @@ def consume_stream(lines) -> tuple[str, float]:
             parts.append(line)
             continue
         if msg.get("type") == "assistant":
+            usage = msg.get("message", {}).get("usage")
+            if usage:
+                seen = per_msg.setdefault(
+                    msg["message"].get("id") or object(), {})
+                for k in _USAGE_KEYS:
+                    seen[k] = max(seen.get(k, 0), usage.get(k) or 0)
             for block in msg.get("message", {}).get("content", []):
                 if block.get("type") == "text":
                     parts.append(block["text"])
@@ -507,7 +529,8 @@ def consume_stream(lines) -> tuple[str, float]:
         elif msg.get("type") == "result":
             cost = msg.get("total_cost_usd", 0.0) or 0.0
             parts.append(msg.get("result", "") or "")
-    return "\n".join(parts), cost
+    usage = {k: sum(m.get(k, 0) for m in per_msg.values()) for k in _USAGE_KEYS}
+    return "\n".join(parts), cost, usage
 
 
 def _mcp_config(cdp_port: int) -> dict:
@@ -624,7 +647,7 @@ def _run_agent_blocking(prompt, job_id, cdp_port, timeout_s, model,
     try:
         proc.stdin.write(prompt)
         proc.stdin.close()
-        text, cost = consume_stream(proc.stdout)
+        text, cost, usage = consume_stream(proc.stdout)
         try:
             proc.wait(timeout=10)   # stdout is at EOF; this only reaps
         except subprocess.TimeoutExpired:
@@ -635,27 +658,41 @@ def _run_agent_blocking(prompt, job_id, cdp_port, timeout_s, model,
             _kill_tree(proc.pid)
 
     duration_ms = int((time.time() - start) * 1000)
-    transcript = _write_transcript(log_dir, job_id, text, cost, duration_ms)
+    transcript = _write_transcript(log_dir, job_id, text, cost, duration_ms,
+                                   usage)
     if timed_out.is_set():
-        return AgentResult("failed", "timeout", transcript_path=str(transcript),
-                           cost_usd=cost, duration_ms=duration_ms)
-
-    result = parse_result(text, nonce)
+        result = AgentResult("failed", "timeout")
+    else:
+        result = parse_result(text, nonce)
     result.transcript_path = str(transcript)
-    result.cost_usd = cost
+    result.cost_usd = cost or 0.0
+    result.usage = usage if cost is None else None
     result.duration_ms = duration_ms
     return result
 
 
-def _write_transcript(log_dir, job_id: int, text: str, cost: float,
-                      duration_ms: int) -> Path:
+def cost_label(cost: float | None, usage: dict | None) -> str:
+    """`cost $X` from a result message, else the token counts -- never a
+    made-up `$0.0000` for a run whose price never arrived."""
+    if cost is not None:
+        return f"cost ${cost:.4f}"
+    u = usage or {}
+    return ("cost unknown (no result message; tokens input="
+            f"{u.get('input_tokens', 0)}, output={u.get('output_tokens', 0)}, "
+            f"cache_write={u.get('cache_creation_input_tokens', 0)}, "
+            f"cache_read={u.get('cache_read_input_tokens', 0)}; not priced, "
+            "no per-model price table in code)")
+
+
+def _write_transcript(log_dir, job_id: int, text: str, cost: float | None,
+                      duration_ms: int, usage: dict | None = None) -> Path:
     """The per-job audit trail, with what the run cost footed onto it --
     nothing else persists cost_usd/duration_ms, so without this line there
     is no record of what any run cost next to what it did."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     transcript = log_dir / f"apply_{ts}_job{job_id}.txt"
     transcript.write_text(
-        f"{text}\n\n-- job {job_id}: cost ${cost:.4f}, {duration_ms} ms --\n",
+        f"{text}\n\n-- job {job_id}: {cost_label(cost, usage)}, {duration_ms} ms --\n",
         encoding="utf-8")
     return transcript
 

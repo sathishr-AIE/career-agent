@@ -193,26 +193,26 @@ def test_consume_stream_collects_text_and_cost():
         _json.dumps({"type": "result", "total_cost_usd": 0.042,
                      "result": f"{R}APPLIED"}),
     ]
-    text, cost = consume_stream(lines)
+    text, cost, _ = consume_stream(lines)
     assert "navigating" in text and f"{R}APPLIED" in text
     assert cost == 0.042
 
 
 def test_consume_stream_tolerates_non_json_lines():
-    text, cost = consume_stream(["not json at all", ""])
-    assert "not json" in text and cost == 0.0
+    text, cost, _ = consume_stream(["not json at all", ""])
+    assert "not json" in text and cost is None   # no result message
 
 
 def test_consume_stream_missing_total_cost_usd_is_zero():
     line = _json.dumps({"type": "result", "result": f"{R}APPLIED"})
-    _, cost = consume_stream([line])
+    _, cost, _ = consume_stream([line])
     assert cost == 0.0
 
 
 def test_consume_stream_null_total_cost_usd_is_zero():
     line = _json.dumps({"type": "result", "total_cost_usd": None,
                         "result": f"{R}APPLIED"})
-    _, cost = consume_stream([line])
+    _, cost, _ = consume_stream([line])
     assert cost == 0.0
 
 
@@ -554,3 +554,44 @@ def test_consume_stream_logs_tool_input_next_to_the_name():
     text = consume_stream([line])[0]
     assert "  >> browser_click " in text and '"Apply"' in text
     assert "hunter2" not in text
+
+
+# -- live-safety FIX 3: a run without a result message has no $0.0000 cost --
+
+def _asst(msg_id, text, **usage):
+    return _json.dumps({"type": "assistant", "message": {
+        "id": msg_id, "usage": usage,
+        "content": [{"type": "text", "text": text}]}})
+
+
+def test_consume_stream_accumulates_usage_per_message_not_per_block():
+    """stream-json repeats a message's usage on every content block it
+    emits, so summing lines would double count."""
+    lines = [_asst("m1", "a", input_tokens=100, output_tokens=5,
+                   cache_read_input_tokens=1000),
+             _asst("m1", "b", input_tokens=100, output_tokens=20,
+                   cache_read_input_tokens=1000),
+             _asst("m2", "c", input_tokens=50, output_tokens=7,
+                   cache_creation_input_tokens=300)]
+    text, cost, usage = consume_stream(lines)
+    assert cost is None        # no result message: the cost is unknown
+    assert usage == {"input_tokens": 150, "output_tokens": 27,
+                     "cache_creation_input_tokens": 300,
+                     "cache_read_input_tokens": 1000}
+
+
+def test_a_timed_out_run_foots_tokens_not_a_zero_cost(sandboxed, monkeypatch):
+    block = threading.Event()
+    proc = _FakeProc([_asst("m1", "filling", input_tokens=1234,
+                            output_tokens=56, cache_read_input_tokens=7890)],
+                     block)
+    _install(monkeypatch, proc, block)
+
+    r = agent_mod._run_agent_blocking("prompt", 7, 9222, 0.2, "sonnet", N)
+
+    assert r.reason == "timeout"
+    assert r.usage["input_tokens"] == 1234
+    footer = Path(r.transcript_path).read_text(encoding="utf-8").strip().splitlines()[-1]
+    assert "$0.0000" not in footer
+    assert "no result message" in footer
+    assert "input=1234" in footer and "output=56" in footer and "cache_read=7890" in footer

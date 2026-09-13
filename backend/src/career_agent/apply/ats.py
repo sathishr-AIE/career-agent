@@ -383,9 +383,11 @@ async def _run(runner, prompt: str, job_id: int, nonce: str) -> tuple:
         # The only place the run's price is recorded: AgentResult carries
         # cost_usd/duration_ms, there is no DB column for either (P0), and
         # the transcript footer is the other half of the record.
-        log.info("apply agent job %s: %s ($%.4f, %d ms, transcript %s)",
-                 job_id, result.code, result.cost_usd, result.duration_ms,
-                 result.transcript_path or "none")
+        log.info("apply agent job %s: %s (%s, %d ms, transcript %s)",
+                 job_id, result.code,
+                 agent_mod.cost_label(None if result.usage else result.cost_usd,
+                                      result.usage),
+                 result.duration_ms, result.transcript_path or "none")
         return result, ""
     except agent_mod.PreconditionError as exc:
         # submit()'s preflight normally catches this first; reaching here
