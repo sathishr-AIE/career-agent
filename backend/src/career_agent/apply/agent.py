@@ -151,6 +151,29 @@ def _profile_section(profile) -> str:
     )
 
 
+def _preferences_section(qa_rows) -> str:
+    """PREFERENCES section (S4 personalized memory): one line per qa_bank row
+    carrying a memory_key -- a preference a human confirmed once that should
+    apply across every job, not just the one it was first asked on. Not
+    wired into build_prompt's section list here; Task 18 places it ahead of
+    KNOWN ANSWERS per the precedence order in the design spec. Rows with no
+    memory_key (the ordinary literal-question qa_bank rows) are skipped."""
+    from career_agent.apply.ats import _confirmed_within_days, QA_VOLATILE_WINDOW_DAYS
+
+    def pref_line(row):
+        confirmed_at = row["last_confirmed_at"]
+        stale = row["is_volatile"] and not (
+            confirmed_at and _confirmed_within_days(confirmed_at, QA_VOLATILE_WINDOW_DAYS))
+        when = confirmed_at.split(" ")[0] if confirmed_at else "never"
+        mark = " (stale — ask with this as the default)" if stale else ""
+        return f"- {row['memory_key']}: {row['answer']} (confirmed {when}){mark}"
+
+    keyed = [r for r in qa_rows if r["memory_key"]]
+    if not keyed:
+        return ""
+    return "== PREFERENCES ==\n" + "\n".join(pref_line(r) for r in keyed)
+
+
 def _hard_rules_section() -> str:
     return (
         "== HARD RULES ==\n"

@@ -1,3 +1,4 @@
+import json
 import re
 import sqlite3
 
@@ -157,12 +158,66 @@ def qa_upsert(conn, question: str, answer: str, is_volatile: bool) -> None:
     conn.commit()
 
 
+def qa_remember(conn, question: str, answer: str, *, kind: str = "text",
+                options=None, memory_key: str | None = None,
+                source_job_id: int | None = None,
+                is_volatile: bool = False) -> None:
+    """Upsert the literal question as answered, and -- when memory_key is
+    given -- also upsert a second, canonical row keyed by the memory_key
+    itself (question_normalized == qa_normalize(memory_key)), so qa_by_key()
+    and the PREFERENCES prompt section can find the preference regardless of
+    which job's exact wording produced the answer. Only that canonical row
+    carries memory_key; the literal per-job row's memory_key stays NULL, or
+    _preferences_section would print the same preference twice. Confirming
+    an existing answer is itself a reconfirmation, so last_confirmed_at is
+    set unconditionally on every call, not only on first insert."""
+    options_json = json.dumps(options) if options is not None else None
+
+    def _upsert(question_normalized: str, mem_key: str | None) -> None:
+        conn.execute(
+            "INSERT INTO qa_bank (question_normalized, answer, is_volatile,"
+            " last_confirmed_at, kind, options_json, source_job_id, memory_key)"
+            " VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?)"
+            " ON CONFLICT(question_normalized) DO UPDATE SET"
+            "   answer = excluded.answer, is_volatile = excluded.is_volatile,"
+            "   last_confirmed_at = excluded.last_confirmed_at,"
+            "   kind = excluded.kind, options_json = excluded.options_json,"
+            "   source_job_id = excluded.source_job_id,"
+            "   memory_key = excluded.memory_key",
+            (question_normalized, answer, int(is_volatile), kind, options_json,
+             source_job_id, mem_key))
+
+    _upsert(qa_normalize(question), None)
+    if memory_key:
+        _upsert(qa_normalize(memory_key), memory_key)
+    conn.commit()
+
+
+def qa_by_key(conn, memory_key: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM qa_bank WHERE question_normalized = ?",
+        (qa_normalize(memory_key),)).fetchone()
+
+
+def qa_touch(conn, keys: list[str]) -> None:
+    """use_count += 1, last_used_at = now for each key (normalized), called
+    when a CONFIRM payload reports a memory was actually used. Unknown keys
+    are a silent no-op -- there is no row to bump."""
+    for key in keys:
+        conn.execute(
+            "UPDATE qa_bank SET use_count = use_count + 1,"
+            " last_used_at = datetime('now') WHERE question_normalized = ?",
+            (qa_normalize(key),))
+    conn.commit()
+
+
 def qa_all(conn) -> list:
     """Return every qa_bank row with all fields the prompt builder needs,
     ordered deterministically by question."""
     return conn.execute(
-        "SELECT question_normalized, answer, is_volatile, last_confirmed_at"
-        " FROM qa_bank ORDER BY question_normalized").fetchall()
+        "SELECT question_normalized, answer, is_volatile, last_confirmed_at,"
+        " memory_key, kind, options_json, source_job_id, use_count,"
+        " last_used_at FROM qa_bank ORDER BY question_normalized").fetchall()
 
 
 def get_settings(conn) -> sqlite3.Row:

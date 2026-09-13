@@ -12,7 +12,8 @@ import pytest
 
 from career_agent.apply import agent as agent_mod
 from career_agent.apply import runner as runner_mod
-from career_agent.apply.agent import AgentResult, build_prompt, consume_stream, parse_result
+from career_agent.apply.agent import (AgentResult, _preferences_section, build_prompt,
+                                       consume_stream, parse_result)
 from career_agent.apply.runner import RunEvents
 from career_agent.config import CandidateProfile, CareerBrief
 from career_agent.models import Job
@@ -96,10 +97,12 @@ def _brief(**kw):
 
 
 QA = [{"question_normalized": "years of python experience",
-       "answer": "6", "is_volatile": 0, "last_confirmed_at": None},
+       "answer": "6", "is_volatile": 0, "last_confirmed_at": None,
+       "memory_key": None},
       {"question_normalized": "current notice period",
        "answer": "30 days", "is_volatile": 1,
-       "last_confirmed_at": "2020-01-01 00:00:00"}]  # long stale
+       "last_confirmed_at": "2020-01-01 00:00:00",
+       "memory_key": None}]  # long stale
 
 
 def test_prompt_embeds_job_profile_and_resume():
@@ -115,6 +118,68 @@ def test_prompt_seeds_qa_bank_and_marks_stale_volatile():
     assert "years of python experience" in p
     assert "30 days" in p
     assert "stale" in p.lower()          # volatile row past the 30-day window
+
+
+def test_preferences_section_lists_keyed_rows_only():
+    rows = [
+        {"question_normalized": "years of python experience", "answer": "6",
+         "is_volatile": 0, "last_confirmed_at": "2026-09-01 00:00:00",
+         "memory_key": None},
+        {"question_normalized": "notice_period", "answer": "30 days",
+         "is_volatile": 0, "last_confirmed_at": "2026-09-13 00:00:00",
+         "memory_key": "notice_period"},
+    ]
+    section = _preferences_section(rows)
+    assert section.startswith("== PREFERENCES ==")
+    assert "- notice_period: 30 days (confirmed 2026-09-13)" in section
+    assert "years of python experience" not in section  # unkeyed row excluded
+
+
+def test_preferences_section_flags_stale_volatile_rows():
+    rows = [
+        {"question_normalized": "notice_period", "answer": "30 days",
+         "is_volatile": 1, "last_confirmed_at": "2020-01-01 00:00:00",
+         "memory_key": "notice_period"},
+    ]
+    section = _preferences_section(rows)
+    assert "stale" in section.lower()
+    assert "ask with this as the default" in section.lower()
+
+
+def test_preferences_section_flags_never_confirmed_volatile_rows():
+    rows = [
+        {"question_normalized": "notice_period", "answer": "30 days",
+         "is_volatile": 1, "last_confirmed_at": None,
+         "memory_key": "notice_period"},
+    ]
+    section = _preferences_section(rows)
+    assert "stale" in section.lower()
+    assert "confirmed never" in section.lower()
+
+
+def test_preferences_section_does_not_flag_fresh_volatile_rows():
+    rows = [
+        {"question_normalized": "notice_period", "answer": "30 days",
+         "is_volatile": 1, "last_confirmed_at": "2026-09-13 00:00:00",
+         "memory_key": "notice_period"},
+    ]
+    section = _preferences_section(rows)
+    assert "stale" not in section.lower()
+
+
+def test_preferences_section_empty_when_no_row_has_a_key():
+    assert _preferences_section(QA) == ""
+
+
+def test_preferences_section_not_wired_into_build_prompt_yet():
+    """Task 18 wires this in -- until then build_prompt must not emit it,
+    even when a qa_row carries a memory_key."""
+    keyed = QA + [{"question_normalized": "notice_period", "answer": "30 days",
+                   "is_volatile": 0, "last_confirmed_at": "2026-09-13 00:00:00",
+                   "memory_key": "notice_period"}]
+    p = build_prompt(_job(), _profile(), _brief(), keyed, "r", "x.docx",
+                     mode="auto", can_submit=True, nonce=N)
+    assert "== PREFERENCES ==" not in p
 
 
 def test_parse_ask_requires_nonce_and_shape():
