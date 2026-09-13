@@ -1,4 +1,5 @@
 import io, json, os, threading, time
+import pytest
 from career_agent.apply import runner as runner_mod
 from career_agent.apply.runner import AgentRun, RunEvents
 
@@ -69,7 +70,8 @@ def test_ask_sets_waiting_and_answer_is_sent_on_stdin():
     fake.emit(_assistant(f'ASK:{NONCE}:{{"id":"q1","kind":"text","question":"Notice?"}}'))
     fake.emit(_result(0.1))
     assert run.waiting.wait(5) and not run.done.is_set()
-    assert asked == [{"id": "q1", "kind": "text", "question": "Notice?"}]
+    assert asked == [{"id": "q1", "kind": "text", "question": "Notice?", "options": [],
+                      "why": "", "memory_key": None, "default": None, "sensitive": False}]
     run.send(f'ANSWER:{NONCE}:{{"id":"q1","answer":"30 days"}}')
     assert "ANSWER:" in fake.stdin.getvalue().splitlines()[-1]
     assert not run.waiting.is_set()          # cleared by send()
@@ -91,10 +93,11 @@ def test_turn_without_ask_or_result_is_nudged_then_given_up():
 def test_result_beats_confirm_beats_ask_and_last_line_wins():
     confirmed, asked = [], []
     run, fake = _run(RunEvents(on_ask=asked.append, on_confirm=confirmed.append))
-    fake.emit(_assistant(f'ASK:{NONCE}:{{"id":"a"}}\nCONFIRM:{NONCE}:{{"id":"c1"}}'))
-    fake.emit(_assistant(f'CONFIRM:{NONCE}:{{"id":"c2"}}')); fake.emit(_result())
+    fake.emit(_assistant(f'ASK:{NONCE}:{{"id":"a","kind":"text","question":"q"}}\n'
+                         f'CONFIRM:{NONCE}:{{"fields":[],"notes":"c1"}}'))
+    fake.emit(_assistant(f'CONFIRM:{NONCE}:{{"fields":[],"notes":"c2"}}')); fake.emit(_result())
     assert run.waiting.wait(5)
-    assert confirmed == [{"id": "c2"}] and asked == [] and run.nudges == 0
+    assert [c["notes"] for c in confirmed] == ["c2"] and asked == [] and run.nudges == 0
     run.send("ok")
     fake.emit(_assistant(f"RESULT:{NONCE}:FAILED:stuck\nASK:{NONCE}:{{}}\nRESULT:{NONCE}:APPLIED"))
     fake.emit(_result()); 
@@ -110,11 +113,29 @@ def test_unstamped_sentinels_are_not_obeyed():
     assert run.wait(5) and run.result_line is None and run.nudges == 1
 
 
-def test_bad_ask_json_is_passed_raw():
-    asked = []
-    run, fake = _run(RunEvents(on_ask=asked.append))
-    fake.emit(_assistant(f"ASK:{NONCE}:not json")); fake.emit(_result())
-    assert run.waiting.wait(5) and asked == [{"raw": f"ASK:{NONCE}:not json"}]
+@pytest.mark.parametrize("line", [f"ASK:{NONCE}:not json",
+                                  f'ASK:{NONCE}:{{"id":"q1"}}',
+                                  f'CONFIRM:{NONCE}:{{"fields":"nope"}}'])
+def test_a_malformed_ask_or_confirm_is_no_ask_and_the_nudge_says_so(line):
+    asked, confirmed = [], []
+    run, fake = _run(RunEvents(on_ask=asked.append, on_confirm=confirmed.append))
+    fake.emit(_assistant(line)); fake.emit(_result())
+    deadline = time.time() + 5
+    while run.nudges == 0 and time.time() < deadline:
+        time.sleep(0.01)
+    assert run.nudges == 1 and not run.waiting.is_set() and asked == confirmed == []
+    assert fake.stdin.getvalue().splitlines()[-1].count(
+        "Your last ASK/CONFIRM line was not valid JSON with the required keys.") == 1
+    fake.close(); assert run.wait(5)
+
+
+def test_a_plain_nudge_does_not_mention_a_malformed_line():
+    run, fake = _run()
+    fake.emit(_assistant("thinking")); fake.emit(_result())
+    deadline = time.time() + 5
+    while run.nudges == 0 and time.time() < deadline:
+        time.sleep(0.01)
+    assert "not valid JSON" not in fake.stdin.getvalue()
     fake.close(); assert run.wait(5)
 
 
@@ -172,7 +193,8 @@ def test_a_raising_callback_closes_stdin_so_the_session_ends():
     def boom(payload):
         raise ValueError("handler bug")
     run, fake = _run(RunEvents(on_ask=boom))
-    fake.emit(_assistant(f'ASK:{NONCE}:{{"id":"q1"}}')); fake.emit(_result())
+    fake.emit(_assistant(f'ASK:{NONCE}:{{"id":"q1","kind":"text","question":"q"}}'))
+    fake.emit(_result())
     assert run.wait(5)
     assert getattr(fake.stdin, "was_closed", False)
     run._reader_thread.join(5)

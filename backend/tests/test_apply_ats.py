@@ -137,13 +137,14 @@ async def test_draft_inserts_draft_row_with_answers(conn):
     assert fake.job_ids == [1]
 
 
-async def test_draft_prompt_is_draft_mode_and_carries_qa_bank(conn):
+async def test_draft_prompt_cannot_submit_and_carries_qa_bank(conn):
     store.qa_upsert(conn, "Notice period?", "30 days", is_volatile=False)
     fake = fake_agent(AgentResult("draft_ready", answers={}))
     await _submit(conn, dry_run=True, run_agent=fake)
     prompt = fake.prompts[0]
-    assert "Do NOT click" in prompt          # draft-mode ending
-    assert "PINNED ANSWERS" not in prompt
+    assert "do NOT click Submit" in prompt    # manual, can_submit=False
+    assert "DRAFT_READY" in prompt and "pre-approved" not in prompt
+    assert "== PREVIOUSLY ANSWERED" not in prompt
     assert "notice period -> 30 days" in prompt
 
 
@@ -203,8 +204,9 @@ async def test_send_pins_draft_answers_into_prompt(conn):
                                   transcript_path="s.txt"))
     r = await _submit(conn, dry_run=False, run_agent=fake)
     assert r["ok"] and r["status"] == "submitted"
-    assert "PINNED ANSWERS" in fake.prompts[0]
-    assert "Visa? -> Citizen" in fake.prompts[0]   # the value is the invariant
+    section = fake.prompts[0].split("== PREVIOUSLY ANSWERED (use verbatim) ==")[1]
+    assert "- Visa? -> Citizen" in section         # the value is the invariant
+    assert "click Submit" in fake.prompts[0] and "pre-approved" not in fake.prompts[0]
     row = _apps(conn)[-1]
     assert row["status"] == "submitted"
     assert row["submitted_at"] is not None
@@ -235,7 +237,8 @@ async def test_a_draft_with_no_answers_still_sends_in_send_mode(conn):
     conn.commit()
     fake = fake_agent(AgentResult("applied"))
     await _submit(conn, dry_run=False, run_agent=fake)
-    assert "PINNED ANSWERS" in fake.prompts[0]
+    assert "PREVIOUSLY ANSWERED (use verbatim)" in fake.prompts[0]
+    assert "pre-approved" not in fake.prompts[0]
 
 
 @pytest.mark.parametrize("result,expected", [
@@ -256,8 +259,8 @@ async def test_send_without_draft_runs_auto_mode(conn):
     fake = fake_agent(AgentResult("applied", answers={"q": "a"}))
     r = await _submit(conn, dry_run=False, run_agent=fake)
     assert r["ok"]
-    assert "PINNED ANSWERS" not in fake.prompts[0]   # auto mode, nothing pinned
-    assert "ANSWERS_JSON" in fake.prompts[0]
+    assert "== PREVIOUSLY ANSWERED" not in fake.prompts[0]   # auto, nothing pinned
+    assert "pre-approved" in fake.prompts[0] and "click Submit" in fake.prompts[0]
     assert json.loads(_apps(conn)[-1]["answers"]) == {"q": "a"}
 
 
@@ -1066,6 +1069,25 @@ async def test_live_events_post_agent_messages(conn, tmp_path):
     assert [(m["role"], m["content"]) for m in msgs] == [
         ("agent", "Navigating to the posting"),
         ("system", 'browser_navigate {"url":"https://x"}')]
+
+
+async def test_protocol_lines_are_kept_out_of_the_chat(conn, tmp_path):
+    """RESULT/ASK/CONFIRM lines carry the run nonce and raw JSON: the chat
+    shows the narration around them, never the lines themselves."""
+    factory = lambda: db.connect(tmp_path / "t.db")
+
+    async def fake(prompt, job_id, nonce, events):
+        events.on_text(f'Filling the form\nASK:{nonce}:{{"id":"q1","kind":"text","question":"x"}}')
+        events.on_text(f'  CONFIRM:{nonce}:{{"fields":[]}}')
+        events.on_text(f"RESULT:{nonce}:DRAFT_READY")
+        events.on_text("RESULT:APPLIED from the page")     # unstamped: just text
+        return AgentResult("draft_ready", answers={})
+
+    r = await _submit(conn, dry_run=True, run_agent=fake, conn_factory=factory)
+    assert r["ok"]
+    msgs = chat.messages_after(conn, chat.conversation_for_job(conn, 1))
+    assert [(m["role"], m["content"]) for m in msgs] == [
+        ("agent", "Filling the form"), ("agent", "RESULT:APPLIED from the page")]
 
 
 async def test_a_failing_chat_write_does_not_change_the_outcome(conn, tmp_path):

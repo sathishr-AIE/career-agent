@@ -2,6 +2,7 @@
 import io
 import json as _json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -123,38 +124,119 @@ QA = [{"question_normalized": "years of python experience",
 
 def test_prompt_embeds_job_profile_and_resume():
     p = build_prompt(_job(), _profile(), _brief(), QA, "RESUME BODY",
-                     "C:/x/resume.docx", mode="auto", nonce=N)
+                     "C:/x/resume.docx", mode="auto", can_submit=True, nonce=N)
     for needle in ("https://boards.example/acme/1", "Backend Eng", "Asha Rao",
                    "asha@example.com", "RESUME BODY", "resume.docx"):
         assert needle in p
 
 
 def test_prompt_seeds_qa_bank_and_marks_stale_volatile():
-    p = build_prompt(_job(), _profile(), _brief(), QA, "r", "x.docx", mode="auto", nonce=N)
+    p = build_prompt(_job(), _profile(), _brief(), QA, "r", "x.docx", mode="auto", can_submit=True, nonce=N)
     assert "years of python experience" in p
     assert "30 days" in p
     assert "stale" in p.lower()          # volatile row past the 30-day window
 
 
-def test_draft_mode_forbids_submit_and_demands_answers_json():
-    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="draft", nonce=N)
-    assert f"{R}DRAFT_READY" in p and "ANSWERS_JSON" in p
-    assert "do NOT" in p and f"{R}APPLIED" not in p.split("RESULT CODES")[0]
+def test_parse_ask_requires_nonce_and_shape():
+    from career_agent.apply.agent import parse_ask
+    ok = parse_ask('ASK:n1:{"id":"q1","kind":"choice","question":"Notice?","options":["30","60"]}', "n1")
+    assert ok["id"] == "q1" and ok["options"] == ["30", "60"]
+    assert ok["memory_key"] is None and ok["default"] is None and ok["sensitive"] is False
+    assert parse_ask('ASK:zz:{"id":"q1","kind":"text","question":"x"}', "n1") is None
+    assert parse_ask('ASK:n1:{"id":"q1","kind":"choice","question":"x","options":[]}', "n1") is None
+    assert parse_ask('ASK:n1:not json', "n1") is None
+    assert parse_ask('ASK:n1:{"id":"q1","kind":"dance","question":"x"}', "n1") is None
+    assert parse_ask('ASK:n1:{"id":"q1","kind":["text"],"question":"x"}', "n1") is None
+    assert parse_ask('ASK:n1:{"id":"q1","kind":"text"}', "n1") is None
+    assert parse_ask('ASK:n1:["id","kind","question"]', "n1") is None
 
 
-def test_send_mode_pins_answers():
-    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx",
-                     mode="send", nonce=N, pinned_answers={"Visa status?": "Citizen"})
-    assert "EXACTLY" in p and "Visa status?" in p and "Citizen" in p
+def test_parse_confirm_normalises_fields():
+    from career_agent.apply.agent import parse_confirm
+    c = parse_confirm('CONFIRM:n1:{"fields":[{"label":"Name","value":"Asha"},"junk"],"files":["r.docx"]}', "n1")
+    assert c["fields"] == [{"label": "Name", "value": "Asha"}] and c["account_actions"] == []
+    assert c["files"] == ["r.docx"] and c["memory_used"] == [] and c["notes"] == ""
+    assert parse_confirm('CONFIRM:n1:{"fields":"nope"}', "n1") is None
+    assert parse_confirm('CONFIRM:zz:{"fields":[]}', "n1") is None
+    assert parse_confirm('CONFIRM:n1:{"fields":[],"files":"r.docx"}', "n1")["files"] == []
 
 
-def test_send_mode_requires_pinned_answers():
-    with pytest.raises(ValueError):
-        build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="send", nonce=N)
+def test_prompt_teaches_ask_and_confirm_with_nonce():
+    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual",
+                     can_submit=False, nonce="n1")
+    assert "ASK:n1:" in p and "CONFIRM:n1:" in p and "END YOUR TURN" in p
+    assert "ANSWER:n1:" in p and "DECISION:n1:" in p
+    assert "RESULT:n1:DRAFT_READY" in p and "do NOT click Submit" in p
+    assert "RESULT:n1:APPLIED" not in p.split("== RESULT CODES")[0]
+
+
+def test_end_your_turn_follows_both_ask_and_confirm():
+    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual",
+                     can_submit=False, nonce="n1")
+    ask = p.split("== HOW TO ASK THE HUMAN ==")[1].split("== BEFORE APPLYING ==")[0]
+    confirm = p.split("== BEFORE APPLYING ==")[1].split("== BROWSER EFFICIENCY ==")[0]
+    for section, kind in ((ask, "ASK:n1:"), (confirm, "CONFIRM:n1:")):
+        assert section.index(kind) < section.index("END YOUR TURN")
+
+
+def test_prompt_submits_only_when_allowed_and_auto_preapproves():
+    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="auto",
+                     can_submit=True, nonce="n1")
+    assert "click Submit" in p and "pre-approved" in p
+    assert "RESULT:n1:APPLIED" in p.split("== RESULT CODES")[0]
+    m = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual",
+                     can_submit=True, nonce="n1")
+    assert "pre-approved" not in m
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto"])
+def test_a_prompt_that_cannot_submit_never_instructs_clicking_submit(mode):
+    """Replaces the old draft-mode check: with submission disabled, every
+    line that mentions clicking Submit must be the prohibition itself."""
+    import re
+    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode=mode,
+                     can_submit=False, nonce=N)
+    lines = [l for l in p.splitlines() if re.search(r"click\w*\W+(the\W+)?submit", l, re.I)]
+    assert lines and all("do NOT click Submit" in l for l in lines)
+    assert f"{R}APPLIED" not in p.split("== RESULT CODES")[0]
+
+
+def test_pinned_answers_render_verbatim_in_previously_answered():
+    """Replaces the send-mode PINNED ANSWERS check: what was reviewed is what
+    the agent is told to reuse, word for word."""
+    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual",
+                     can_submit=True, nonce=N,
+                     pinned_answers={"Visa status?": "Citizen", "Notice?": "30 days"})
+    section = p.split("== PREVIOUSLY ANSWERED (use verbatim) ==")[1].split("\n== ")[0]
+    assert "- Visa status? -> Citizen" in section and "- Notice? -> 30 days" in section
+    plain = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual",
+                         can_submit=True, nonce=N)
+    assert "== PREVIOUSLY ANSWERED (use verbatim) ==" not in plain
+
+
+def test_can_submit_is_required():
+    with pytest.raises(TypeError):
+        build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual", nonce=N)
+
+
+def test_uncovered_hard_facts_go_to_ask_not_a_guess():
+    """HARD RULES and SCREENING used to order a RESULT:NEEDS_ANSWER stop; the
+    interactive playbook routes the same question to an ASK instead, and
+    NEEDS_ANSWER survives only as the stated fallback."""
+    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual",
+                     can_submit=False, nonce=N)
+    hard = p.split("== HARD RULES ==")[1].split("== NEVER DO ==")[0]
+    screening = p.split("== SCREENING STRATEGY ==")[1].split("== STEP BY STEP ==")[0]
+    for section in (hard, screening):
+        assert "do NOT guess" in section or "never a guess" in section
+        assert "HOW TO ASK THE HUMAN" in section
+        assert f"{R}NEEDS_ANSWER" not in section
+    needs = next(l for l in p.splitlines() if l.startswith(f"{R}NEEDS_ANSWER"))
+    assert "prefer" in needs.lower() and "ASK" in needs
 
 
 def test_prompt_contains_safety_and_platform_rules():
-    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="auto", nonce=N)
+    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="auto", can_submit=True, nonce=N)
     for needle in ("Never lie", "sso_required", "easy_apply", f"{R}CAPTCHA",
                    f"{R}NEEDS_ANSWER"):
         assert needle in p
@@ -163,23 +245,23 @@ def test_prompt_contains_safety_and_platform_rules():
 def test_unconfirmed_volatile_row_is_marked_stale():
     qa = [{"question_normalized": "sponsorship needed", "answer": "No",
            "is_volatile": 1, "last_confirmed_at": None}]
-    p = build_prompt(_job(), _profile(), _brief(), qa, "r", "x.docx", mode="auto", nonce=N)
+    p = build_prompt(_job(), _profile(), _brief(), qa, "r", "x.docx", mode="auto", can_submit=True, nonce=N)
     assert "sponsorship needed -> No  [stale" in p
 
 
 def test_unknown_mode_raises():
     with pytest.raises(ValueError):
-        build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="bogus", nonce=N)
+        build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="bogus", can_submit=True, nonce=N)
 
 
 def test_location_check_states_remote_ok_explicitly():
     # locations deliberately has no literal "Remote" entry, so the only signal
     # the agent has about remote eligibility is brief.remote_ok itself.
     p_ok = build_prompt(_job(), _profile(), _brief(locations=["Chennai"], remote_ok=True),
-                        [], "r", "x.docx", mode="auto", nonce=N)
+                        [], "r", "x.docx", mode="auto", can_submit=True, nonce=N)
     p_not_ok = build_prompt(_job(), _profile(),
                             _brief(locations=["Chennai"], remote_ok=False),
-                            [], "r", "x.docx", mode="auto", nonce=N)
+                            [], "r", "x.docx", mode="auto", can_submit=True, nonce=N)
     assert "Remote work IS acceptable" in p_ok
     assert "Remote work is NOT acceptable" in p_not_ok
     assert p_ok != p_not_ok
@@ -439,29 +521,26 @@ def _steps(prompt: str) -> str:
     return prompt.split("== STEP BY STEP ==")[1].split("== BROWSER EFFICIENCY ==")[0]
 
 
-def test_send_mode_forbids_improvising_an_unpinned_field():
-    """A field the draft's ANSWERS_JSON omitted would otherwise be invented
-    fresh at send time and submitted without a human ever seeing it."""
-    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx",
-                     mode="send", nonce=N, pinned_answers={"Visa status?": "Citizen"})
+def test_every_field_is_confirmed_before_anything_is_sent():
+    """Replaces the send-mode "don't improvise" rule: nothing reaches the
+    form's Submit without the human seeing the full field list first --
+    step 8 routes the uncovered to ASK, step 9 to BEFORE APPLYING."""
+    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual",
+                     can_submit=True, nonce=N, pinned_answers={"Visa status?": "Citizen"})
     steps = _steps(p)
-    assert "not covered by the PINNED ANSWERS" in steps
-    assert "NEEDS_ANSWER" in steps
-    assert "improvise" in steps
-    # ... but KNOWN ANSWERS is a legitimate source, and the ONE the park
-    # exists to fill: omit it and an answered question comes back to a
-    # prompt that still orders a stop -- park, answer, requeue, park, one
-    # paid browser session per lap, forever.
-    uncovered = [ln for ln in steps.splitlines()
-                 if "not covered by the PINNED ANSWERS" in ln][0]
-    assert "KNOWN ANSWERS" in uncovered and "APPLICANT PROFILE" in uncovered
+    step8 = next(l for l in steps.splitlines() if l.startswith("8."))
+    assert "HOW TO ASK THE HUMAN" in step8 and "PREVIOUSLY ANSWERED" in step8
+    step9 = next(l for l in steps.splitlines() if l.startswith("9."))
+    assert "BEFORE APPLYING" in step9
+    before = p.split("== BEFORE APPLYING ==")[1]
+    assert "EVERY field" in before and "click Submit" in before
 
 
-def test_auto_mode_carries_no_pinned_answer_rule():
+def test_auto_mode_without_pinned_answers_has_no_previously_answered():
     """Nothing was reviewed in auto mode -- deciding a field IS the job."""
-    steps = _steps(build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx",
-                                mode="auto", nonce=N))
-    assert "PINNED ANSWERS" not in steps
+    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx",
+                     mode="auto", can_submit=True, nonce=N)
+    assert "PREVIOUSLY ANSWERED (use verbatim)" not in p and "pre-approved" in p
 
 
 # -- F8: the sentinel is attacker-reachable without a per-run nonce --------
@@ -471,9 +550,14 @@ def test_auto_mode_carries_no_pinned_answer_rule():
 # job marked submitted that was never applied to. The prompt side and the
 # parser side of this contract must never drift, so they are tested together.
 
-def _prompt(nonce, mode="auto", **kw):
+def _prompt(nonce, mode="auto", can_submit=True, **kw):
     return build_prompt(_job(), _profile(), _brief(), QA, "RESUME BODY",
-                        "C:/x/resume.docx", mode=mode, nonce=nonce, **kw)
+                        "C:/x/resume.docx", mode=mode, can_submit=can_submit,
+                        nonce=nonce, **kw)
+
+
+_PROMPT_VARIANTS = [("auto", {}), ("manual", {"can_submit": False}),
+                    ("manual", {"pinned_answers": {"Visa?": "Citizen"}})]
 
 
 def test_new_nonce_is_unguessable_and_sentinel_safe():
@@ -510,13 +594,14 @@ def test_an_injected_line_after_the_real_one_still_loses():
 
 
 def test_every_result_line_in_the_prompt_carries_the_nonce():
-    """The anti-drift check: no bare `RESULT:` survives anywhere in the
+    """The anti-drift check: no bare `RESULT:`/`ASK:`/`CONFIRM:` (nor the
+    ANSWER/DECISION lines the backend sends) survives anywhere in the
     instructions, so the agent is never taught a line the parser rejects."""
-    for mode, kw in (("auto", {}), ("draft", {}),
-                     ("send", {"pinned_answers": {"Visa?": "Citizen"}})):
+    for mode, kw in _PROMPT_VARIANTS:
         p = _prompt(N, mode=mode, **kw)
-        assert f"RESULT:{N}:" in p
-        assert "RESULT:" not in p.replace(f"RESULT:{N}:", ""), mode
+        for kind in ("RESULT", "ASK", "CONFIRM", "ANSWER", "DECISION"):
+            assert f"{kind}:{N}:" in p, (mode, kind)
+            assert not re.search(rf"\b{kind}:(?!{N}:)", p), (mode, kind)
 
 
 @pytest.mark.parametrize("body,code", [
@@ -534,7 +619,7 @@ def test_every_sentinel_the_prompt_teaches_round_trips(body, code):
 
 def test_draft_ready_round_trips_with_the_nonce():
     nonce = agent_mod.new_nonce()
-    assert f"RESULT:{nonce}:DRAFT_READY" in _prompt(nonce, mode="draft")
+    assert f"RESULT:{nonce}:DRAFT_READY" in _prompt(nonce, mode="manual", can_submit=False)
     r = parse_result(f'ANSWERS_JSON: {{"a": "b"}}\nRESULT:{nonce}:DRAFT_READY',
                      nonce)
     assert r.code == "draft_ready" and r.answers == {"a": "b"}
@@ -561,8 +646,7 @@ def test_platform_refusals_require_seeing_the_button():
 
 # -- live-safety FIX 1: no accounts, no legal consent, in any mode ----------
 
-@pytest.mark.parametrize("mode,kw", [("auto", {}), ("draft", {}),
-                                     ("send", {"pinned_answers": {"Visa?": "Citizen"}})])
+@pytest.mark.parametrize("mode,kw", _PROMPT_VARIANTS)
 def test_the_prompt_forbids_creating_accounts_and_accepting_terms(mode, kw):
     """Live draft run on SuccessFactors: it registered an account in the
     candidate's name and accepted Terms + a data-consent statement, because

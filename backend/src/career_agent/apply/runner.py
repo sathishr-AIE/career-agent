@@ -8,11 +8,13 @@ import threading
 from dataclasses import dataclass
 from typing import Callable
 
-from career_agent.apply.agent import (_USAGE_KEYS, _kill_tree,
-                                      summarize_tool_input, user_message)
+from career_agent.apply.agent import (_USAGE_KEYS, _kill_tree, parse_ask,
+                                      parse_confirm, summarize_tool_input,
+                                      user_message)
 
 NUDGE = ("Continue. If you need something from the human, emit an ASK line; "
          "when finished, emit your RESULT line.")
+MALFORMED = " Your last ASK/CONFIRM line was not valid JSON with the required keys."
 MAX_NUDGES = 3
 
 
@@ -23,14 +25,6 @@ class RunEvents:
     on_turn_end: Callable[[float | None, dict], None] = lambda c, u: None
     on_ask: Callable[[dict], None] = lambda p: None
     on_confirm: Callable[[dict], None] = lambda p: None
-
-
-def _parse_payload(line: str, prefix: str) -> dict:
-    # ponytail: placeholder until Task 6's parse_ask/parse_confirm
-    try:
-        return json.loads(line[len(prefix):])
-    except json.JSONDecodeError:
-        return {"raw": line}
 
 
 class AgentRun:
@@ -157,27 +151,31 @@ class AgentRun:
         def last(kind):
             prefix = f"{kind}:{self.nonce}:"
             hits = [l for l in lines if l.startswith(prefix)]
-            return (hits[-1], prefix) if hits else (None, prefix)
+            return hits[-1] if hits else None
 
-        res, _ = last("RESULT")
+        res = last("RESULT")
         if res:
             self.result_line = res
             self._close_stdin()
             self.done.set()
             return
-        confirm, prefix = last("CONFIRM")
+        # A malformed ASK/CONFIRM is no ask at all: nudge, and say why.
+        confirm, ask = last("CONFIRM"), last("ASK")
         if confirm:
-            self.waiting.set()
-            self.events.on_confirm(_parse_payload(confirm, prefix))
-            return
-        ask, prefix = last("ASK")
-        if ask:
-            self.waiting.set()
-            self.events.on_ask(_parse_payload(ask, prefix))
-            return
+            payload = parse_confirm(confirm, self.nonce)
+            if payload is not None:
+                self.waiting.set()
+                self.events.on_confirm(payload)
+                return
+        elif ask:
+            payload = parse_ask(ask, self.nonce)
+            if payload is not None:
+                self.waiting.set()
+                self.events.on_ask(payload)
+                return
         if self.nudges < MAX_NUDGES:
             self.nudges += 1
-            self._write_user(NUDGE)
+            self._write_user(NUDGE + (MALFORMED if confirm or ask else ""))
             return
         self._close_stdin()
         self.done.set()

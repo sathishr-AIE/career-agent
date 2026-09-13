@@ -148,7 +148,7 @@ _NARRATED_TOOLS = {"browser_navigate", "browser_file_upload", "browser_click",
                    "browser_fill_form"}
 
 
-def _chat_events(conn_factory, job_id: int) -> RunEvents:
+def _chat_events(conn_factory, job_id: int, nonce: str) -> RunEvents:
     """RunEvents that narrate a run into the job's conversation, or no-ops
     when there is no conn_factory.
 
@@ -156,7 +156,11 @@ def _chat_events(conn_factory, job_id: int) -> RunEvents:
     sqlite3's check_same_thread on: the caller's connection raises there. So
     each event opens its own connection and closes it -- cheap at this
     message volume. A failed write is logged and dropped: narration must
-    never stop an application mid-form."""
+    never stop an application mid-form.
+
+    Protocol lines (RESULT/ASK/CONFIRM stamped with this run's nonce) are
+    cut from the narration: they would put the nonce and raw JSON in the
+    chat, and the ASK/CONFIRM cards reach it through on_ask/on_confirm."""
     if conn_factory is None:
         return RunEvents()
 
@@ -175,7 +179,16 @@ def _chat_events(conn_factory, job_id: int) -> RunEvents:
         if name in _NARRATED_TOOLS:
             post("system", f"{name} {summary}")
 
-    return RunEvents(on_text=lambda text: post("agent", text), on_tool=on_tool)
+    protocol = (agent_mod.result_prefix(nonce), agent_mod.ask_prefix(nonce),
+                agent_mod.confirm_prefix(nonce))
+
+    def on_text(text: str) -> None:
+        kept = "\n".join(l for l in text.splitlines()
+                         if not l.strip().startswith(protocol)).strip()
+        if kept:
+            post("agent", kept)
+
+    return RunEvents(on_text=on_text, on_tool=on_tool)
 
 
 def _resume_text(row) -> str:
@@ -543,11 +556,11 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
     # job page cannot guess it, so it cannot forge an outcome. The runner
     # carries it through to parse_result; nothing else ever sees it.
     nonce = agent_mod.new_nonce()
-    events = _chat_events(conn_factory, job_id)
+    events = _chat_events(conn_factory, job_id, nonce)
 
     if dry_run:
-        prompt = agent_mod.build_prompt(*prompt_args, mode="draft",
-                                        nonce=nonce, score=score)
+        prompt = agent_mod.build_prompt(*prompt_args, mode="manual",
+                                        can_submit=False, nonce=nonce, score=score)
         async with _agent_lock():
             result, detail = await _run(runner, prompt, job_id, nonce, events)
         return _record_draft_outcome(conn, job_id, resume_version,
@@ -573,11 +586,11 @@ async def submit(conn: sqlite3.Connection, job_id: int, dry_run: bool,
         # for review is exactly what gets sent" -- by silently sending
         # different answers than what was reviewed. Reuse wins.
         pinned = json.loads(draft["answers"] or "{}")
-        prompt = agent_mod.build_prompt(*prompt_args, mode="send", nonce=nonce,
-                                        pinned_answers=pinned, score=score)
+        prompt = agent_mod.build_prompt(*prompt_args, mode="manual", can_submit=True,
+                                        nonce=nonce, pinned_answers=pinned, score=score)
     else:
-        prompt = agent_mod.build_prompt(*prompt_args, mode="auto", nonce=nonce,
-                                        score=score)
+        prompt = agent_mod.build_prompt(*prompt_args, mode="auto", can_submit=True,
+                                        nonce=nonce, score=score)
 
     # The in_flight row is written INSIDE the lock: started_at is what
     # sweep_stale_in_flight measures, so a run queued behind another would
