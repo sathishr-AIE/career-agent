@@ -715,6 +715,7 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
     score = score_row["weighted_score"] if score_row else None
     runner = run_agent or _live_run_agent
     can_submit = SUBMISSION_IMPLEMENTED or run_agent is not None
+    carried = 0
     if resume and (cp["mode"], cp["can_submit"]) != (mode, int(can_submit)):
         # Never continue a session under other rules: an auto session resumed
         # as manual could submit without a DECISION; the reverse would wait on one.
@@ -722,7 +723,7 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
         _say(conn, job_id, f"Starting a fresh session: the interrupted one ran in"
              f" {cp['mode'] or 'an unknown'} mode (can_submit={cp['can_submit']}), this run is"
              f" {mode} mode (can_submit={int(can_submit)}).")
-        resume, cp = False, None
+        resume, cp, carried = False, None, cp["resume_count"]     # the cap still counts
     elif resume and cp["resume_count"] >= MAX_RESUMES:
         return _resume_limit(conn, job_id, resume_version)
     elif resume:
@@ -754,8 +755,13 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
         live = _blocking_status(conn, job_id)
         if live:
             return _blocked(job_id, live)
-        if resume and (checkpoint.get(conn, job_id) or {}).get("status") != "resumable":
-            return _not_resumable(job_id)       # resumed (or restarted) while queued
+        if resume:
+            # `cp` was read before the lock: a resume queued behind another that
+            # resumed, fell back (new session and nonce) or restarted is stale.
+            now = checkpoint.get(conn, job_id) or {}
+            if now.get("status") != "resumable" or any(
+                    now.get(k) != cp[k] for k in ("session_id", "nonce", "resume_count")):
+                return _not_resumable(job_id)
         # A crashed run's cards can never be answered; this run's cards are
         # the ones created after `baseline` (the answer API refuses older).
         chat.expire_open_prompts(conn, job_id)
@@ -770,7 +776,7 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
         if resume:
             _checkpoint(checkpoint.resume, conn, job_id)
         else:
-            _checkpoint(checkpoint.start, conn, job_id, session_id, nonce, mode, can_submit)
+            _checkpoint(checkpoint.start, conn, job_id, session_id, nonce, mode, can_submit, carried)
         try:
             result, detail = await _run(runner, first, job_id, nonce, events,
                                         session_id=session_id, resume=resume)

@@ -447,7 +447,14 @@ def resume_job(conn: sqlite3.Connection, job_id: int, brief_path: Path,
         return _refuse(409, f"job {job_id} already has a live agent run")
     if ats_apply._agent_lock().locked():
         return _refuse(409, "Another application is running — continue when it ends")
-    checkpoint.set_auto_resumed(conn, job_id, False)    # a human touch re-arms the worker's one
+    parked = worker.get_run_state(conn, "apply")["current_job_id"]
+    if parked is not None and parked != job_id:
+        return _refuse(409, "Another job is already parked awaiting review — resolve it first.")
+    denial = worker.guard(conn, job_id, allow_skip=True, brief_path=brief_path)
+    if denial:
+        return _refuse(409, denial)
+    # Claimed until the run returns: the auto worker must not resume it meanwhile.
+    checkpoint.set_auto_resumed(conn, job_id, True)
     worker.say(conn, job_id, "Continuing where it left off")
     task = asyncio.create_task(_resume_run(conn, job_id, brief_path, candidate_profile_path,
                                            conn_factory))
@@ -470,6 +477,11 @@ async def _resume_run(conn, job_id: int, brief_path: Path, candidate_profile_pat
         log.exception("continue failed for job %s", job_id)
         worker.say(conn, job_id, f"Continue failed: {exc}")
         return
+    finally:
+        try:        # a human touch re-arms the worker's one auto-resume
+            checkpoint.set_auto_resumed(conn, job_id, False)
+        except Exception:
+            log.warning("could not re-arm auto-resume for job %s", job_id, exc_info=True)
     worker.say(conn, job_id, worker._outcome_text(conn, job_id, result))
 
 

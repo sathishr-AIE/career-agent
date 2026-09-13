@@ -51,8 +51,8 @@ def test_a_fresh_start_resets_the_previous_run(conn):
 def test_resumable_and_sweep_orphans(conn):
     conn.execute("INSERT INTO job (fingerprint, source, external_id, company, company_normalized,"
                  " title, title_normalized, url) VALUES ('fp2','ats','2','B','b','AI','ai','https://y')")
-    checkpoint.start(conn, 1, "s1", "n")
-    checkpoint.start(conn, 2, "s2", "n")
+    checkpoint.start(conn, 1, "s1", "n", mode="manual", can_submit=True)
+    checkpoint.start(conn, 2, "s2", "n", mode="manual", can_submit=True)
     checkpoint.mark_waiting(conn, 2, 3)
     assert checkpoint.sweep_orphans(conn, live_job_ids={2}) == 1     # 2 is still driven
     assert checkpoint.get(conn, 1)["status"] == "resumable"
@@ -94,7 +94,7 @@ def test_sweep_orphans_finishes_a_job_whose_latest_attempt_is_terminal(conn):
     conn.commit()
     assert checkpoint.sweep_orphans(conn, set()) == 0
     assert checkpoint.get(conn, 1)["status"] == "done"
-    checkpoint.start(conn, 1, "s", "n")                 # a live attempt's row: in_flight
+    checkpoint.start(conn, 1, "s", "n", mode="manual")  # a live attempt's row: in_flight
     conn.execute("INSERT INTO application (job_id, resume_version, status) VALUES (1, 'v', 'in_flight')")
     conn.commit()
     assert checkpoint.sweep_orphans(conn, set()) == 1
@@ -149,3 +149,17 @@ def test_next_auto_resume_picks_each_checkpoint_once(conn):
     assert checkpoint.next_auto_resume(conn) is None
     checkpoint.set_auto_resumed(conn, 1, False)                # a human touch re-arms it
     assert checkpoint.next_auto_resume(conn) == 1
+    checkpoint.start(conn, 1, "s", "n", mode="manual", can_submit=True)   # I1: never a manual one
+    checkpoint.mark_resumable(conn, 1)
+    assert checkpoint.next_auto_resume(conn) is None
+
+
+def test_sweep_finishes_a_crashed_auto_session_that_could_submit(conn):
+    """I3: an auto session is pre-approved; it can click Submit before approve_sent."""
+    conn.execute("INSERT INTO job (fingerprint, source, external_id, company, company_normalized,"
+                 " title, title_normalized, url) VALUES ('fp2','ats','2','B','b','AI','ai','https://y')")
+    checkpoint.start(conn, 1, "s", "n", mode="auto", can_submit=True)
+    checkpoint.start(conn, 2, "s", "n", mode="auto", can_submit=False)    # kill switch off
+    assert checkpoint.sweep_orphans(conn, set()) == 1
+    assert checkpoint.get(conn, 1)["status"] == "done"
+    assert checkpoint.get(conn, 2)["status"] == "resumable"

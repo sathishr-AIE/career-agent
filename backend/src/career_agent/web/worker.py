@@ -162,8 +162,6 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
         return
 
     job_id = resume_id if resume_id is not None else candidate["job_id"]
-    if resume_id is not None:
-        checkpoint.set_auto_resumed(conn, job_id, True)     # before any await
     set_run_state(conn, "apply", current_job_id=job_id)
     # Before any await: a stale needs_answer card answered while this job
     # starts would unpark it and let the next tick run it a second time.
@@ -179,6 +177,9 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
         store.log(conn, job_id, "run_autopaused", denial)
         say(conn, job_id, f"Apply run auto-paused: {denial}", conn_factory)
         return
+    if resume_id is not None:
+        # After the guard (a denial must not use it up), before any await (no loop).
+        checkpoint.set_auto_resumed(conn, job_id, True)
 
     try:
         resume_version = await tailor_for_apply(conn, job_id, brief_path)
@@ -246,6 +247,29 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
     set_run_state(conn, "apply", current_job_id=None)  # auto: done
 
 
+def startup_sweep(conn: sqlite3.Connection) -> None:
+    """Crash recovery. app.lifespan runs it on a plain connection before the first
+    _conn(), whose sweep_stale_in_flight would otherwise hold a crashed run's row
+    first (and sweep_orphans would then read that hold as an ended job).
+
+    A checkpoint left running/waiting by a crashed server becomes resumable. With
+    the kill switch off no run could have clicked Submit, so a crashed run's
+    in_flight row needs no held_unknown adjudication: it is dropped -- after the
+    sweep, which reads that row as "not ended"."""
+    live = {jid for jid, run in agent_mod.RUNS.items() if not run.done.is_set()}
+    checkpoint.sweep_orphans(conn, live)
+    if ats_apply.SUBMISSION_IMPLEMENTED:
+        return
+    for r in conn.execute("SELECT id, job_id FROM application"
+                          " WHERE status = 'in_flight'").fetchall():
+        if r["job_id"] not in live and conn.execute(
+                "DELETE FROM application WHERE id = ? AND status = 'in_flight'",
+                (r["id"],)).rowcount:
+            store.log(conn, r["job_id"], "orphan_in_flight_dropped",
+                      "submission disabled: nothing was sent")
+    conn.commit()
+
+
 async def apply_worker_loop(conn_factory, brief_path, profile_path,
                             chat_conn_factory=None) -> None:
     """Keeps the apply run advancing without anyone polling — the piece
@@ -254,23 +278,10 @@ async def apply_worker_loop(conn_factory, brief_path, profile_path,
     fresh connection, matching the rest of the app's per-call pattern.
     chat_conn_factory (default: conn_factory) is the lighter one handed to
     submit() for the agent's narration (see ats._chat_events)."""
-    # A checkpoint left running/waiting by a crashed server is resumable.
+    # Idempotent: app.lifespan already ran it before the first _conn().
     conn = conn_factory()
     try:
-        live = {jid for jid, run in agent_mod.RUNS.items() if not run.done.is_set()}
-        checkpoint.sweep_orphans(conn, live)
-        if not ats_apply.SUBMISSION_IMPLEMENTED:
-            # With the kill switch off no run could have clicked Submit: a crashed
-            # run's in_flight row needs no held_unknown adjudication. After the
-            # sweep, which reads that row as "not ended" (-> resumable).
-            for r in conn.execute("SELECT id, job_id FROM application"
-                                  " WHERE status = 'in_flight'").fetchall():
-                if r["job_id"] not in live and conn.execute(
-                        "DELETE FROM application WHERE id = ? AND status = 'in_flight'",
-                        (r["id"],)).rowcount:
-                    store.log(conn, r["job_id"], "orphan_in_flight_dropped",
-                              "submission disabled: nothing was sent")
-            conn.commit()
+        startup_sweep(conn)
     finally:
         conn.close()
     while True:

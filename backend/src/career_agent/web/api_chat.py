@@ -5,6 +5,7 @@ from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import JSONResponse
 
 from career_agent import chat
+from career_agent.apply import ats as ats_apply
 from career_agent.apply import checkpoint
 from career_agent.web import actions
 
@@ -32,7 +33,9 @@ def api_messages(cid: int, after: int = 0):
     open_prompt, resumable = None, False
     if conv and conv["job_id"]:
         cp = checkpoint.get(conn, conv["job_id"])
-        resumable = bool(cp and cp["status"] == "resumable")
+        # Never offer a Continue that is certain to be refused (a BLOCKING attempt).
+        resumable = bool(cp and cp["status"] == "resumable"
+                         and not ats_apply._blocking_status(conn, conv["job_id"]))
         row = chat.open_prompt_for_job(conn, conv["job_id"])
         if row:
             open_prompt = {"id": row["id"], "kind": row["kind"],
