@@ -174,6 +174,37 @@ def _hard_rules_section() -> str:
     )
 
 
+def _known_logins_section(logins: list[dict]) -> str:
+    """S5 (Task 18 wires this in). domain + email only -- a caller may pass a
+    dict that also carries a decrypted password (e.g. straight from
+    credentials.get); this never renders it into the prompt."""
+    if not logins:
+        return ""
+    lines = "\n".join(f"- {l['domain']} (sign in as {l['email']})" for l in logins)
+    return (
+        "== KNOWN LOGINS ==\n"
+        f"{lines}\n"
+        "When a site in this list asks you to sign in, do not guess or reuse a "
+        'password from anywhere else -- output an ASK of kind "need_password" '
+        "naming the domain and wait for the password to arrive in the ANSWER."
+    )
+
+
+# S5's HARD RULES wording (Task 15 swaps this in for the "never create an
+# account" line above; Task 18 wires KNOWN LOGINS into build_prompt). Kept as
+# a standalone constant so it exists and is tested now without changing what
+# the agent is actually told today -- the backend still refuses
+# approve_account (SUBMISSION_IMPLEMENTED gate), so teaching the agent it can
+# ask for one would be a promise this build can't keep.
+ACCOUNT_RULES_S5 = (
+    "Account creation, registration, or accepting Terms of Use / privacy consent is "
+    'allowed ONLY after an ASK of kind "approve_account" (with domain, email, and '
+    'terms_summary) receives an answer of "approve" carrying a password in the '
+    "ANSWER. Never choose a password yourself -- the backend supplies it. Never "
+    "type a password into any field other than that site's own sign-in/sign-up form."
+)
+
+
 def _never_do_section() -> str:
     return (
         "== NEVER DO ==\n"
