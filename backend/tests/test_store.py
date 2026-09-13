@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import pytest
@@ -292,3 +293,106 @@ def test_qa_all_returns_every_row(conn):
         assert "answer" in row.keys()
         assert "is_volatile" in row.keys()
         assert "last_confirmed_at" in row.keys()
+
+
+def test_qa_all_includes_the_s4_memory_columns(conn):
+    store.qa_upsert(conn, "Visa status?", "Citizen", is_volatile=True)
+    row = store.qa_all(conn)[0]
+    assert {"memory_key", "kind", "use_count"} <= set(row.keys())
+    assert row["memory_key"] is None
+    assert row["use_count"] == 0
+
+
+def test_qa_upsert_leaves_new_columns_at_defaults(conn):
+    """qa_upsert (the pre-S4 caller) never touches memory_key/kind/etc, so
+    an ordinary literal answer must not accidentally look keyed."""
+    store.qa_upsert(conn, "Notice period?", "30 days", is_volatile=True)
+    row = store.qa_lookup(conn, "notice period")
+    assert row["memory_key"] is None
+    assert row["kind"] is None
+    assert row["options_json"] is None
+    assert row["source_job_id"] is None
+    assert row["use_count"] == 0
+    assert row["last_used_at"] is None
+
+
+def test_qa_remember_with_a_memory_key_writes_both_rows(conn):
+    store.qa_remember(conn, "What's your notice period?", "30 days",
+                      kind="text", options=["30 days", "60 days"],
+                      memory_key="notice_period", source_job_id=7,
+                      is_volatile=True)
+
+    literal = store.qa_lookup(conn, "What's your notice period?")
+    keyed = store.qa_by_key(conn, "notice_period")
+
+    assert literal is not None and keyed is not None
+    assert literal["question_normalized"] != keyed["question_normalized"]
+    assert literal["question_normalized"] == store.qa_normalize(
+        "What's your notice period?")
+    assert keyed["question_normalized"] == store.qa_normalize("notice_period")
+
+    for row in (literal, keyed):
+        assert row["answer"] == "30 days"
+        assert row["kind"] == "text"
+        assert json.loads(row["options_json"]) == ["30 days", "60 days"]
+        assert row["source_job_id"] == 7
+        assert row["is_volatile"] == 1
+        assert row["last_confirmed_at"] is not None
+
+    # Only the canonical keyed row carries memory_key -- otherwise the
+    # PREFERENCES section would print the same preference twice.
+    assert literal["memory_key"] is None
+    assert keyed["memory_key"] == "notice_period"
+
+
+def test_qa_remember_without_a_memory_key_writes_only_the_literal_row(conn):
+    store.qa_remember(conn, "Years of Python?", "6")
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 1
+    row = store.qa_lookup(conn, "Years of Python?")
+    assert row["memory_key"] is None
+    assert row["kind"] == "text"
+
+
+def test_qa_remember_twice_updates_and_does_not_duplicate(conn):
+    store.qa_remember(conn, "Notice period?", "30 days",
+                      memory_key="notice_period")
+    first_confirmed = store.qa_by_key(conn, "notice_period")["last_confirmed_at"]
+
+    store.qa_remember(conn, "Notice period?", "60 days",
+                      memory_key="notice_period")
+
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 2
+    keyed = store.qa_by_key(conn, "notice_period")
+    assert keyed["answer"] == "60 days"
+    assert keyed["last_confirmed_at"] >= first_confirmed
+    literal = store.qa_lookup(conn, "Notice period?")
+    assert literal["answer"] == "60 days"
+
+
+def test_qa_by_key_is_case_and_punctuation_insensitive(conn):
+    store.qa_remember(conn, "Notice period?", "30 days",
+                      memory_key="Notice Period!")
+    for variant in ("notice period", "NOTICE PERIOD", "Notice, Period."):
+        assert store.qa_by_key(conn, variant) is not None
+        assert store.qa_by_key(conn, variant)["answer"] == "30 days"
+
+
+def test_qa_by_key_returns_none_when_absent(conn):
+    assert store.qa_by_key(conn, "notice_period") is None
+
+
+def test_qa_touch_bumps_use_count_and_last_used_at(conn):
+    store.qa_remember(conn, "Notice period?", "30 days",
+                      memory_key="notice_period")
+    store.qa_touch(conn, ["notice_period"])
+    row = store.qa_by_key(conn, "notice_period")
+    assert row["use_count"] == 1
+    assert row["last_used_at"] is not None
+
+    store.qa_touch(conn, ["notice_period"])
+    assert store.qa_by_key(conn, "notice_period")["use_count"] == 2
+
+
+def test_qa_touch_is_a_no_op_for_unknown_keys(conn):
+    store.qa_touch(conn, ["does_not_exist"])  # must not raise
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 0

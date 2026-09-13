@@ -187,6 +187,14 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "resume", "content", "TEXT")
     _add_column_if_missing(conn, "application", "failure_reason", "TEXT")
     _add_column_if_missing(conn, "application", "transcript_path", "TEXT")
+    # S4 personalized memory: keyed preferences layered onto the existing
+    # literal-question qa_bank rows -- see store.qa_remember/qa_by_key.
+    _add_column_if_missing(conn, "qa_bank", "memory_key", "TEXT")
+    _add_column_if_missing(conn, "qa_bank", "kind", "TEXT")
+    _add_column_if_missing(conn, "qa_bank", "options_json", "TEXT")
+    _add_column_if_missing(conn, "qa_bank", "source_job_id", "INTEGER")
+    _add_column_if_missing(conn, "qa_bank", "use_count", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "qa_bank", "last_used_at", "TEXT")
     conn.commit()
 
 
