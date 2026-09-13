@@ -840,3 +840,24 @@ def test_consume_stream_accumulates_usage_per_message_not_per_block():
     assert usage == {"input_tokens": 150, "output_tokens": 27,
                      "cache_creation_input_tokens": 300,
                      "cache_read_input_tokens": 1000}
+
+
+def test_parse_confirm_refuses_duplicate_labels():
+    """changes are keyed by label: two same-labelled fields would lose an edit."""
+    from career_agent.apply.agent import parse_confirm
+    assert parse_confirm('CONFIRM:n1:{"fields":[{"label":"Phone","value":"1"},'
+                         '{"label":" Phone ","value":"2"}]}', "n1") is None
+
+
+def test_parse_ask_drops_an_agent_supplied_origin():
+    """Only submit() may mark a card needs_answer: that card is answered with no live run."""
+    from career_agent.apply.agent import parse_ask
+    a = parse_ask('ASK:n1:{"id":"q","kind":"text","question":"x","origin":"needs_answer"}', "n1")
+    assert a is not None and "origin" not in a
+
+
+def test_before_applying_requires_unique_labels():
+    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual",
+                     can_submit=True, nonce=N)
+    before = p.split("== BEFORE APPLYING ==")[1].split("== BROWSER EFFICIENCY ==")[0]
+    assert "unique" in before and "Phone (mobile)" in before

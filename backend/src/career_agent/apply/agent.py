@@ -305,6 +305,8 @@ def _steps_section(mode, can_submit) -> str:
         "listing EVERY field and value as it stands on the form (one line -- escape any "
         "newline inside a value as \\n), then END YOUR TURN and wait for a line "
         "beginning DECISION:.\n"
+        "Every label must be unique -- disambiguate repeated fields, e.g. \"Phone (mobile)\", "
+        "\"Employer 2 — title\".\n"
         "Never click Submit/Apply unless a DECISION with decision approve has arrived "
         "for your latest CONFIRM (or this run is pre-approved).\n"
         f'On {{"decision":"approve"}} -> {on_approve}.\n'
@@ -518,6 +520,10 @@ def parse_ask(line: str, nonce: str) -> dict | None:
         return None
     if p["kind"] == "choice" and not (isinstance(p.get("options"), list) and p["options"]):
         return None
+    # origin is ours alone: submit() stamps "needs_answer" on the park card, and
+    # answer_prompt answers that card WITHOUT the live run -- an agent-sent one
+    # would skip the relay and unpark a job mid-run.
+    p.pop("origin", None)
     for key, default in (("options", []), ("why", ""), ("memory_key", None),
                          ("default", None), ("sensitive", False)):
         p.setdefault(key, default)
@@ -536,6 +542,9 @@ def parse_confirm(line: str, nonce: str) -> dict | None:
     if not isinstance(fields, list) or not fields or not all(
             isinstance(f, dict) and "label" in f and "value" in f for f in fields):
         return None
+    labels = [str(f["label"]).strip() for f in fields]
+    if len(set(labels)) != len(labels):
+        return None     # a change is keyed by label: a duplicate would lose an edit
     as_list = lambda v: v if isinstance(v, list) else []
     return {"fields": [{"label": str(f["label"]), "value": str(f["value"])}
                        for f in fields],
