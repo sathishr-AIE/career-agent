@@ -79,6 +79,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Career Agent", lifespan=lifespan)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 app.include_router(api_router)
+from career_agent.web import api_chat
+app.include_router(api_chat.router)
 
 
 def _conn():
