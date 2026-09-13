@@ -121,6 +121,38 @@ CREATE TABLE IF NOT EXISTS resume (
 
 CREATE INDEX IF NOT EXISTS idx_assessment_job ON assessment(job_id);
 CREATE INDEX IF NOT EXISTS idx_event_job ON event(job_id);
+
+CREATE TABLE IF NOT EXISTS conversation (
+    id         INTEGER PRIMARY KEY,
+    kind       TEXT NOT NULL CHECK (kind IN ('home','job')),
+    job_id     INTEGER UNIQUE REFERENCES job(id),
+    title      TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS message (
+    id              INTEGER PRIMARY KEY,
+    conversation_id INTEGER NOT NULL REFERENCES conversation(id),
+    role            TEXT NOT NULL CHECK (role IN ('user','agent','system','prompt')),
+    content         TEXT NOT NULL,
+    payload         TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS message_conv_id ON message(conversation_id, id);
+
+CREATE TABLE IF NOT EXISTS agent_prompt (
+    id              INTEGER PRIMARY KEY,
+    job_id          INTEGER NOT NULL REFERENCES job(id),
+    conversation_id INTEGER NOT NULL REFERENCES conversation(id),
+    kind            TEXT NOT NULL,
+    payload         TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'open'
+                     CHECK (status IN ('open','answered','expired')),
+    answer          TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    answered_at     TEXT
+);
 """
 
 
