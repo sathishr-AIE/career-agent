@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import sqlite3
 
@@ -6,6 +7,8 @@ from career_agent import normalize
 from career_agent.apply import ats
 from career_agent.config import SCORING_MODELS, CareerBrief
 from career_agent.models import Job, Verdict
+
+logger = logging.getLogger(__name__)
 
 
 def log(conn, job_id: int | None, type_: str, payload: str | None = None) -> None:
@@ -158,19 +161,37 @@ def qa_upsert(conn, question: str, answer: str, is_volatile: bool) -> None:
     conn.commit()
 
 
+# A memory_key is agent-proposed text that becomes a second question_normalized
+# row (see qa_remember below) -- a loose key ("notice period", with a space)
+# would normalize to the same string as an unrelated literal question and
+# silently merge the two. Snake_case with at least one underscore keeps keys
+# and literal questions in visibly different shapes.
+_MEMORY_KEY_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)+$")
+
+
 def qa_remember(conn, question: str, answer: str, *, kind: str = "text",
                 options=None, memory_key: str | None = None,
                 source_job_id: int | None = None,
                 is_volatile: bool = False) -> None:
     """Upsert the literal question as answered, and -- when memory_key is
-    given -- also upsert a second, canonical row keyed by the memory_key
-    itself (question_normalized == qa_normalize(memory_key)), so qa_by_key()
-    and the PREFERENCES prompt section can find the preference regardless of
-    which job's exact wording produced the answer. Only that canonical row
-    carries memory_key; the literal per-job row's memory_key stays NULL, or
-    _preferences_section would print the same preference twice. Confirming
-    an existing answer is itself a reconfirmation, so last_confirmed_at is
-    set unconditionally on every call, not only on first insert."""
+    given AND valid snake_case -- also upsert a second, canonical row keyed
+    by the memory_key itself (question_normalized == qa_normalize(memory_key)),
+    so qa_by_key() and the PREFERENCES prompt section can find the preference
+    regardless of which job's exact wording produced the answer. Only that
+    canonical row carries memory_key; the literal per-job row's memory_key
+    stays NULL, or _preferences_section would print the same preference
+    twice. Confirming an existing answer is itself a reconfirmation, so
+    last_confirmed_at is set unconditionally on every call, not only on
+    first insert. An invalid memory_key (not ^[a-z][a-z0-9]*(_[a-z0-9]+)+$)
+    is dropped -- the literal row is still stored -- and logged, since the
+    agent proposes keys and a bad one must not silently collide with an
+    unrelated question (see _MEMORY_KEY_RE)."""
+    if memory_key and not _MEMORY_KEY_RE.match(memory_key):
+        logger.warning("qa_remember: rejected memory_key %r (must be snake_case,"
+                       " e.g. 'notice_period') -- storing the literal answer only",
+                       memory_key)
+        memory_key = None
+
     options_json = json.dumps(options) if options is not None else None
 
     def _upsert(question_normalized: str, mem_key: str | None) -> None:
@@ -218,6 +239,89 @@ def qa_all(conn) -> list:
         "SELECT question_normalized, answer, is_volatile, last_confirmed_at,"
         " memory_key, kind, options_json, source_job_id, use_count,"
         " last_used_at FROM qa_bank ORDER BY question_normalized").fetchall()
+
+
+def _literal_twins(conn, answer: str, source_job_id: int | None):
+    """The literal (memory_key IS NULL) rows qa_remember wrote alongside a
+    keyed row: same answer text, same source_job_id. `source_job_id IS ?`
+    (not `=`) so a NULL source_job_id still matches NULL, the SQLite way."""
+    return conn.execute(
+        "SELECT id FROM qa_bank WHERE memory_key IS NULL"
+        " AND answer = ? AND source_job_id IS ?", (answer, source_job_id))
+
+
+def qa_update(conn, row_id: int, answer: str, is_volatile: bool) -> bool:
+    """Edit one qa_bank row (the /memory drawer's Save). When the row is
+    keyed, its literal twins -- identified the same way qa_remember wrote
+    them, by the row's PRIOR answer and source_job_id -- are updated too, so
+    editing the canonical preference doesn't leave the per-job history rows
+    stale (see the "keyed vs literal drift" ruling). Returns False for an
+    unknown id."""
+    row = conn.execute("SELECT * FROM qa_bank WHERE id = ?", (row_id,)).fetchone()
+    if row is None:
+        return False
+    if row["memory_key"]:
+        twins = [r["id"] for r in _literal_twins(conn, row["answer"], row["source_job_id"])]
+        for twin_id in twins:
+            conn.execute(
+                "UPDATE qa_bank SET answer = ?, last_confirmed_at = datetime('now')"
+                " WHERE id = ?", (answer, twin_id))
+    conn.execute(
+        "UPDATE qa_bank SET answer = ?, is_volatile = ?,"
+        " last_confirmed_at = datetime('now') WHERE id = ?",
+        (answer, int(is_volatile), row_id))
+    conn.commit()
+    return True
+
+
+def qa_delete(conn, row_id: int) -> bool:
+    """Delete one qa_bank row and, for a keyed row, its literal twins
+    (same identification as qa_update). Returns False for an unknown id."""
+    row = conn.execute("SELECT * FROM qa_bank WHERE id = ?", (row_id,)).fetchone()
+    if row is None:
+        return False
+    if row["memory_key"]:
+        conn.execute(
+            "DELETE FROM qa_bank WHERE memory_key IS NULL"
+            " AND answer = ? AND source_job_id IS ?",
+            (row["answer"], row["source_job_id"]))
+    conn.execute("DELETE FROM qa_bank WHERE id = ?", (row_id,))
+    conn.commit()
+    return True
+
+
+def memory_list(conn) -> list[dict]:
+    """The /memory drawer's rows: every keyed (preference) row, plus literal
+    rows that are NOT a keyed row's twin (same answer + source_job_id) --
+    those twins are history, not something to edit or show twice (see the
+    "keyed vs literal drift" ruling). A literal row that coincidentally
+    shares both an answer and a (possibly NULL) source_job_id with an
+    unrelated keyed row would also be hidden by this; accepted as the same
+    limitation the ruling already names."""
+    rows = conn.execute(
+        "SELECT id, question_normalized, answer, is_volatile, last_confirmed_at,"
+        " memory_key, kind, options_json, source_job_id, use_count,"
+        " last_used_at FROM qa_bank ORDER BY question_normalized").fetchall()
+    keyed_twin_keys = {(r["answer"], r["source_job_id"]) for r in rows if r["memory_key"]}
+
+    items = []
+    for r in rows:
+        is_keyed = bool(r["memory_key"])
+        if not is_keyed and (r["answer"], r["source_job_id"]) in keyed_twin_keys:
+            continue
+        items.append({
+            "id": r["id"],
+            "label": r["memory_key"] or r["question_normalized"],
+            "answer": r["answer"],
+            "kind": r["kind"],
+            "options": json.loads(r["options_json"]) if r["options_json"] else None,
+            "is_volatile": bool(r["is_volatile"]),
+            "last_confirmed_at": r["last_confirmed_at"],
+            "use_count": r["use_count"],
+            "last_used_at": r["last_used_at"],
+            "is_preference": is_keyed,
+        })
+    return items
 
 
 def get_settings(conn) -> sqlite3.Row:

@@ -370,9 +370,12 @@ def test_qa_remember_twice_updates_and_does_not_duplicate(conn):
 
 
 def test_qa_by_key_is_case_and_punctuation_insensitive(conn):
+    # Task 13: memory_key must itself be snake_case (see the rejection tests
+    # below), so this exercises qa_by_key's own normalization on case/trailing
+    # punctuation variants of a valid key -- not on the stored key's shape.
     store.qa_remember(conn, "Notice period?", "30 days",
-                      memory_key="Notice Period!")
-    for variant in ("notice period", "NOTICE PERIOD", "Notice, Period."):
+                      memory_key="notice_period")
+    for variant in ("notice_period", "NOTICE_PERIOD", "Notice_Period."):
         assert store.qa_by_key(conn, variant) is not None
         assert store.qa_by_key(conn, variant)["answer"] == "30 days"
 
@@ -396,3 +399,92 @@ def test_qa_touch_bumps_use_count_and_last_used_at(conn):
 def test_qa_touch_is_a_no_op_for_unknown_keys(conn):
     store.qa_touch(conn, ["does_not_exist"])  # must not raise
     assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 0
+
+
+# -- Task 13: memory_key validation, qa_update/qa_delete twin rules, memory_list --
+
+@pytest.mark.parametrize("key", ["notice period", "Notice_Period", "gender", "a_"])
+def test_qa_remember_rejects_a_non_snake_case_memory_key(conn, key):
+    store.qa_remember(conn, "Some question?", "answer", memory_key=key)
+    # literal row still stored, but no keyed row -- only the literal exists
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 1
+    literal = store.qa_lookup(conn, "Some question?")
+    assert literal is not None and literal["memory_key"] is None
+
+
+@pytest.mark.parametrize("key", ["notice_period", "expected_salary_inr"])
+def test_qa_remember_accepts_a_snake_case_memory_key(conn, key):
+    store.qa_remember(conn, "Some question?", "answer", memory_key=key)
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 2
+    assert store.qa_by_key(conn, key) is not None
+
+
+def test_qa_remember_logs_the_rejected_key(conn, caplog):
+    with caplog.at_level("WARNING"):
+        store.qa_remember(conn, "Some question?", "answer", memory_key="Notice_Period")
+    assert "Notice_Period" in caplog.text
+
+
+def test_qa_update_on_a_keyed_row_updates_its_literal_twin(conn):
+    store.qa_remember(conn, "Notice period?", "30 days", memory_key="notice_period",
+                      source_job_id=7)
+    # a different job's literal row that happens to share the answer text --
+    # must not be touched by an update to the (job 7) keyed row.
+    store.qa_remember(conn, "How much notice?", "30 days", source_job_id=8)
+
+    keyed = store.qa_by_key(conn, "notice_period")
+    assert store.qa_update(conn, keyed["id"], "45 days", True) is True
+
+    assert store.qa_by_key(conn, "notice_period")["answer"] == "45 days"
+    twin = store.qa_lookup(conn, "Notice period?")
+    assert twin["answer"] == "45 days"
+    other = store.qa_lookup(conn, "How much notice?")
+    assert other["answer"] == "30 days"
+
+
+def test_qa_update_on_an_unkeyed_literal_only_updates_itself(conn):
+    store.qa_upsert(conn, "Years of experience?", "6", is_volatile=False)
+    row = store.qa_lookup(conn, "Years of experience?")
+    assert store.qa_update(conn, row["id"], "7", False) is True
+    assert store.qa_lookup(conn, "Years of experience?")["answer"] == "7"
+
+
+def test_qa_update_unknown_id_returns_false(conn):
+    assert store.qa_update(conn, 999, "x", False) is False
+
+
+def test_qa_delete_removes_a_keyed_row_and_its_literal_twin(conn):
+    store.qa_remember(conn, "Notice period?", "30 days", memory_key="notice_period",
+                      source_job_id=7)
+    keyed = store.qa_by_key(conn, "notice_period")
+    assert store.qa_delete(conn, keyed["id"]) is True
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 0
+
+
+def test_qa_delete_unknown_id_returns_false(conn):
+    assert store.qa_delete(conn, 999) is False
+
+
+def test_memory_list_hides_literal_twins_but_shows_untwinned_literals(conn):
+    store.qa_remember(conn, "Notice period?", "30 days", memory_key="notice_period",
+                      source_job_id=7)
+    store.qa_upsert(conn, "Years of experience?", "6", is_volatile=False)
+    items = store.memory_list(conn)
+    by_label = {i["label"]: i for i in items}
+
+    assert "notice_period" in by_label
+    assert by_label["notice_period"]["is_preference"] is True
+    assert by_label["notice_period"]["answer"] == "30 days"
+
+    literal_label = store.qa_normalize("Notice period?")
+    assert literal_label not in by_label, "the literal twin must be hidden"
+
+    exp_label = store.qa_normalize("Years of experience?")
+    assert exp_label in by_label
+    assert by_label[exp_label]["is_preference"] is False
+    assert by_label[exp_label]["answer"] == "6"
+
+    for item in items:
+        assert {"id", "label", "answer", "kind", "options", "is_volatile",
+               "last_confirmed_at", "use_count", "last_used_at",
+               "is_preference"} <= item.keys()

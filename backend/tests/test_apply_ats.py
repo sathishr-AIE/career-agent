@@ -1289,6 +1289,70 @@ def test_a_refused_send_leaves_the_prompt_open(conn, runs, state):
     assert chat.open_prompt_for_job(conn, 1)["id"] == pid
 
 
+# -- Task 13: answer_prompt remembers choice/text answers -------------------
+
+def test_answer_prompt_remembers_a_choice_answer_by_default(conn, runs):
+    from career_agent.web import actions
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    pid = _open(conn, "choice", {"id": "q", "kind": "choice", "question": "Notice period?",
+                                 "options": ["30", "60"], "memory_key": "notice_period",
+                                 "sensitive": False})
+    assert actions.answer_prompt(conn, pid, {"answer": "30"})["ok"]
+    assert store.qa_lookup(conn, "Notice period?")["answer"] == "30"
+    keyed = store.qa_by_key(conn, "notice_period")
+    assert keyed is not None and keyed["answer"] == "30"
+    assert keyed["source_job_id"] == 1
+
+
+def test_answer_prompt_remember_false_writes_nothing(conn, runs):
+    from career_agent.web import actions
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    pid = _open(conn, "text", {"id": "q", "kind": "text", "question": "Why?",
+                               "memory_key": None, "sensitive": False})
+    assert actions.answer_prompt(conn, pid, {"answer": "because", "remember": False})["ok"]
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 0
+
+
+def test_answer_prompt_sensitive_card_is_never_remembered(conn, runs):
+    from career_agent.web import actions
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    pid = _open(conn, "text", {"id": "q", "kind": "text", "question": "SSN?",
+                               "memory_key": "ssn", "sensitive": True})
+    assert actions.answer_prompt(conn, pid, {"answer": "123-45-6789"})["ok"]
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 0
+
+
+class RefusingRun(FakeRun):
+    """A run that always refuses send() -- same as a run that ended between
+    the waiting-check and the send call."""
+    def send(self, text):
+        return False
+
+
+def test_answer_prompt_a_refused_send_remembers_nothing(conn, runs):
+    from career_agent.web import actions
+    run = runs[1] = RefusingRun("n")
+    run.waiting.set()
+    pid = _open(conn, "choice", {"id": "q", "kind": "choice", "question": "Notice period?",
+                                 "options": ["30", "60"], "memory_key": "notice_period"})
+    r = actions.answer_prompt(conn, pid, {"answer": "30"})
+    assert not r["ok"] and r["code"] == 409
+    assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 0
+
+
+def test_answer_prompt_confirm_approve_bumps_memory_use_count(conn, runs):
+    from career_agent.web import actions
+    store.qa_remember(conn, "Notice period?", "30 days", memory_key="notice_period")
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    pid = _open(conn, "confirm", {**_confirm(Name="Asha"), "memory_used": ["notice_period"]})
+    assert actions.answer_prompt(conn, pid, {"decision": "approve"})["ok"]
+    assert store.qa_by_key(conn, "notice_period")["use_count"] == 1
+
+
 def _in_flight(conn):
     conn.execute("INSERT INTO application (job_id, resume_version, status, started_at)"
                  " VALUES (1, 'base-v1', 'in_flight', datetime('now'))")
