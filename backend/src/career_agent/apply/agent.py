@@ -456,6 +456,34 @@ def parse_result(output: str, nonce: str) -> AgentResult:
 # consume_stream (pure) by house convention -- see CLAUDE.md testing
 # conventions and this task's brief. --------------------------------------
 
+# Short tokens only on letter boundaries: bare "pin" would hit "Shipping"
+# and "pincode" (an Indian postal code, not a secret).
+_SECRET = re.compile(r"pass(word|wd|code|phrase)|pwd|secret|token"
+                     r"|(?<![a-z])(pin|otp|ssn|cvv)(?![a-z])", re.I)
+_PAYLOAD_KEYS = ("value", "text", "values")
+
+
+def _redact(obj):
+    if isinstance(obj, list):
+        return [_redact(v) for v in obj]
+    if not isinstance(obj, dict):
+        return obj
+    # Playwright MCP names the field in a sibling of the typed payload
+    # (fill_form: name/value, type: element/text), so a matching label
+    # redacts the payload, not just a matching key.
+    labelled = any(isinstance(v, str) and _SECRET.search(v)
+                   for k, v in obj.items() if k not in _PAYLOAD_KEYS)
+    return {k: "***" if _SECRET.search(k) or (labelled and k in _PAYLOAD_KEYS)
+            else _redact(v) for k, v in obj.items()}
+
+
+def summarize_tool_input(inp, limit: int = 300) -> str:
+    """One transcript line of what a tool call entered, secrets redacted --
+    the audit trail must show what was typed without keeping a password."""
+    s = json.dumps(_redact(inp), ensure_ascii=False, separators=(",", ":"))
+    return s if len(s) <= limit else s[:limit] + "…"
+
+
 def consume_stream(lines) -> tuple[str, float]:
     """Fold claude's stream-json stdout into (text transcript, cost)."""
     parts, cost = [], 0.0
@@ -474,7 +502,8 @@ def consume_stream(lines) -> tuple[str, float]:
                     parts.append(block["text"])
                 elif block.get("type") == "tool_use":
                     name = block.get("name", "").replace("mcp__playwright__", "")
-                    parts.append(f"  >> {name}")
+                    parts.append(f"  >> {name} "
+                                 f"{summarize_tool_input(block.get('input', {}))}")
         elif msg.get("type") == "result":
             cost = msg.get("total_cost_usd", 0.0) or 0.0
             parts.append(msg.get("result", "") or "")

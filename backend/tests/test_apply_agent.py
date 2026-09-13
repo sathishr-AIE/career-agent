@@ -512,3 +512,45 @@ def test_browser_run_code_unsafe_is_disallowed_at_the_cli():
     assert cmd.count("--disallowedTools") == 1
     assert "browser_evaluate" not in " ".join(cmd)
     assert cmd[cmd.index("--tools") + 1] == ""
+
+
+# -- live-safety FIX 2: transcripts record what was typed, secrets redacted --
+
+def test_fill_form_input_is_logged_with_the_password_redacted():
+    inp = {"fields": [
+        {"name": "Email address", "type": "textbox", "ref": "e3",
+         "value": "jane@example.com"},
+        {"name": "Create Password", "type": "textbox", "ref": "e4",
+         "value": "hunter2-Secret!"},
+        {"name": "Confirm your passcode", "type": "textbox", "ref": "e5",
+         "value": "hunter2-Secret!"}]}
+    s = agent_mod.summarize_tool_input(inp)
+    assert "jane@example.com" in s
+    assert "hunter2" not in s and '"***"' in s
+
+
+def test_type_into_a_password_element_is_redacted():
+    s = agent_mod.summarize_tool_input(
+        {"element": "Password input", "ref": "e9", "text": "hunter2"})
+    assert "hunter2" not in s and "Password input" in s
+
+
+def test_a_sensitive_key_is_redacted_anywhere_in_the_input():
+    s = agent_mod.summarize_tool_input({"nested": [{"api_token": "abc123"}]})
+    assert "abc123" not in s
+
+
+def test_long_tool_inputs_are_truncated():
+    s = agent_mod.summarize_tool_input({"text": "x" * 5000})
+    assert len(s) <= 301
+
+
+def test_consume_stream_logs_tool_input_next_to_the_name():
+    line = _json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "mcp__playwright__browser_type",
+         "input": {"element": "Password", "ref": "e1", "text": "hunter2"}},
+        {"type": "tool_use", "name": "mcp__playwright__browser_click",
+         "input": {"element": "Apply", "ref": "e2"}}]}})
+    text = consume_stream([line])[0]
+    assert "  >> browser_click " in text and '"Apply"' in text
+    assert "hunter2" not in text

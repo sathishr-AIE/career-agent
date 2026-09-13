@@ -156,7 +156,7 @@ its source is AGPL):
   `browser_run_code_unsafe` runs code in Playwright's own Node process (host access, outside
   the page sandbox) and the server has no flag to disable it; `browser_evaluate` (page
   sandbox) stays allowed.
-- Streams stdout line-by-line: `assistant` text and humanized `tool_use` lines append to a
+- Streams stdout line-by-line: `assistant` text and humanized `tool_use` lines (tool name plus its input, one line, capped at 300 chars, secret-looking fields redacted to `***` by `summarize_tool_input`) append to a
   per-job transcript `data/logs/apply_<ts>_job<id>.txt`; the final `result` message yields
   `cost_usd`. Wall-clock timeout 1200 s → process-tree kill → `AgentResult("failed", "timeout")`.
   1200 s, not 600: a multi-page ATS form (Workday/iCIMS/SuccessFactors) can run past ten minutes (a live SuccessFactors draft did),
