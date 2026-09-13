@@ -66,3 +66,14 @@ def test_open_prompt_is_surfaced(client, conn):
     cid = chat.conversation_for_job(conn, 1)
     r = client.get(f"/api/chat/{cid}/messages").json()
     assert r["open_prompt"]["id"] == pid and r["open_prompt"]["payload"]["question"] == "Notice period?"
+
+
+def test_post_to_unknown_conversation_is_404(client, conn):
+    r = client.post("/api/chat/999/messages", json={"text": "hello"})
+    assert r.status_code == 404
+
+
+def test_post_blank_message_is_422(client, conn):
+    home = client.get("/api/chat/conversations").json()["home_id"]
+    r = client.post(f"/api/chat/{home}/messages", json={"text": "   "})
+    assert r.status_code == 422

@@ -1,7 +1,7 @@
 """/api/chat/*: the React chat's only backend. Same deferred-import rule as
 api.py: app.py mounts this router, so app.py is imported at call time."""
 import json
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, HTTPException
 
 from career_agent import chat
 
@@ -40,8 +40,13 @@ def api_messages(cid: int, after: int = 0):
 @router.post("/{cid}/messages")
 def api_post_message(cid: int, text: str = Body(..., embed=True)):
     conn = _app()._conn()
-    mid = chat.post_message(conn, cid, "user", text.strip())
     conv = conn.execute("SELECT kind FROM conversation WHERE id = ?", (cid,)).fetchone()
-    if conv and conv["kind"] == "home":
+    if not conv:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    stripped = text.strip()
+    if not stripped:
+        raise HTTPException(status_code=422, detail="empty message")
+    mid = chat.post_message(conn, cid, "user", stripped)
+    if conv["kind"] == "home":
         chat.post_message(conn, cid, "system", "Commands arrive in a later slice.")
     return {"ok": True, "message_id": mid}
