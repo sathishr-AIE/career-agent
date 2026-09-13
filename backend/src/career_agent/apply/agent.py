@@ -184,9 +184,10 @@ def _known_logins_section(logins: list[dict]) -> str:
     return (
         "== KNOWN LOGINS ==\n"
         f"{lines}\n"
-        "When a site in this list asks you to sign in, do not guess or reuse a "
-        'password from anywhere else -- output an ASK of kind "need_password" '
-        "naming the domain and wait for the password to arrive in the ANSWER."
+        "You do NOT have the password for any of these -- when a site in this list "
+        "asks you to sign in, do not guess or reuse a password from anywhere else. "
+        'Output an ASK of kind "need_password" naming the domain and wait for the '
+        "password to arrive in the ANSWER."
     )
 
 

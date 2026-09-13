@@ -84,6 +84,47 @@ def test_normalize_domain_collapses_to_same_host(value):
     assert credentials.normalize_domain(value) == "careers.ses.com"
 
 
+def test_normalize_domain_backslash_spoof_resolves_to_the_real_pre_backslash_host():
+    """A browser treats "\\" as a path separator, ending the netloc there, so
+    "https://evil.com\\@careers.ses.com/" is really evil.com -- not
+    careers.ses.com, even though a naive "@"-rsplit on the raw netloc would
+    say so."""
+    assert (credentials.normalize_domain("https://evil.com\\@careers.ses.com/")
+           == "evil.com")
+
+
+def test_normalize_domain_userinfo_at_sign_strips_to_host():
+    assert credentials.normalize_domain("https://user:pw@careers.ses.com/") == "careers.ses.com"
+
+
+def test_normalize_domain_ipv6_literal():
+    assert credentials.normalize_domain("https://[::1]:8080/") == "::1"
+
+
+def test_normalize_domain_strips_trailing_dot():
+    assert credentials.normalize_domain("careers.ses.com.") == "careers.ses.com"
+    assert credentials.normalize_domain("https://www.careers.ses.com./x") == "careers.ses.com"
+
+
+def test_normalize_domain_unicode_host_becomes_punycode():
+    assert credentials.normalize_domain("https://café.com/") == "xn--caf-dma.com"
+
+
+@pytest.mark.parametrize("value", ["", "https:///x", "   ", "https://\\@/x"])
+def test_normalize_domain_with_no_host_raises_value_error(value):
+    with pytest.raises(ValueError):
+        credentials.normalize_domain(value)
+
+
+def test_put_and_get_refuse_a_domain_with_no_host_rather_than_store_it(conn):
+    with pytest.raises(ValueError):
+        credentials.put(conn, "https:///x", "https://x/login", "u@x.com", "pw",
+                        created_by="agent")
+    assert conn.execute("SELECT COUNT(*) n FROM site_credential").fetchone()["n"] == 0
+    with pytest.raises(ValueError):
+        credentials.get(conn, "https:///x")
+
+
 # -- put / get / list_ / delete -------------------------------------------
 
 def test_put_then_get_round_trips_password(conn):
@@ -120,6 +161,16 @@ def test_get_bumps_last_used_at(conn):
 
 def test_get_missing_domain_returns_none(conn):
     assert credentials.get(conn, "nowhere.com") is None
+
+
+def test_get_with_wrong_key_raises_and_does_not_bump_last_used_at(conn, monkeypatch):
+    credentials.put(conn, "a.com", "https://a.com", "u@a.com", "pw", created_by="agent")
+    monkeypatch.setenv("CREDENTIAL_KEY", Fernet.generate_key().decode())
+    with pytest.raises(CredentialKeyError):
+        credentials.get(conn, "a.com")
+    row = conn.execute("SELECT last_used_at FROM site_credential WHERE domain='a.com'"
+                       ).fetchone()
+    assert row["last_used_at"] is None
 
 
 def test_put_upserts_by_normalized_domain(conn):

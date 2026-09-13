@@ -13,13 +13,35 @@ _SYMBOLS = "!@#$%^&*-_=+"  # site-friendly; no ambiguous look-alikes required
 
 
 def normalize_domain(value: str) -> str:
-    """A URL or bare host -> lowercase host, no scheme/userinfo/port/path/www."""
-    value = value.strip().lower()
+    """A URL or bare host -> lowercase ASCII host, no scheme/userinfo/port/
+    path/www/trailing dot. Raises ValueError when no host survives -- a
+    caller must refuse and never store or look up a credential under a
+    junk key.
+
+    A raw netloc split (e.g. rsplit on "@") is not enough: a browser treats
+    a backslash in a URL as a path separator, ending the host early, but
+    Python's urlsplit does not -- "https://evil.com\\@careers.ses.com/"
+    would parse as one netloc and rsplit("@") would hand back
+    "careers.ses.com", the *attacker's* href-visible host being evil.com.
+    Replacing "\\" with "/" first makes urlsplit end the netloc exactly
+    where a browser would. hostname (not netloc) then drops userinfo and
+    port and unwraps IPv6 brackets in one step, so "[::1]:8080" -> "::1"
+    rather than the netloc's leading "[".
+    """
+    value = value.strip().lower().replace("\\", "/")
     if "//" not in value:
         value = "//" + value  # forces urlsplit to treat it as netloc, not path
-    netloc = urlsplit(value).netloc or value
-    host = netloc.rsplit("@", 1)[-1].split(":", 1)[0]  # strip userinfo, port
-    return host[4:] if host.startswith("www.") else host
+    host = urlsplit(value).hostname
+    if host:
+        host = host.rstrip(".")
+    if host and host.startswith("www."):
+        host = host[4:]
+    if not host:
+        raise ValueError(f"no host found in domain/URL {value!r}")
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ValueError(f"invalid host {host!r}") from exc
 
 
 def generate_password(length: int = 20) -> str:
@@ -58,16 +80,19 @@ def put(conn, domain: str, login_url: str, email: str, password: str,
 
 
 def get(conn, domain: str) -> dict | None:
-    """Decrypted credential for a domain, or None. Bumps last_used_at."""
+    """Decrypted credential for a domain, or None. Bumps last_used_at --
+    but only once decrypt() has actually succeeded, so a wrong
+    CREDENTIAL_KEY (CredentialKeyError) never marks the row used."""
     d = normalize_domain(domain)
     row = conn.execute("SELECT * FROM site_credential WHERE domain = ?", (d,)).fetchone()
     if row is None:
         return None
+    password = decrypt(row["password_enc"])
     conn.execute("UPDATE site_credential SET last_used_at = datetime('now') WHERE id = ?",
                 (row["id"],))
     conn.commit()
     return {"id": row["id"], "domain": row["domain"], "login_url": row["login_url"],
-            "email": row["email"], "password": decrypt(row["password_enc"]),
+            "email": row["email"], "password": password,
             "created_by": row["created_by"], "created_at": row["created_at"],
             "last_used_at": row["last_used_at"]}
 
