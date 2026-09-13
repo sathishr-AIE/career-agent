@@ -10,11 +10,18 @@ export function ConfirmCard({ prompt, onAnswered }: { prompt: OpenPrompt; onAnsw
   const p = prompt.payload as unknown as ConfirmPayload
   const { busy, error, send } = useAnswer(prompt.id, onAnswered)
   const [mode, setMode] = useState<'view' | 'edit' | 'cancel'>('view')
-  // Edits keyed by row index; `changes` keeps only values that differ.
+  // Edits keyed by row index; `changes` keeps only trimmed values that differ.
+  // A cleared row blocks Save: the backend only checks `changes` is non-empty,
+  // so an empty value would overwrite a real answer.
   const [edits, setEdits] = useState<Record<number, string>>({})
   const changes: Record<string, string> = {}
+  let blank = false
   p.fields.forEach((f, i) => {
-    if (i in edits && edits[i] !== f.value) changes[f.label] = edits[i]
+    if (!(i in edits)) return
+    const v = edits[i].trim()
+    if (v === f.value) return
+    if (!v) blank = true
+    else changes[f.label] = v
   })
   const changed = Object.keys(changes).length > 0
 
@@ -83,7 +90,7 @@ export function ConfirmCard({ prompt, onAnswered }: { prompt: OpenPrompt; onAnsw
             <button
               type="button"
               className="btn primary"
-              disabled={busy || !changed}
+              disabled={busy || !changed || blank}
               onClick={() => send({ decision: 'change', changes })}
             >
               Save changes
@@ -114,6 +121,9 @@ export function ConfirmCard({ prompt, onAnswered }: { prompt: OpenPrompt; onAnsw
         )}
       </div>
 
+      {mode === 'edit' && blank && (
+        <div className="qcard__error">A changed answer can't be empty — use Discard to keep the original.</div>
+      )}
       {error && <div className="qcard__error" role="alert">{error}</div>}
     </div>
   )
