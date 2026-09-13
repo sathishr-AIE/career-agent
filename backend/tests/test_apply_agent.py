@@ -936,6 +936,8 @@ def test_parse_confirm_refuses_duplicate_labels():
     from career_agent.apply.agent import parse_confirm
     assert parse_confirm('CONFIRM:n1:{"fields":[{"label":"Phone","value":"1"},'
                          '{"label":" Phone ","value":"2"}]}', "n1") is None
+    assert parse_confirm('CONFIRM:n1:{"fields":[{"label":"Phone","value":"1"},'
+                         '{"label":"PHONE","value":"2"}]}', "n1") is None
 
 
 def test_parse_ask_drops_an_agent_supplied_origin():

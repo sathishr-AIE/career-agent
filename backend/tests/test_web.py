@@ -2135,8 +2135,54 @@ def test_run_status_context_exposes_the_open_prompt_and_conversation(client):
     assert ctx["conversation_id"] == chat.conversation_for_job(conn, 1)
     pid = chat.open_prompt(conn, 1, "text", {"id": "q", "question": "Notice?"})
     assert web._run_status_context(conn)["open_prompt"] == {
-        "id": pid, "kind": "text", "question": "Notice?"}
+        "id": pid, "kind": "text", "question": "Notice?", "needs_answer": False}
     chat.expire_open_prompts(conn, 1)
     cpid = chat.open_prompt(conn, 1, "confirm", {"fields": []})
     assert web._run_status_context(conn)["open_prompt"] == {
-        "id": cpid, "kind": "confirm", "question": "Review before applying"}
+        "id": cpid, "kind": "confirm", "question": "Review before applying", "needs_answer": False}
+
+
+# -- Task 9 fix round 1 ---------------------------------------------------------
+
+def _live_ask(conn, job_id=1):
+    from career_agent import chat
+    worker.set_run_state(conn, "apply", status="running", mode="manual", current_job_id=job_id)
+    return chat.open_prompt(conn, job_id, "text", {"id": "q1", "kind": "text", "question": "Notice?"})
+
+
+def test_the_legacy_form_is_not_shown_for_a_live_run_ask(client):
+    conn = db.connect(web.DB_PATH)
+    _live_ask(conn)
+    r = client.get("/run/status")
+    assert 'name="question"' not in r.text
+
+
+def test_legacy_answer_refuses_a_live_run_ask(client):
+    conn = db.connect(web.DB_PATH)
+    pid = _live_ask(conn)
+    for r in (client.post("/answer/1", data={"question": "Notice?", "answer": "30 days"}),
+              client.post("/api/answer/1", json={"question": "Notice?", "answer": "30 days"})):
+        assert "answer it in the job" in r.text   # the Jinja span escapes the apostrophe
+    assert store.qa_lookup(conn, "Notice?") is None
+    assert worker.get_run_state(conn, "apply")["current_job_id"] == 1
+    types = {e["type"] for e in conn.execute("SELECT type FROM event")}
+    assert "needs_answer_resolved" not in types
+    from career_agent import chat
+    assert chat.open_prompt_for_job(conn, 1)["id"] == pid
+
+
+def test_do_apply_expires_a_stale_card_before_tailoring_and_posts_refusals(client, monkeypatch):
+    from career_agent import chat
+    conn = db.connect(web.DB_PATH)
+    _open_needs_answer(conn, 1, "PMP?")
+    seen = []
+
+    async def fake_tailor(conn, job_id, brief_path):
+        seen.append(chat.open_prompt_for_job(conn, job_id))
+        raise RuntimeError("tailor boom")
+
+    monkeypatch.setattr(web.worker, "tailor_for_apply", fake_tailor)
+    r = client.post("/api/apply/1")
+    assert r.status_code == 422 and seen == [None]
+    texts = [m["content"] for m in chat.messages_after(conn, chat.conversation_for_job(conn, 1))]
+    assert "Apply refused: tailor boom" in texts

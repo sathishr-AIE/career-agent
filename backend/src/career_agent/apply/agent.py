@@ -626,7 +626,7 @@ def parse_confirm(line: str, nonce: str) -> dict | None:
     if not isinstance(fields, list) or not fields or not all(
             isinstance(f, dict) and "label" in f and "value" in f for f in fields):
         return None
-    labels = [str(f["label"]).strip() for f in fields]
+    labels = [str(f["label"]).strip().casefold() for f in fields]
     if len(set(labels)) != len(labels):
         return None     # a change is keyed by label: a duplicate would lose an edit
     as_list = lambda v: v if isinstance(v, list) else []

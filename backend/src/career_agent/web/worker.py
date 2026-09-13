@@ -147,18 +147,18 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
 
     job_id = candidate["job_id"]
     set_run_state(conn, "apply", current_job_id=job_id)
+    # Before any await: a stale needs_answer card answered while this job
+    # starts would unpark it and let the next tick run it a second time.
+    chat.expire_open_prompts(conn, job_id)
     say(conn, job_id, f"Picked up by the apply worker ({state['mode']} mode)", conn_factory)
 
     denial = guard(conn, job_id, allow_skip=True, brief_path=brief_path)
     if denial:
-        if "cap" in denial.lower():
-            set_run_state(conn, "apply", status="paused", current_job_id=None)
-            store.log(conn, job_id, "run_autopaused", denial)
-            say(conn, job_id, f"Apply run auto-paused: {denial}", conn_factory)
-        else:
-            store.log(conn, job_id, "job_skipped", denial)
-            set_run_state(conn, "apply", current_job_id=None)
-            say(conn, job_id, f"Skipped: {denial}", conn_factory)
+        # Pause on every denial: the job stays in the queue, so clearing
+        # current_job_id alone would re-pick it on the next tick, forever.
+        set_run_state(conn, "apply", status="paused", current_job_id=None)
+        store.log(conn, job_id, "run_autopaused", denial)
+        say(conn, job_id, f"Apply run auto-paused: {denial}", conn_factory)
         return
 
     try:

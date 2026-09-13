@@ -574,23 +574,44 @@ async def test_tick_autopauses_on_daily_cap(conn, brief_path, profile_path):
     assert "run_autopaused" in types
 
 
-async def test_tick_skips_a_denied_job_and_stays_running(conn, brief_path, profile_path):
-    # A verdict='skip' job is excluded by next_candidate's own SQL
-    # (verdict IN ('submit','hold')), so it never reaches guard() through
-    # apply_tick and can't exercise the job_skipped branch. Use a real
-    # ('submit') candidate with the agent paused instead, the reachable
-    # non-cap denial guard() produces.
-    _job(conn, "gate-skipped")
+async def test_tick_pauses_on_a_non_cap_denial(conn, brief_path, profile_path):
+    # The reachable non-cap denial is a legacy event type='pause' row. The
+    # job stays queued, so clearing current_job_id alone would re-pick it
+    # every 0.1 s (two chat messages each time) -- pause instead.
+    job_id = _job(conn, "gate-skipped")
     store.log(conn, None, "pause", "on")
     worker.set_run_state(conn, "apply", status="running", mode="auto")
 
     await worker.apply_tick(conn, brief_path, profile_path)
 
     state = worker.get_run_state(conn, "apply")
-    assert state["status"] == "running"
+    assert state["status"] == "paused"
     assert state["current_job_id"] is None
     types = {e["type"] for e in conn.execute("SELECT type FROM event")}
-    assert "job_skipped" in types
+    assert "run_autopaused" in types
+    assert any("auto-paused" in t for t in _chat_texts(conn, job_id))
+
+
+async def test_apply_tick_expires_a_stale_card_before_tailoring(
+        conn, brief_path, profile_path, monkeypatch):
+    from career_agent import chat
+    job_id = _job(conn, "fp1")
+    chat.open_prompt(conn, job_id, "text", {"id": "needs_answer", "question": "PMP?",
+                                            "origin": "needs_answer"})
+    worker.set_run_state(conn, "apply", status="running", mode="manual")
+    seen = []
+
+    async def fake_tailor(conn, job_id, brief_path):
+        seen.append(chat.open_prompt_for_job(conn, job_id))
+        return "base-v1"
+
+    async def fake_submit(conn, job_id, mode, **kw):
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(worker, "tailor_for_apply", fake_tailor)
+    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
+    await worker.apply_tick(conn, brief_path, profile_path)
+    assert seen == [None]
 
 
 async def test_tick_errors_on_unhandled_submit_exception(

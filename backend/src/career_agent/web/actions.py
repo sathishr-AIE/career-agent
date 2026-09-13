@@ -95,6 +95,19 @@ async def upload_master_resume(file) -> dict:
 async def do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
                    event: str | None, brief_path: Path,
                    candidate_profile_path: Path, conn_factory=None) -> dict:
+    """The Applications page opens the job's chat before this returns, so a
+    refusal is posted there too -- except the needs_answer park, whose card
+    is already in the chat."""
+    result = await _do_apply(conn, job_id, allow_skip, event, brief_path,
+                             candidate_profile_path, conn_factory)
+    if not result["ok"] and not result.pop("parked", False):
+        worker.say(conn, job_id, f"Apply refused: {result['message']}")
+    return result
+
+
+async def _do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
+                    event: str | None, brief_path: Path,
+                    candidate_profile_path: Path, conn_factory=None) -> dict:
     parked = worker.get_run_state(conn, "apply")["current_job_id"]
     if parked is not None and parked != job_id:
         # Drafting job_id would set current_job_id to it below, silently
@@ -107,6 +120,10 @@ async def do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
     denial = worker.guard(conn, job_id, allow_skip=allow_skip, brief_path=brief_path)
     if denial:
         return {"ok": False, "message": denial}
+
+    # Before any await: a stale needs_answer card answered while this job is
+    # tailoring would unpark it and let the worker run it a second time.
+    chat.expire_open_prompts(conn, job_id)
 
     if event:
         store.log(conn, job_id, event)
@@ -134,7 +151,7 @@ async def do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
         # usually wasn't there unless the run happened to already be parked
         # on this exact job.
         worker.set_run_state(conn, "apply", current_job_id=job_id)
-        return {"ok": False, "message":
+        return {"ok": False, "parked": True, "message":
                 f'Answer needed: {result["needs_answer"]} — answer it in the'
                 " job's chat."}
     if not result["ok"]:
@@ -148,10 +165,14 @@ async def do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
 
 def answer_question(conn: sqlite3.Connection, job_id: int, question: str,
                     answer: str, is_volatile: bool) -> dict:
-    store.qa_upsert(conn, question, answer.strip(), is_volatile=is_volatile)
-    # Legacy (Jinja) path: close the chat card too, or it stays answerable.
+    # Legacy (Jinja) path. A live run's own ASK must be answered through the
+    # run (answer_prompt); saving it here would unpark a job mid-run.
     open_row = chat.open_prompt_for_job(conn, job_id)
-    if open_row and json.loads(open_row["payload"]).get("origin") == "needs_answer":
+    if open_row and json.loads(open_row["payload"]).get("origin") != "needs_answer":
+        return {"ok": False, "message":
+                "The agent is waiting on this question live — answer it in the job's chat."}
+    store.qa_upsert(conn, question, answer.strip(), is_volatile=is_volatile)
+    if open_row:    # close the chat card too, or it stays answerable
         chat.answer_prompt_row(conn, open_row["id"], {"answer": answer.strip()})
     # Distinguishable from the needs_answer event that parked the job, so
     # run_status_context can tell "still needs an answer" apart from

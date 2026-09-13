@@ -31,7 +31,7 @@
   {% if current_job %}
   <div class="card now-processing">
     <b>{{ current_job["title"] }}</b> at {{ current_job["company"] }}
-    {% if open_prompt and open_prompt.kind == "text" %}
+    {% if open_prompt and open_prompt.needs_answer %}
       <span class="rationale">Answer needed: {{ open_prompt.question }}</span>
       <form hx-post="/answer/{{ current_job['job_id'] }}"
             hx-target="#run-status" hx-swap="outerHTML">

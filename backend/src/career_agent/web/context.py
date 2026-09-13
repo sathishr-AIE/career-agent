@@ -199,8 +199,10 @@ def run_status_context(conn: sqlite3.Connection) -> dict:
         # needs_answer/needs_answer_resolved event race can't re-show it.
         row = chat.open_prompt_for_job(conn, state["current_job_id"])
         if row:
+            payload = json.loads(row["payload"])
             open_prompt = {"id": row["id"], "kind": row["kind"],
-                           "question": chat.prompt_title(row["kind"], json.loads(row["payload"]))}
+                           "question": chat.prompt_title(row["kind"], payload),
+                           "needs_answer": payload.get("origin") == "needs_answer"}
     submitted = conn.execute(
         "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
     ).fetchone()["n"]
