@@ -293,9 +293,10 @@ async def test_resume_launches_a_resumed_submit_in_the_background(db_path, runs,
         return "base-v1"
 
     async def fake_submit(conn, job_id, **kw):
-        calls.append((job_id, kw))
+        calls.append((job_id, kw, checkpoint.get(conn, job_id)["auto_resumed"]))
         return {"ok": True, "job_id": job_id, "status": "draft"}
     monkeypatch.setattr(actions.worker, "tailor_for_apply", fake_tailor)
+    monkeypatch.setattr(actions.worker, "guard", lambda *a, **kw: None)
     monkeypatch.setattr(actions.ats_apply, "submit", fake_submit)
     monkeypatch.setattr(actions, "load_brief", lambda p: "BRIEF")
     monkeypatch.setattr(actions.context, "load_candidate_profile_or_none", lambda p: "PROFILE")
@@ -303,7 +304,8 @@ async def test_resume_launches_a_resumed_submit_in_the_background(db_path, runs,
     r = actions.resume_job(c, 1, "brief", "profile", "factory", tasks)
     assert r["ok"] and r["message"]
     await asyncio.gather(*tasks)
-    job_id, kw = calls[0]
+    job_id, kw, claimed = calls[0]
+    assert claimed == 1                                         # I5b: claimed while it runs
     assert job_id == 1 and kw["resume"] is True and kw["mode"] == "manual"
     assert kw["conn_factory"] == "factory" and kw["resume_version"] == "base-v1"
     assert checkpoint.get(c, 1)["auto_resumed"] == 0            # a human touch re-arms auto-resume
@@ -311,8 +313,9 @@ async def test_resume_launches_a_resumed_submit_in_the_background(db_path, runs,
     assert any("Continuing" in t for t in texts)
 
 
-def test_resume_endpoint_succeeds(client, conn, runs, monkeypatch):
+def test_resume_endpoint_succeeds(client, conn, runs, monkeypatch, tmp_path):
     _resumable(conn)
+    monkeypatch.setattr(web, "BRIEF_PATH", _brief(tmp_path))
     monkeypatch.setattr(actions, "_resume_run", lambda *a, **kw: _noop())
     r = client.post("/api/chat/jobs/1/resume")
     assert r.status_code == 200 and r.json()["ok"]
@@ -320,3 +323,60 @@ def test_resume_endpoint_succeeds(client, conn, runs, monkeypatch):
 
 async def _noop():
     return None
+
+
+# -- Task 11 fix round 1 ------------------------------------------------------
+
+def _brief(tmp_path):
+    p = tmp_path / "career_brief.toml"
+    p.write_text('target_titles = ["AI Engineer"]\nsearch_locations = ["Chennai"]\ndaily_cap = 5\n')
+    return p
+
+
+def test_resume_refuses_while_the_apply_run_is_paused(client, conn, runs, monkeypatch, tmp_path):
+    """I4: Continue goes through the same guard as Apply."""
+    _resumable(conn)
+    monkeypatch.setattr(web, "BRIEF_PATH", _brief(tmp_path))
+    conn.execute("INSERT INTO event (job_id, type, payload) VALUES (NULL, 'pause', 'on')")
+    conn.commit()
+    r = client.post("/api/chat/jobs/1/resume")
+    assert r.status_code == 409 and "paused" in r.json()["message"]
+    assert checkpoint.get(conn, 1)["auto_resumed"] == 0         # a refusal claims nothing
+
+
+async def test_resume_refuses_while_another_job_is_parked(db_path, runs):
+    from career_agent.web import worker as wk
+
+    c = db.connect(db_path)
+    _resumable(c)
+    wk.set_run_state(c, "apply", current_job_id=2)
+    r = actions.resume_job(c, 1, "brief", "profile", None, set())
+    assert r["code"] == 409 and "parked" in r["message"]
+
+
+def test_a_blocked_job_is_not_offered_continue(client, conn):
+    """M1."""
+    _resumable(conn)
+    conn.execute("INSERT INTO application (job_id, resume_version, status) VALUES (1, 'v', 'held_unknown')")
+    conn.commit()
+    cid = chat.conversation_for_job(conn, 1)
+    assert client.get(f"/api/chat/{cid}/messages").json()["resumable"] is False
+
+
+async def test_lifespan_sweeps_before_the_first_conn(db_path, monkeypatch):
+    """I2: startup_sweep must run before any _conn() (its stale sweep holds first)."""
+    import asyncio
+
+    order = []
+    real_conn = web._conn
+    monkeypatch.setattr(web, "DB_PATH", db_path)
+    monkeypatch.setattr(web.worker, "startup_sweep", lambda c: order.append("startup_sweep"))
+    monkeypatch.setattr(web, "_conn", lambda: (order.append("_conn"), real_conn())[1])
+
+    async def idle(*a, **kw):
+        await asyncio.sleep(3600)
+    monkeypatch.setattr(web.worker, "apply_worker_loop", idle)
+    async with web.lifespan(web.app):
+        pass
+    await asyncio.sleep(0)
+    assert order[:2] == ["startup_sweep", "_conn"]

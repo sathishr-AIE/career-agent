@@ -63,6 +63,8 @@ export function Chat() {
         }
         setOpenPrompt(r.open_prompt)
         setResumable(r.resumable)
+        // A clicked Continue stays disabled until a poll shows the run took it.
+        if (!r.resumable) setResuming(false)
       })
       .catch(() => {
         /* transient poll failure -- the next tick re-asks from the same cursor */
@@ -87,6 +89,7 @@ export function Chat() {
     setMessages([])
     setOpenPrompt(null)
     setResumable(false)
+    setResuming(false)
     setResumeError(null)
     loadMessages()
     const t = setInterval(loadMessages, POLL_MS)
@@ -105,8 +108,10 @@ export function Chat() {
     setResumeError(null)
     post(`/api/chat/jobs/${jobId}/resume`)
       .then(loadMessages)
-      .catch((e) => setResumeError(errorText(e)))
-      .finally(() => setResuming(false))
+      .catch((e) => {
+        setResumeError(errorText(e))
+        setResuming(false)
+      })
   }
 
   const panel = params.get('panel')

@@ -62,6 +62,15 @@ _background_tasks: set[asyncio.Task] = set()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Crash recovery first, on a plain connection: _conn() runs
+    # sweep_stale_in_flight, which would hold a crashed run's in_flight row
+    # before worker.startup_sweep can drop it.
+    boot = db.connect(DB_PATH)
+    try:
+        db.init_schema(boot)
+        worker.startup_sweep(boot)
+    finally:
+        boot.close()
     conn = _conn()
     # There is no pause/resume/stop for the pipeline by design, so a 'running'
     # row left by a process that died mid-run would strand the Run Now button

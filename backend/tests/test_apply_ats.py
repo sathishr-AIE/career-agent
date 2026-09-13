@@ -2049,3 +2049,65 @@ async def test_an_auto_approve_is_recorded_on_the_checkpoint(conn, runs, factory
         return AgentResult("applied")
 
     await _submit(conn, mode="auto", run_agent=fake, conn_factory=factory)
+
+
+# -- Task 11 fix round 1 ------------------------------------------------------
+
+async def test_a_queued_resume_is_refused_when_the_session_changed_under_it(conn):
+    """I5: B read the checkpoint before the lock; A fell back meanwhile (new
+    session and nonce) and stopped resumable again. B must not continue A's
+    stale session."""
+    _resumable_as(conn)
+    fake = fake_agent(AgentResult("draft_ready"))
+    lock = ats_apply._agent_lock()
+    await lock.acquire()
+    try:
+        task = asyncio.create_task(_submit(conn, mode="manual", run_agent=fake, resume=True))
+        await asyncio.sleep(0.1)                            # B is now waiting on the lock
+        checkpoint.restart(conn, 1, "sess-new", "newnonce")
+        checkpoint.mark_resumable(conn, 1)
+    finally:
+        lock.release()
+    r = await task
+    assert not r["ok"] and "resumable" in r["reason"] and fake.prompts == []
+    assert _apps(conn) == [] and checkpoint.get(conn, 1)["session_id"] == "sess-new"
+
+
+async def test_a_mismatch_fresh_start_carries_the_resume_count(conn):
+    """M5."""
+    _resumable_as(conn, "auto", True)
+    conn.execute("UPDATE apply_checkpoint SET resume_count = 2")
+    conn.commit()
+    calls = []
+    fake = _recording(AgentResult("draft_ready"), calls)
+    fake.conn = conn
+    await _submit(conn, mode="manual", run_agent=fake, resume=True)
+    assert calls[0]["resume"] is False and calls[0]["cp"]["resume_count"] == 2
+
+
+async def test_after_a_fallback_an_ask_with_the_old_nonce_opens_no_card(conn, factory):
+    """M3: through a real AgentRun reader on the fallback's events."""
+    import test_runner as tr
+    from career_agent.apply.runner import AgentRun
+
+    _resumable_as(conn)
+    seen = []
+
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
+        if resume:
+            return AgentResult("failed", "agent_error")      # silent: falls back
+        popen = tr.FakePopen()
+        run = AgentRun(cmd=["x"], cwd=".", env={}, nonce=nonce, events=events,
+                       popen=lambda *a, **kw: popen)
+        run.start("fresh")
+        popen.emit(tr._assistant('ASK:oldnonce:{"id":"q1","kind":"text","question":"Stale?"}'))
+        popen.emit(tr._result())
+        popen.close()
+        assert run.wait(5)
+        seen.append(nonce)
+        return agent_mod.parse_result(run.transcript, nonce)
+
+    r = await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory, resume=True)
+    assert seen and seen[0] != "oldnonce"
+    assert conn.execute("SELECT COUNT(*) n FROM agent_prompt").fetchone()["n"] == 0
+    assert not r["ok"]

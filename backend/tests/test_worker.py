@@ -756,8 +756,8 @@ async def test_the_loop_sweeps_orphaned_checkpoints_on_start(conn, brief_path, p
     from career_agent.apply import checkpoint
 
     a, b = _job(conn, "orphan"), _job(conn, "live")
-    checkpoint.start(conn, a, "s1", "n")
-    checkpoint.start(conn, b, "s2", "n")
+    checkpoint.start(conn, a, "s1", "n", mode="manual", can_submit=True)
+    checkpoint.start(conn, b, "s2", "n", mode="manual", can_submit=True)
 
     class Live:
         done = asyncio.Event()      # has .is_set() -> False
@@ -878,3 +878,47 @@ async def test_the_loop_drops_orphan_in_flight_rows_while_submission_is_off(
         assert sorted(left) == [a, b] and dropped == []
     else:
         assert left == [b] and dropped == [a]
+
+
+async def test_auto_mode_never_resumes_a_manual_checkpoint(conn, brief_path, profile_path, monkeypatch):
+    """I1: a manual stop (e.g. Apply anyway on a gate skip) restarted as auto
+    would submit a job nobody reviewed."""
+    _resumable_job(conn, mode="manual")
+    calls = []
+    monkeypatch.setattr(worker.ats_apply, "submit", _recording_submit(calls))
+    worker.set_run_state(conn, "apply", status="running", mode="auto")
+    await worker.apply_tick(conn, brief_path, profile_path)
+    assert calls == [] and worker.get_run_state(conn, "apply")["status"] == "idle"
+
+
+async def test_a_guard_denial_does_not_use_up_the_auto_resume(conn, brief_path, profile_path, monkeypatch):
+    """I6."""
+    from career_agent.apply import checkpoint
+
+    job_id = _resumable_job(conn)
+    calls = []
+    monkeypatch.setattr(worker.ats_apply, "submit", _recording_submit(calls))
+    store.log(conn, None, "pause", "on")
+    worker.set_run_state(conn, "apply", status="running", mode="auto")
+    await worker.apply_tick(conn, brief_path, profile_path)
+    assert calls == [] and worker.get_run_state(conn, "apply")["status"] == "paused"
+    assert checkpoint.get(conn, job_id)["auto_resumed"] == 0
+
+
+def test_startup_sweep_drops_an_old_orphan_before_the_stale_sweep_holds_it(conn, monkeypatch):
+    """I2: a restart 45 minutes after the crash, in the real order: startup_sweep,
+    then the first _conn()'s sweep_stale_in_flight."""
+    from career_agent.apply import agent as agent_mod
+    from career_agent.apply import checkpoint
+
+    monkeypatch.setattr(agent_mod, "RUNS", {})
+    monkeypatch.setattr(worker.ats_apply, "SUBMISSION_IMPLEMENTED", False)
+    job_id = _job(conn, "crashed")
+    checkpoint.start(conn, job_id, "s", "n", mode="manual", can_submit=False)
+    conn.execute("INSERT INTO application (job_id, resume_version, status, started_at)"
+                 " VALUES (?, 'v', 'in_flight', datetime('now', '-45 minutes'))", (job_id,))
+    conn.commit()
+    worker.startup_sweep(conn)
+    assert worker.ats_apply.sweep_stale_in_flight(conn) == 0
+    assert conn.execute("SELECT COUNT(*) n FROM application").fetchone()["n"] == 0
+    assert checkpoint.get(conn, job_id)["status"] == "resumable"

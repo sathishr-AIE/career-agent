@@ -18,18 +18,20 @@ def _set(conn, job_id: int, sql: str, *args) -> None:
 
 
 def start(conn, job_id: int, session_id: str, nonce: str, mode: str | None = None,
-          can_submit: bool | None = None) -> None:
-    """A fresh session: everything resets, counters included. mode and
-    can_submit are what a resume must match (see ats.submit)."""
+          can_submit: bool | None = None, resume_count: int = 0) -> None:
+    """A fresh session: everything resets, the counters included (resume_count
+    only carries over a mode-mismatch restart). mode and can_submit are what a
+    resume must match (see ats.submit)."""
     conn.execute(
-        "INSERT INTO apply_checkpoint (job_id, session_id, nonce, status, mode, can_submit)"
-        " VALUES (?, ?, ?, 'running', ?, ?)"
+        "INSERT INTO apply_checkpoint (job_id, session_id, nonce, status, mode, can_submit,"
+        " resume_count) VALUES (?, ?, ?, 'running', ?, ?, ?)"
         " ON CONFLICT(job_id) DO UPDATE SET session_id = excluded.session_id,"
         " nonce = excluded.nonce, step = 'start', answers = '{}', form_url = NULL,"
         " open_prompt_id = NULL, status = 'running', mode = excluded.mode,"
-        " can_submit = excluded.can_submit, approve_sent = 0, resume_count = 0,"
+        " can_submit = excluded.can_submit, approve_sent = 0, resume_count = excluded.resume_count,"
         " auto_resumed = 0, updated_at = datetime('now')",
-        (job_id, session_id, nonce, mode, None if can_submit is None else int(can_submit)))
+        (job_id, session_id, nonce, mode, None if can_submit is None else int(can_submit),
+         resume_count))
     conn.commit()
 
 
@@ -71,8 +73,11 @@ def set_auto_resumed(conn, job_id: int, flag: bool) -> None:
 
 
 def next_auto_resume(conn) -> int | None:
+    """Only an auto session: a manual one (an "Apply anyway" on a gate skip
+    included) restarted by the auto worker would submit what nobody reviewed."""
     row = conn.execute("SELECT job_id FROM apply_checkpoint WHERE status = 'resumable'"
-                       " AND auto_resumed = 0 ORDER BY updated_at, job_id LIMIT 1").fetchone()
+                       " AND mode = 'auto' AND auto_resumed = 0"
+                       " ORDER BY updated_at, job_id LIMIT 1").fetchone()
     return row["job_id"] if row else None
 
 
@@ -101,13 +106,16 @@ _TERMINAL = ("submitted", "draft", "failed", "failed_permanent", "held_unknown")
 
 def sweep_orphans(conn, live_job_ids: set[int]) -> int:
     """running/waiting rows no live run is driving (a crashed server) -> resumable,
-    or done when the job's latest application is terminal or the session sent a
-    DECISION approve while it could submit (resuming it risks a double submit; its
-    in_flight row goes through held_unknown). Returns the resumable count."""
+    or done when the job's latest application is terminal, or when the session could
+    submit and may have: it sent a DECISION approve, or it was not a manual session
+    (an auto session is pre-approved and can click Submit before approve_sent is
+    written; a NULL mode is a legacy row, treated the same). Resuming those risks a
+    double submit; their in_flight row goes through held_unknown. Returns the
+    resumable count."""
     live = list(live_job_ids)
     orphan = (" WHERE status IN ('running','waiting')"
               f" AND job_id NOT IN ({','.join('?' * len(live))})")
-    ended = (" AND ((approve_sent = 1 AND can_submit IS NOT 0)"
+    ended = (" AND ((can_submit IS NOT 0 AND (approve_sent = 1 OR mode IS NOT 'manual'))"
              " OR (SELECT ap.status FROM application ap WHERE ap.job_id = apply_checkpoint.job_id"
              f" ORDER BY ap.id DESC LIMIT 1) IN ({','.join('?' * len(_TERMINAL))}))")
     conn.execute("UPDATE apply_checkpoint SET status = 'done', open_prompt_id = NULL,"
