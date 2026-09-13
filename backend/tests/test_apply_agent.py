@@ -465,3 +465,14 @@ def test_an_empty_nonce_is_refused_on_both_sides():
         _prompt("")
     with pytest.raises(ValueError):
         parse_result("RESULT:APPLIED", "")
+
+
+def test_platform_refusals_require_seeing_the_button():
+    """Live run 2026-09-13: a signed-out LinkedIn page showed no Apply button, and
+    the agent guessed "Cognizant is usually Easy Apply" -> failed_permanent. A
+    missing button must be a retryable login problem, never an inferred refusal."""
+    from career_agent.apply.agent import _platform_rules_section
+    rules = _platform_rules_section()
+    assert "no Apply button is visible" in rules
+    assert "do not guess" in rules
+    assert "RESULT:LOGIN_ISSUE" in rules
