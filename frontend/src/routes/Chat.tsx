@@ -34,6 +34,9 @@ export function Chat() {
   // messages (or move the cursor) into the new one.
   const shown = useRef<number | null>(null)
   const inFlight = useRef(false)
+  // Consecutive failed polls; a few in a row show the offline banner.
+  const failures = useRef(0)
+  const [offline, setOffline] = useState(false)
   const cid = id ? Number(id) : homeId
 
   const loadConvs = useCallback(() => {
@@ -56,6 +59,8 @@ export function Chat() {
       `/api/chat/${cid}/messages?after=${lastId.current}`,
     )
       .then((r) => {
+        failures.current = 0
+        setOffline(false)
         if (shown.current !== cid) return
         if (r.messages.length) {
           lastId.current = Math.max(lastId.current, r.messages[r.messages.length - 1].id)
@@ -73,7 +78,9 @@ export function Chat() {
         }
       })
       .catch(() => {
-        /* transient poll failure -- the next tick re-asks from the same cursor */
+        // The next tick re-asks from the same cursor; say so once it keeps failing.
+        failures.current += 1
+        if (failures.current >= 3) setOffline(true)
       })
       .finally(() => {
         inFlight.current = false
@@ -142,6 +149,11 @@ export function Chat() {
         ))}
       </Glass>
       <main className="chat__main">
+        {offline && (
+          <div className="qcard__error" role="status">
+            Can't reach the server — retrying
+          </div>
+        )}
         <MessageList messages={messages} openPrompt={openPrompt} onAnswered={loadMessages} />
         {resumable && (
           <div className="chat__resume">

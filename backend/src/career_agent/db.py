@@ -237,13 +237,13 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # qa_update/qa_delete/memory_list identify twins by that link instead of
     # by (answer, source_job_id) coincidence -- see store.qa_remember.
     _add_column_if_missing(conn, "qa_bank", "twin_key", "TEXT")
-    # Task 11 resume bookkeeping (apply/checkpoint.py): what a resume must match,
+    # Resume bookkeeping (apply/checkpoint.py): what a resume must match,
     # whether a DECISION approve went out, the resume cap, the worker's one auto-resume.
     _add_column_if_missing(conn, "apply_checkpoint", "mode", "TEXT")
     _add_column_if_missing(conn, "apply_checkpoint", "can_submit", "INTEGER")
     for col in ("approve_sent", "resume_count", "auto_resumed"):
         _add_column_if_missing(conn, "apply_checkpoint", col, "INTEGER NOT NULL DEFAULT 0")
-    # Task 20: a Home confirmation card has no job. SQLite can't drop NOT NULL
+    # A Home confirmation card has no job. SQLite can't drop NOT NULL
     # in place, so an older DB's agent_prompt is rebuilt once (nothing references it).
     if any(r["name"] == "job_id" and r["notnull"]
            for r in conn.execute("PRAGMA table_info(agent_prompt)")):

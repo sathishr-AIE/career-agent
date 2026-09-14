@@ -28,6 +28,13 @@ MAX_ATTEMPTS = 3
 MAX_RESUMES = 3
 BLOCKING = ("in_flight", "submitted", "held_unknown", "failed_permanent")
 
+# Jobs an Apply, a Continue or a worker tick has claimed while its run may not
+# have an in_flight row yet (tailoring, or queued behind _agent_lock): another
+# start on the same job is refused instead of running back to back.
+# ponytail: process-local set, right for the single-process server; a table if
+# the worker ever runs in a process of its own.
+PENDING: set[int] = set()
+
 # The outermost kill switch: a real send is refused unless this is flipped
 # by hand, for EVERY source (the agent engine is source-agnostic, so the
 # old per-source refusal is gone and this flag is the only gate left). See
@@ -59,14 +66,16 @@ PERMANENT_REASONS = {
 # BLOCKING status) and a human adjudicates, exactly as sweep_stale_in_flight
 # does for a crashed in_flight row (see docs/lld-apply-button-v2.md section
 # 6, layer 2). With submission disabled nothing could have been sent, so
-# they stay retryable. `answer_timeout` is deliberately NOT here: the agent
-# only waits at ASK/CONFIRM and CONFIRM precedes Submit.
+# they stay retryable. `answer_timeout` is deliberately NOT here: it is the
+# one stop that lands while the agent is parked on a card with no turn in
+# progress, so without an approve out it is safe to resume (_might_have_sent),
+# and after one it holds anyway (_record_outcome).
 # Matched on the part before the first ':' -- "unrecognized_result:<body>"
 # carries a payload.
 UNKNOWN_STATE_REASONS = {"agent_error", "timeout", "no_result_line",
                          "unrecognized_result"}
 
-# Stops that interrupt a run which can pick up where it left off (Task 10):
+# Stops that interrupt a run which can pick up where it left off:
 # the checkpoint becomes `resumable`, the in_flight row is removed, and NO
 # attempt is consumed (worker.QUEUE_WHERE keeps a resumable job out of the
 # queue instead). A crash/kill (asyncio cancellation) is handled the same way
@@ -114,12 +123,18 @@ def is_unknown_state(reason: str) -> bool:
     return reason.split(":", 1)[0].strip() in UNKNOWN_STATE_REASONS
 
 
-def _might_have_sent(can_submit: bool, mode: str, approved_any: bool, reason: str) -> bool:
-    """Whether an interrupted run could have clicked Submit (narrowed I4).
-    A DECISION approve went out; or an auto run -- pre-approved, and its
-    CONFIRM and Submit can share the turn the stop cut short -- died mid-turn
-    (answer_timeout is a wait at an ASK, not mid-turn)."""
-    return can_submit and (approved_any or (mode == "auto" and is_unknown_state(reason)))
+def _might_have_sent(can_submit: bool, approved_any: bool, parked: bool) -> bool:
+    """Whether an interrupted run could have clicked Submit. "No Submit without
+    an approve" is only the prompt's rule, and a page can prompt-inject the
+    agent past it, so a run that could submit is safe to resume only when it
+    stopped parked -- waiting on a card, no turn in progress -- with no DECISION
+    approve sent. A timeout, a crash or a cancel mid-turn may have sent."""
+    return can_submit and (approved_any or not parked)
+
+
+def _parked(events: RunEvents) -> bool:
+    """At a cancel: the registered run was waiting on a card, or none ever spoke."""
+    return events.parked if events.parked is not None else not events.heard.is_set()
 
 
 def sweep_stale_in_flight(conn: sqlite3.Connection, minutes: int = 30) -> int:
@@ -192,6 +207,8 @@ def _kill_live(job_id: int, events: RunEvents) -> None:
     events.cancelled.set()
     run = agent_mod.RUNS.get(job_id)
     if run is not None and getattr(run, "events", events) is events:
+        if not run.done.is_set():       # read before the kill: the run's thread unregisters it
+            events.parked = run.waiting.is_set()
         run.kill()
 
 
@@ -253,6 +270,10 @@ def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual",
 
     def on_ask(payload: dict) -> None:
         heard.set()
+        from career_agent import store      # store imports this module
+        if store.is_secret_card(payload["kind"], payload):
+            refuse_secret(payload)
+            return
 
         def record(c):
             if payload["kind"] == "approve_account":
@@ -262,6 +283,18 @@ def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual",
             if payload["kind"] == "need_password":
                 auto_fill_login(c, pid, payload)
         with_conn(record, "an ASK")
+
+    def refuse_secret(payload: dict) -> None:
+        """A secret never goes through a question card: no card, no checkpoint
+        wait, and the agent is told "none" at once, as for a login it may not use."""
+        run = agent_mod.RUNS.get(job_id)
+        if run is not None:
+            run.send(agent_mod.answer_line(nonce, payload["kind"],
+                                           {"id": payload.get("id"), "answer": "none"}))
+        q = str(payload.get("question") or "")
+        q = q if len(q) <= 80 else q[:79] + "…"
+        post("system", f"The agent asked for a secret ({q}). Secrets are never typed into chat — "
+                       "saved logins are filled by the backend; manage them in Logins.")
 
     def auto_fill_login(c, pid: int, payload: dict) -> None:
         """No human step (spec S5): answer_prompt fills the saved login over
@@ -418,6 +451,15 @@ def _reason_of(result) -> str:
     return result.reason or result.code
 
 
+def _latest_attempt(conn, job_id: int) -> tuple:
+    """(newest application id, checkpoint session id): what changes when any
+    other start for this job gets a session."""
+    app = conn.execute("SELECT MAX(id) m FROM application WHERE job_id = ?",
+                       (job_id,)).fetchone()["m"]
+    cp = checkpoint.get(conn, job_id)
+    return app, cp["session_id"] if cp else None
+
+
 def _prior_failures(conn, job_id: int) -> int:
     return conn.execute(
         "SELECT COUNT(*) n FROM application"
@@ -447,8 +489,7 @@ def _confirm_outcome(conn, job_id: int, baseline: int) -> tuple[dict, str | None
 
 
 def _record_outcome(conn, job_id: int, app_id: int, url: str, result,
-                    detail: str, can_submit: bool, confirm: tuple,
-                    mode: str = "manual") -> dict:
+                    detail: str, can_submit: bool, confirm: tuple) -> dict:
     """The one outcome recorder: turns this run's in_flight row into what
     happened. Every non-submitted UPDATE/DELETE is guarded on
     `status = 'in_flight'`: a run can outlive sweep_stale_in_flight and come
@@ -510,7 +551,7 @@ def _record_outcome(conn, job_id: int, app_id: int, url: str, result,
     else:
         reason = _reason_of(result)
         if (reason in RESUMABLE_REASONS
-                and not _might_have_sent(can_submit, mode, approved_any, reason)
+                and not _might_have_sent(can_submit, approved_any, parked=reason == "answer_timeout")
                 and _drop_in_flight(conn, job_id, app_id, f"{reason} {detail or result.transcript_path}")):
             return {"ok": False, "resumable": True,
                     "reason": f"stopped ({detail or reason}); resumable"}
@@ -642,6 +683,7 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
     live = _blocking_status(conn, job_id)
     if live:
         return _blocked(job_id, live)
+    seen = _latest_attempt(conn, job_id)
     cp = checkpoint.get(conn, job_id) if resume else None
     if resume and (cp is None or cp["status"] != "resumable"):
         return _not_resumable(job_id)
@@ -762,6 +804,10 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
             if now.get("status") != "resumable" or any(
                     now.get(k) != cp[k] for k in ("session_id", "nonce", "resume_count")):
                 return _not_resumable(job_id)
+        if _latest_attempt(conn, job_id) != seen:
+            # Another start for this job ran while this one queued (a draft, a
+            # failure, or a session that stopped resumable): never a second one.
+            return {"ok": False, "reason": f"job {job_id} was started by another request meanwhile"}
         # A crashed run's cards can never be answered; this run's cards are
         # the ones created after `baseline` (the answer API refuses older).
         chat.expire_open_prompts(conn, job_id)
@@ -796,10 +842,10 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
                 result, detail = await _run(runner, prompt, job_id, nonce, events,
                                             session_id=session_id, resume=False)
         except asyncio.CancelledError:
-            # A kill mid-run: resumable, unless it might have sent -- then the
-            # in_flight row stays for sweep_stale_in_flight to hold, as before.
+            # A kill: resumable only if nothing could have been sent -- else the
+            # in_flight row stays for held_unknown adjudication.
             approved_any = _confirm_outcome(conn, job_id, baseline)[2]
-            if (not _might_have_sent(can_submit, mode, approved_any, "agent_error")
+            if (not _might_have_sent(can_submit, approved_any, _parked(events))
                     and _drop_in_flight(conn, job_id, app_id, "cancelled mid-run")):
                 _checkpoint(checkpoint.mark_resumable, conn, job_id)
             else:
@@ -808,7 +854,7 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
     # Outcome first, cards second: once the in_flight row is gone a refused
     # answer can no longer reopen a card (chat.reopen_prompt_row).
     outcome = _record_outcome(conn, job_id, app_id, row["url"], result, detail,
-                              can_submit, _confirm_outcome(conn, job_id, baseline), mode)
+                              can_submit, _confirm_outcome(conn, job_id, baseline))
     _checkpoint(checkpoint.mark_resumable if outcome.get("resumable") else checkpoint.finish,
                 conn, job_id)
     chat.expire_open_prompts(conn, job_id)

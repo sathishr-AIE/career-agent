@@ -13,7 +13,7 @@ import pytest
 from career_agent.apply import agent as agent_mod
 from career_agent.apply import runner as runner_mod
 from career_agent.apply.agent import (AgentResult, _preferences_section, build_prompt,
-                                       consume_stream, parse_result)
+                                       parse_result)
 from career_agent.apply.runner import RunEvents
 from career_agent.config import CandidateProfile, CareerBrief
 from career_agent.models import Job
@@ -478,39 +478,6 @@ def test_summarize_tool_input_scrubs_secrets_before_truncating():
     s = agent_mod.summarize_tool_input({"v": "x" * 280 + pw}, secrets={pw})
     assert pw[:5] not in s and "••••••" in s
 
-
-# -- consume_stream -------------------------------------------------------
-
-def test_consume_stream_collects_text_and_cost():
-    lines = [
-        _json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "navigating"},
-            {"type": "tool_use", "name": "mcp__playwright__browser_click",
-             "input": {"ref": "e12"}}]}}),
-        _json.dumps({"type": "result", "total_cost_usd": 0.042,
-                     "result": f"{R}APPLIED"}),
-    ]
-    text, cost, _ = consume_stream(lines)
-    assert "navigating" in text and f"{R}APPLIED" in text
-    assert cost == 0.042
-
-
-def test_consume_stream_tolerates_non_json_lines():
-    text, cost, _ = consume_stream(["not json at all", ""])
-    assert "not json" in text and cost is None   # no result message
-
-
-def test_consume_stream_missing_total_cost_usd_is_zero():
-    line = _json.dumps({"type": "result", "result": f"{R}APPLIED"})
-    _, cost, _ = consume_stream([line])
-    assert cost == 0.0
-
-
-def test_consume_stream_null_total_cost_usd_is_zero():
-    line = _json.dumps({"type": "result", "total_cost_usd": None,
-                        "result": f"{R}APPLIED"})
-    _, cost, _ = consume_stream([line])
-    assert cost == 0.0
 
 
 # -- sandbox (the spawned session reads untrusted posting text) ------------
@@ -1010,39 +977,12 @@ def test_long_tool_inputs_are_truncated():
     assert len(s) <= 301
 
 
-def test_consume_stream_logs_tool_input_next_to_the_name():
-    line = _json.dumps({"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "name": "mcp__playwright__browser_type",
-         "input": {"element": "Password", "ref": "e1", "text": "hunter2"}},
-        {"type": "tool_use", "name": "mcp__playwright__browser_click",
-         "input": {"element": "Apply", "ref": "e2"}}]}})
-    text = consume_stream([line])[0]
-    assert "  >> browser_click " in text and '"Apply"' in text
-    assert "hunter2" not in text
-
-
 # -- live-safety FIX 3: a run without a result message has no $0.0000 cost --
 
 def _asst(msg_id, text, **usage):
     return _json.dumps({"type": "assistant", "message": {
         "id": msg_id, "usage": usage,
         "content": [{"type": "text", "text": text}]}})
-
-
-def test_consume_stream_accumulates_usage_per_message_not_per_block():
-    """stream-json repeats a message's usage on every content block it
-    emits, so summing lines would double count."""
-    lines = [_asst("m1", "a", input_tokens=100, output_tokens=5,
-                   cache_read_input_tokens=1000),
-             _asst("m1", "b", input_tokens=100, output_tokens=20,
-                   cache_read_input_tokens=1000),
-             _asst("m2", "c", input_tokens=50, output_tokens=7,
-                   cache_creation_input_tokens=300)]
-    text, cost, usage = consume_stream(lines)
-    assert cost is None        # no result message: the cost is unknown
-    assert usage == {"input_tokens": 150, "output_tokens": 27,
-                     "cache_creation_input_tokens": 300,
-                     "cache_read_input_tokens": 1000}
 
 
 def test_parse_confirm_refuses_duplicate_labels():
@@ -1134,3 +1074,10 @@ def test_a_resume_answered_only_by_an_error_result_is_resume_failed(child):
                               events=RunEvents(), timeout_s=30, resume=True,
                               resume_output_s=0.3, popen=lambda *a, **kw: child)
     assert (r.code, r.reason) == ("failed", "resume_failed")
+
+
+def test_the_prompt_forbids_asking_for_secrets():
+    """C1: a password, one-time code or other secret is never an ASK."""
+    ask = agent_mod._steps_section("manual", False).split("== HOW TO ASK THE HUMAN ==")[1]
+    assert "Never ASK for a password, a one-time code" in ask
+    assert "RESULT:FAILED:account_required" in ask

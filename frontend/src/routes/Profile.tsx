@@ -2,8 +2,7 @@ import { useEffect, useState } from 'react'
 import { ApiError, get, put } from '../api'
 import '../components/ui.css'
 
-// Types declared locally per Task 17's controller ruling -- api.ts is not
-// touched here to avoid colliding with the parallel task editing it.
+// Types declared locally.
 
 interface Address {
   line1: string

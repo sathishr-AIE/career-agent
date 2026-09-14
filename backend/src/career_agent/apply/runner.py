@@ -38,6 +38,8 @@ class RunEvents:
     prompt_baseline: int = 0
     # Set when the awaiting task is cancelled, possibly before the run exists.
     cancelled: threading.Event = field(default_factory=threading.Event)
+    # At a cancel: whether the registered run was waiting on a card (ats._kill_live).
+    parked: bool | None = None
 
 
 class AgentRun:
@@ -50,8 +52,9 @@ class AgentRun:
         self._reader_thread: threading.Thread | None = None
         self.proc = None
         self.transcript = ""
-        # Passwords answer_prompt sent to this run (the agent types them via a
-        # tool call): scrubbed from every event and transcript line.
+        # Passwords the backend filled into this run's browser (secret_fill; the
+        # agent never receives one): scrubbed if one ever echoes into an event
+        # or a transcript line.
         self.secrets: set[str] = set()
         self._turn_buf: list[str] = []
         self._per_msg: dict = {}
@@ -136,7 +139,7 @@ class AgentRun:
             self._writer_thread.join(10 if timeout_s is None else timeout_s)
         return True
 
-    # -- stream (same parsing rules as agent.consume_stream) ----------------
+    # -- stream ---------------------------------------------------------------
     def _append(self, line: str) -> None:
         line = redact_secrets(line, self.secrets)
         self.transcript += line + "\n"
@@ -185,7 +188,7 @@ class AgentRun:
 
     def _add_usage(self, message: dict) -> None:
         # stream-json repeats a message's usage per content block: take the
-        # largest per message id, as consume_stream does.
+        # largest per message id.
         usage = message.get("usage")
         if not usage:
             return

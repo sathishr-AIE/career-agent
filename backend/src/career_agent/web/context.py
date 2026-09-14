@@ -226,6 +226,9 @@ def run_status_context(conn: sqlite3.Connection) -> dict:
         "in_progress": 1 if state["current_job_id"] else 0,
         "successful": submitted,
         "failed_skipped": failed + gate_skipped,
+        # interrupted sessions waiting on a Continue (see worker.startup_sweep)
+        "resumable": conn.execute("SELECT COUNT(*) n FROM apply_checkpoint"
+                                  " WHERE status = 'resumable'").fetchone()["n"],
     }
     recent_events = conn.execute(
         "SELECT type, payload, occurred_at FROM event"
@@ -240,16 +243,6 @@ def run_status_context(conn: sqlite3.Connection) -> dict:
             # Read once, cheaply, so the always-visible status bar can show
             # the kill switch's state without a second endpoint just for it.
             "submission_implemented": ats_apply.SUBMISSION_IMPLEMENTED}
-
-
-def draft_answers(conn: sqlite3.Connection) -> dict | None:
-    """The parked job's drafted answers, for the legacy Jinja status card
-    only (the React app shows them on the chat's CONFIRM card)."""
-    draft = conn.execute(
-        "SELECT ap.answers FROM application ap JOIN run_state r ON r.kind = 'apply'"
-        " WHERE ap.job_id = r.current_job_id AND ap.status = 'draft'"
-        " ORDER BY ap.id DESC LIMIT 1").fetchone()
-    return json.loads(draft["answers"]) if draft and draft["answers"] else None
 
 
 def pipeline_status_context(conn: sqlite3.Connection) -> dict:

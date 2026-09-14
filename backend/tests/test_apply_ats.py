@@ -1570,17 +1570,6 @@ def test_a_tool_call_echoing_a_sent_password_is_redacted_in_chat_and_transcript(
     assert not any(pw in t for t in texts) and pw not in run.transcript
 
 
-def test_a_sensitive_answer_is_hidden_in_the_chat(conn, runs):
-    from career_agent.web import actions
-    run = runs[1] = FakeRun("n")
-    run.waiting.set()
-    pid = _open(conn, "text", {"id": "s", "question": "Expected CTC?", "sensitive": True})
-    assert actions.answer_prompt(conn, pid, {"answer": "42 LPA"})["ok"]
-    texts = [m["content"] for m in chat.messages_after(conn, chat.conversation_for_job(conn, 1))]
-    assert "Expected CTC? → (hidden)" in texts and not any("42 LPA" in t for t in texts)
-    assert "42 LPA" in run.sent[0]                     # the agent still gets it
-
-
 @pytest.mark.parametrize("state", ["no_run", "not_waiting", "done"])
 def test_a_refused_send_leaves_the_prompt_open(conn, runs, state):
     from career_agent.web import actions
@@ -1626,7 +1615,7 @@ def test_answer_prompt_sensitive_card_is_never_remembered(conn, runs):
     run.waiting.set()
     pid = _open(conn, "text", {"id": "q", "kind": "text", "question": "SSN?",
                                "memory_key": "ssn", "sensitive": True})
-    assert actions.answer_prompt(conn, pid, {"answer": "123-45-6789"})["ok"]
+    assert actions.answer_prompt(conn, pid, {"answer": "123-45-6789"})["code"] == 422
     assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 0
 
 
@@ -2022,15 +2011,18 @@ async def test_ask_and_confirm_mark_the_checkpoint_waiting(conn, runs, factory):
 
 
 @pytest.mark.parametrize("reason", ["timeout", "answer_timeout", "agent_error"])
-async def test_a_resumable_stop_consumes_no_attempt(conn, reason):
+async def test_a_resumable_stop_consumes_no_attempt(conn, monkeypatch, reason):
+    """With submission off: with it, a mid-turn timeout/agent_error holds."""
     _queue_ready(conn)
     if reason == "agent_error":
         async def runner(prompt, jid, nonce, events, session_id=None, resume=False):
             raise RuntimeError("claude died")
     else:
         runner = fake_agent(AgentResult("failed", reason))
+    monkeypatch.setattr(ats_apply, "_live_run_agent", runner)
+    monkeypatch.setattr(ats_apply, "preflight", lambda: None)
     for _ in range(ats_apply.MAX_ATTEMPTS + 1):
-        r = await _submit(conn, mode="manual", run_agent=runner)
+        r = await _submit(conn, mode="manual")
         assert not r["ok"] and r["resumable"]
         assert checkpoint.get(conn, 1)["status"] == "resumable"
     assert _apps(conn) == []                       # no failed / failed_permanent rows
@@ -2242,16 +2234,12 @@ def test_mark_applied_supersedes_a_resumable_checkpoint(conn, tmp_path):
 
 
 async def test_what_the_checkpoint_pins_from_answers(conn, runs, factory):
-    """M3: a sensitive ASK answer is never pinned; a CONFIRM pins only its
-    changes, never the unedited field list."""
+    """M3: a CONFIRM pins only its changes, never the unedited field list. (A
+    sensitive ASK opens no card at all -- the C1 tests.)"""
     from career_agent.web import actions
 
     async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
         run = runs[jid] = FakeRun(nonce, events)
-        _waiting_on(run, events, "ask", {"id": "q1", "kind": "text", "question": "SSN?",
-                                         "options": [], "sensitive": True})
-        pid = chat.open_prompt_for_job(factory(), jid)["id"]
-        assert actions.answer_prompt(factory(), pid, {"answer": "123"}, factory)["ok"]
         _waiting_on(run, events, "confirm", _confirm(Name="Asha", Phone="+1"))
         pid = chat.open_prompt_for_job(factory(), jid)["id"]
         assert actions.answer_prompt(factory(), pid, {"decision": "change",
@@ -2272,7 +2260,8 @@ def _resumable_as(conn, mode="manual", can_submit=True, answers=None):
 
 async def test_resume_increments_the_resume_count(conn):
     _resumable_as(conn)
-    await _submit(conn, mode="manual", run_agent=fake_agent(AgentResult("failed", "timeout")),
+    # answer_timeout: the stop a can_submit session may resume from (a timeout holds)
+    await _submit(conn, mode="manual", run_agent=fake_agent(AgentResult("failed", "answer_timeout")),
                   resume=True)
     cp = checkpoint.get(conn, 1)
     assert (cp["status"], cp["resume_count"]) == ("resumable", 1)
@@ -2453,3 +2442,147 @@ def test_need_password_on_a_page_that_keeps_the_value_answers_none(conn, runs, k
     assert [_sent_body(s) for s in run.sent] == [{"id": "np", "answer": "none"}]
     assert pw not in "".join(run.sent) and pw not in _db_dump(conn)
     assert any("kept the password" in t for t in _chat_texts(conn))
+
+
+# -- final review C1: a secret never goes through a question card -------------
+
+SECRET = "hunter2-Zq9!typed"
+
+
+@pytest.mark.parametrize("question,memory_key,sensitive", [
+    ("Enter your Workday password", None, False),
+    ("Enter your Workday password", None, True),
+    ("Expected CTC?", None, True),
+    ("Sign-in step", "workday_password", False),
+])
+async def test_a_secret_ask_opens_no_card_and_is_answered_none(conn, runs, factory,
+                                                             question, memory_key, sensitive):
+    from career_agent.web import actions
+
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
+        run = runs[jid] = FakeRun(nonce, events)
+        _waiting_on(run, events, "ask", {"id": "pw", "kind": "text", "question": question,
+                                         "options": [], "why": "", "memory_key": memory_key,
+                                         "default": None, "sensitive": sensitive})
+        assert chat.open_prompt_for_job(factory(), jid) is None, "no card for a secret"
+        assert [json.loads(s.split(":", 2)[2]) for s in run.sent] == [{"id": "pw", "answer": "none"}]
+        assert checkpoint.get(factory(), jid)["status"] == "running"
+        # an ordinary text card still works
+        _waiting_on(run, events, "ask", {"id": "q", "kind": "text", "question": "Notice?",
+                                         "options": [], "sensitive": False})
+        pid = chat.open_prompt_for_job(factory(), jid)["id"]
+        assert actions.answer_prompt(factory(), pid, {"answer": "30 days"}, factory)["ok"]
+        return AgentResult("draft_ready")
+
+    await _submit(conn, mode="manual", run_agent=fake, conn_factory=factory)
+    payloads = [r["payload"] for r in conn.execute("SELECT payload FROM agent_prompt")]
+    assert len(payloads) == 1 and "Notice?" in payloads[0]
+    texts = [m["content"] for m in chat.messages_after(conn, chat.conversation_for_job(conn, 1))]
+    assert any("The agent asked for a secret" in t and "Secrets are never typed into chat" in t
+               and "Logins" in t for t in texts), texts
+
+
+@pytest.mark.parametrize("kind,payload", [
+    ("text", {"id": "a", "question": "Enter your Workday password", "sensitive": False}),
+    ("text", {"id": "b", "question": "Expected CTC?", "sensitive": True}),
+    ("choice", {"id": "c", "question": "Your PIN?", "options": ["1234", "0000"],
+                "sensitive": False}),
+    ("text", {"id": "d", "question": "Your one-time OTP", "origin": "needs_answer",
+              "sensitive": False}),
+])
+def test_answer_prompt_refuses_a_secret_card_and_stores_nothing(conn, runs, kind, payload):
+    from career_agent.web import actions
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    checkpoint.start(conn, 1, "s", "n", mode="manual", can_submit=False)
+    pid = _open(conn, kind, payload)
+    typed = "1234" if kind == "choice" else SECRET
+    before = [l for l in conn.iterdump() if typed in l]      # a choice's options hold it already
+    r = actions.answer_prompt(conn, pid, {"answer": typed})
+    assert (r["ok"], r["code"]) == (False, 422)
+    assert run.sent == []
+    assert chat.open_prompt_for_job(conn, 1)["id"] == pid
+    assert [l for l in conn.iterdump() if typed in l] == before, "the typed value landed in the DB"
+
+
+def test_the_legacy_answer_route_refuses_a_secret_question(conn):
+    from career_agent.web import actions
+    r = actions.answer_question(conn, 1, "What is your password?", SECRET, is_volatile=False)
+    assert not r["ok"]
+    assert not any(SECRET in line for line in conn.iterdump())
+
+
+# -- final review I2: can_submit stops only resume when parked ----------------
+
+@pytest.mark.parametrize("reason", ["timeout", "agent_error"])
+async def test_a_mid_turn_stop_holds_when_it_could_submit(conn, reason):
+    if reason == "agent_error":
+        async def runner(prompt, jid, nonce, events, session_id=None, resume=False):
+            raise RuntimeError("claude died")
+    else:
+        runner = fake_agent(AgentResult("failed", reason))
+    r = await _submit(conn, mode="manual", run_agent=runner)
+    assert not r.get("resumable")
+    assert (_apps(conn)[-1]["status"], _apps(conn)[-1]["failure_reason"]) == ("held_unknown", reason)
+    assert checkpoint.get(conn, 1)["status"] == "done"
+
+
+@pytest.mark.parametrize("reason", ["timeout", "agent_error"])
+async def test_a_mid_turn_stop_stays_resumable_when_submission_is_off(conn, monkeypatch, reason):
+    if reason == "agent_error":
+        async def runner(prompt, jid, nonce, events, session_id=None, resume=False):
+            raise RuntimeError("claude died")
+        monkeypatch.setattr(ats_apply, "_live_run_agent", runner)
+        monkeypatch.setattr(ats_apply, "preflight", lambda: None)
+    else:
+        _use_live_fake(monkeypatch, AgentResult("failed", reason))
+    r = await _submit(conn, mode="manual")
+    assert r["resumable"] and _apps(conn) == []
+    assert checkpoint.get(conn, 1)["status"] == "resumable"
+
+
+@pytest.mark.parametrize("waiting,live", [(False, False), (True, False), (False, True), (True, True)])
+async def test_a_cancel_resumes_only_a_parked_run_when_it_could_submit(conn, runs, monkeypatch,
+                                                                     waiting, live):
+    started = asyncio.Event()
+
+    async def hangs(prompt, jid, nonce, events, session_id=None, resume=False):
+        run = runs[jid] = FakeRun(nonce, events)
+        events.heard.set()
+        if waiting:
+            run.waiting.set()
+        started.set()
+        await asyncio.sleep(30)
+
+    if live:        # can_submit False: the live runner slot
+        monkeypatch.setattr(ats_apply, "_live_run_agent", hangs)
+        monkeypatch.setattr(ats_apply, "preflight", lambda: None)
+        task = asyncio.create_task(_submit(conn, mode="manual"))
+    else:
+        task = asyncio.create_task(_submit(conn, mode="manual", run_agent=hangs))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    if waiting or live:
+        assert _apps(conn) == [] and checkpoint.get(conn, 1)["status"] == "resumable"
+    else:           # mid-turn with can_submit: the in_flight row stays to be held
+        assert _apps(conn)[-1]["status"] == "in_flight"
+        assert checkpoint.get(conn, 1)["status"] == "done"
+
+
+# -- final review M1: one session per job ---------------------------------------
+
+async def test_two_queued_submits_for_one_job_run_one_session(conn):
+    calls = []
+
+    async def runner(prompt, jid, nonce, events, session_id=None, resume=False):
+        calls.append(jid)
+        await asyncio.sleep(0.05)
+        return AgentResult("draft_ready")
+
+    a, b = await asyncio.gather(_submit(conn, mode="manual", run_agent=runner),
+                                _submit(conn, mode="manual", run_agent=runner))
+    assert calls == [1]
+    assert sorted([a["ok"], b["ok"]]) == [False, True]
+    assert len(_apps(conn)) == 1

@@ -84,6 +84,7 @@ export interface RunStatusContext {
     in_progress: number
     successful: number
     failed_skipped: number
+    resumable: number
   }
   recent_events: { type: string; payload: string | null; occurred_at: string }[]
   open_prompt: { id: number; kind: string; question: string } | null

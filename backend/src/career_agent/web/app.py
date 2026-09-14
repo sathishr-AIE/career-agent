@@ -163,7 +163,6 @@ def applications(request: Request, show: str = "queue"):
     return templates.TemplateResponse(
         request=request, name="applications.html",
         context={"active_nav": "applications",
-                 "draft_answers": context.draft_answers(conn),
                  **context.applications_context(
                      conn, show, BRIEF_PATH,
                      scheduled=scheduled_task_installed())})
@@ -198,14 +197,6 @@ def answer_question(job_id: int, question: str = Form(...),
         conn, job_id, question, answer, is_volatile=bool(is_volatile)))
 
 
-@app.post("/send/{job_id}", response_class=HTMLResponse)
-async def send(job_id: int):
-    conn = _conn()
-    return _span(await actions.send(
-        conn, job_id, brief_path=BRIEF_PATH,
-        candidate_profile_path=CANDIDATE_PROFILE_PATH, conn_factory=_chat_conn))
-
-
 @app.post("/dismiss/{job_id}", response_class=HTMLResponse)
 def dismiss(job_id: int):
     conn = _conn()
@@ -231,8 +222,7 @@ def run_status(request: Request):
     conn = _conn()
     return templates.TemplateResponse(
         request=request, name="_run_status.html",
-        context={**context.run_status_context(conn),
-                 "draft_answers": context.draft_answers(conn)})
+        context=context.run_status_context(conn))
 
 
 @app.post("/run/start")

@@ -226,28 +226,6 @@ def test_apply_denial_reason_is_escaped(client, monkeypatch):
     assert "<script>" not in r.text
 
 
-def test_apply_parks_the_job_so_the_draft_shows_in_the_status_card(client, monkeypatch):
-    """The Queue tab's Apply button posts to /apply/{job_id}, but until this
-    sets current_job_id, the status card (the only place Send/Skip render)
-    has no idea a draft exists -- it only ever shows the job matching
-    current_job_id, same as apply_tick's own park-before-draft pattern."""
-    async def fake_submit(conn, job_id, mode, brief=None, profile=None,
-                          resume_version=None, **kw):
-        return {"ok": True, "job_id": job_id, "status": "draft"}
-
-    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
-
-    r = client.post("/apply/1")
-    assert r.status_code == 200
-
-    conn = db.connect(web.DB_PATH)
-    assert worker.get_run_state(conn, "apply")["current_job_id"] == 1
-
-    status = client.get("/run/status")
-    assert "AI Engineer" in status.text
-    assert 'hx-post="/send/1"' in status.text
-
-
 def test_apply_refuses_when_another_job_is_already_parked(client, monkeypatch):
     """Without this guard, clicking Apply on a second job while the first
     one is awaiting review would silently overwrite current_job_id and
@@ -269,26 +247,6 @@ def test_apply_refuses_when_another_job_is_already_parked(client, monkeypatch):
     assert "denied" in r.text
     assert calls == [], "must refuse before ever calling submit()"
     assert worker.get_run_state(conn, "apply")["current_job_id"] == 2
-
-
-@pytest.mark.parametrize("path", ["/send/1", "/api/send/1"])
-def test_send_is_retired_in_favour_of_the_chat_review_card(client, monkeypatch, path):
-    """S2: a live run's CONFIRM decision is the send. The route stays so an old
-    page's button gets a clear answer -- and it never starts a run."""
-    calls = []
-
-    async def spy(*args, **kwargs):
-        calls.append(args)
-        return {"ok": True}
-
-    monkeypatch.setattr(web.ats_apply, "submit", spy)
-    conn = db.connect(web.DB_PATH)
-    conn.execute("INSERT INTO application (job_id, resume_version, status)"
-                 " VALUES (1, 'base-v1', 'draft')")
-    conn.commit()
-    r = client.post(path)
-    assert calls == []
-    assert "Answer the review card" in r.text    # Jinja escapes the apostrophe
 
 
 def test_index_offers_mark_applied_when_a_draft_exists(client):
@@ -380,7 +338,9 @@ def test_run_start_sets_status_running_and_ticks_once(client, monkeypatch):
     state = worker.get_run_state(conn, "apply")
     assert state["status"] == "running"
     assert state["mode"] == "manual"
-    assert state["current_job_id"] == 1  # job 1 is the higher-scored fixture row
+    assert state["current_job_id"] is None   # a draft does not park the run
+    assert conn.execute("SELECT job_id FROM application WHERE status = 'draft'"
+                        ).fetchone()["job_id"] == 1   # job 1 is the higher-scored fixture row
 
 
 def test_run_pause_sets_status_paused(client, monkeypatch):
@@ -413,7 +373,9 @@ def test_run_resume_sets_status_running(client, monkeypatch):
     r = client.post("/run/resume")
     assert r.status_code == 200
     conn = db.connect(web.DB_PATH)
-    assert worker.get_run_state(conn, "apply")["status"] == "running"
+    # resumed and ticked: job 1 already drafted, job 2 is a gate skip -> queue empty
+    assert worker.get_run_state(conn, "apply")["status"] == "idle"
+    assert "run_resumed" in [r["type"] for r in conn.execute("SELECT type FROM event")]
 
 
 def test_run_stop_clears_current_job(client, monkeypatch):
@@ -477,8 +439,8 @@ def test_queue_skip_advances_to_a_higher_ranked_candidate(client, monkeypatch):
     r = client.post("/queue/1/skip")
     assert r.status_code == 200
     conn = db.connect(web.DB_PATH)
-    state = worker.get_run_state(conn, "apply")
-    assert state["current_job_id"] == 2
+    drafted = [r["job_id"] for r in conn.execute("SELECT job_id FROM application")]
+    assert drafted == [2]       # the tick ran job 2 (and, a draft, did not park on it)
 
 
 def test_queue_retry_only_accepts_failed_status(client):
@@ -620,6 +582,8 @@ def test_run_status_shows_pause_button_and_current_job_when_running(client, monk
 
     monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
     client.post("/run/start", data={"mode": "manual"})
+    conn = db.connect(web.DB_PATH)
+    worker.set_run_state(conn, "apply", current_job_id=1)     # the worker mid-job
     r = client.get("/run/status")
     assert "Pause" in r.text
     assert "AI Engineer" in r.text  # current job's title, from the fixture
@@ -1579,20 +1543,11 @@ def test_a_recorded_outcome_is_shown(client):
 
 def test_marking_applied_clears_the_run_state_so_the_worker_can_advance(
         client, monkeypatch):
-    """Manual mode parks the run on a draft, and marking applied is now the
-    sanctioned way to resolve one. If it doesn't release current_job_id,
-    apply_tick returns early forever and the run is dead."""
-    async def fake_submit(conn, job_id, mode, brief=None, profile=None,
-                          resume_version=None, **kw):
-        conn.execute("INSERT INTO application (job_id, resume_version,"
-                     " status) VALUES (?, 'v1', 'draft')", (job_id,))
-        conn.commit()
-        return {"ok": True, "job_id": job_id, "status": "draft"}
-
-    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
-    client.post("/run/start", data={"mode": "manual"})
+    """A needs_answer park holds current_job_id, and marking the job applied
+    resolves it. If it doesn't release current_job_id, apply_tick returns
+    early forever and the run is dead."""
     conn = db.connect(web.DB_PATH)
-    assert worker.get_run_state(conn, "apply")["current_job_id"] == 1
+    worker.set_run_state(conn, "apply", status="running", mode="manual", current_job_id=1)
 
     r = client.post("/applied/1", data={"when": "2026-08-20"})
     assert r.status_code == 200
@@ -1952,29 +1907,6 @@ def test_answering_clears_the_needs_answer_card_before_a_new_draft_lands(client)
     # form's distinguishing input rather than the question text, which the
     # log line also contains.
     assert 'name="question"' not in r.text
-
-
-def test_run_status_shows_the_drafted_answers(client):
-    """The README's whole pre-flip verification procedure -- draft against a
-    real posting, check what the filler produced, before ever flipping
-    SUBMISSION_IMPLEMENTED -- needs the drafted answers visible somewhere.
-    Nothing else in the dashboard shows application.answers."""
-    conn = db.connect(web.DB_PATH)
-    job_id = conn.execute(
-        "INSERT INTO job (fingerprint, source, external_id, company,"
-        " company_normalized, title, title_normalized)"
-        " VALUES ('fp9','ats','9','Acme','acme','AI Engineer','aiengineer')"
-    ).lastrowid
-    conn.execute("INSERT INTO application (job_id, resume_version, answers,"
-                 " status) VALUES (?, 'base-v1', ?, 'draft')",
-                 (job_id, json.dumps({"#first_name": "Jane"})))
-    worker.set_run_state(conn, "apply", status="running", mode="manual",
-                         current_job_id=job_id)
-    conn.commit()
-
-    r = client.get("/run/status")
-    assert "#first_name" in r.text
-    assert "Jane" in r.text
 
 
 def test_do_apply_needs_answer_parks_the_run_so_the_card_shows(client, monkeypatch):

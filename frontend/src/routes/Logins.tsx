@@ -2,8 +2,7 @@ import { useEffect, useState } from 'react'
 import { ApiError, get } from '../api'
 import '../components/ui.css'
 
-// Types declared locally per the Phase B worktree convention (Task 18 may
-// lift shared ones into api.ts). The API never returns a password.
+// Types declared locally. The API never returns a password.
 
 interface Login {
   id: number

@@ -54,7 +54,7 @@ export function PromptCard({ prompt, onAnswered }: { prompt: OpenPrompt; onAnswe
           <div className="qcard__actions">
             <input
               id={inputId}
-              type={p.sensitive ? 'password' : 'text'}
+              type="text"
               value={text}
               disabled={busy}
               onChange={(e) => setText(e.target.value)}

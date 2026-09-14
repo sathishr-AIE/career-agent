@@ -52,6 +52,7 @@ def test_resumable_and_sweep_orphans(conn):
     conn.execute("INSERT INTO job (fingerprint, source, external_id, company, company_normalized,"
                  " title, title_normalized, url) VALUES ('fp2','ats','2','B','b','AI','ai','https://y')")
     checkpoint.start(conn, 1, "s1", "n", mode="manual", can_submit=True)
+    checkpoint.mark_waiting(conn, 1, 2)
     checkpoint.start(conn, 2, "s2", "n", mode="manual", can_submit=True)
     checkpoint.mark_waiting(conn, 2, 3)
     assert checkpoint.sweep_orphans(conn, live_job_ids={2}) == 1     # 2 is still driven
@@ -94,7 +95,7 @@ def test_sweep_orphans_finishes_a_job_whose_latest_attempt_is_terminal(conn):
     conn.commit()
     assert checkpoint.sweep_orphans(conn, set()) == 0
     assert checkpoint.get(conn, 1)["status"] == "done"
-    checkpoint.start(conn, 1, "s", "n", mode="manual")  # a live attempt's row: in_flight
+    checkpoint.start(conn, 1, "s", "n", mode="manual", can_submit=False)  # a live attempt's row: in_flight
     conn.execute("INSERT INTO application (job_id, resume_version, status) VALUES (1, 'v', 'in_flight')")
     conn.commit()
     assert checkpoint.sweep_orphans(conn, set()) == 1
@@ -163,3 +164,18 @@ def test_sweep_finishes_a_crashed_auto_session_that_could_submit(conn):
     assert checkpoint.sweep_orphans(conn, set()) == 1
     assert checkpoint.get(conn, 1)["status"] == "done"
     assert checkpoint.get(conn, 2)["status"] == "resumable"
+
+
+# -- final review I2: a crash mid-turn with can_submit is never resumable -------
+
+@pytest.mark.parametrize("can_submit,waiting,expected", [
+    (True, False, "done"), (True, True, "resumable"),
+    (False, False, "resumable"), (False, True, "resumable"),
+])
+def test_sweep_resumes_a_can_submit_session_only_while_it_was_parked(conn, can_submit, waiting,
+                                                                      expected):
+    checkpoint.start(conn, 1, "s", "n", mode="manual", can_submit=can_submit)
+    if waiting:
+        checkpoint.mark_waiting(conn, 1, 3)
+    checkpoint.sweep_orphans(conn, set())
+    assert checkpoint.get(conn, 1)["status"] == expected

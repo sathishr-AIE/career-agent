@@ -181,6 +181,16 @@ _SECRET_QA_RE = re.compile(
     r"|\bcvv\b|\bpin\b(?!\s*code)|bank account|card number")
 
 
+def is_secret_card(kind: str, payload: dict) -> bool:
+    """A choice/text card asking for a secret: marked sensitive, or a question or
+    memory_key shaped like one. A secret never goes through a question card --
+    saved logins are filled by the backend -- so such a card is never shown
+    (ats._chat_events) and never answered (actions.answer_prompt)."""
+    return kind in ("choice", "text") and (bool(payload.get("sensitive")) or any(
+        isinstance(v, str) and _SECRET_QA_RE.search(v)
+        for v in (payload.get("question"), payload.get("memory_key"))))
+
+
 def qa_remember(conn, question: str, answer: str, *, kind: str = "text",
                 options=None, memory_key: str | None = None,
                 source_job_id: int | None = None,

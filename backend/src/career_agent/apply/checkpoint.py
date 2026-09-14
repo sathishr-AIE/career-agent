@@ -115,15 +115,18 @@ _TERMINAL = ("submitted", "draft", "failed", "failed_permanent", "held_unknown")
 def sweep_orphans(conn, live_job_ids: set[int]) -> int:
     """running/waiting rows no live run is driving (a crashed server) -> resumable,
     or done when the job's latest application is terminal, or when the session could
-    submit and may have: it sent a DECISION approve, or it was not a manual session
+    submit and may have: it sent a DECISION approve, it was not a manual session
     (an auto session is pre-approved and can click Submit before approve_sent is
-    written; a NULL mode is a legacy row, treated the same). Resuming those risks a
-    double submit; their in_flight row goes through held_unknown. Returns the
-    resumable count."""
+    written; a NULL mode is a legacy row, treated the same), or it crashed mid-turn
+    (`running`: the prompt's "no Submit without approve" is all that stood between
+    an injected page and Submit). Only a `waiting` manual session with no approve
+    is safe. Resuming the others risks a double submit; their in_flight row goes
+    through held_unknown. Returns the resumable count."""
     live = list(live_job_ids)
     orphan = (" WHERE status IN ('running','waiting')"
               f" AND job_id NOT IN ({','.join('?' * len(live))})")
-    ended = (" AND ((can_submit IS NOT 0 AND (approve_sent = 1 OR mode IS NOT 'manual'))"
+    ended = (" AND ((can_submit IS NOT 0 AND (approve_sent = 1 OR mode IS NOT 'manual'"
+             " OR status = 'running'))"
              " OR (SELECT ap.status FROM application ap WHERE ap.job_id = apply_checkpoint.job_id"
              f" ORDER BY ap.id DESC LIMIT 1) IN ({','.join('?' * len(_TERMINAL))}))")
     conn.execute("UPDATE apply_checkpoint SET status = 'done', open_prompt_id = NULL,"

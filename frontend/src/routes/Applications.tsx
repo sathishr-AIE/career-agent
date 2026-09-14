@@ -29,6 +29,7 @@ interface ApplicationsContext {
     in_progress: number
     successful: number
     failed_skipped: number
+    resumable: number
   }
   recent_events: { type: string; payload: string | null; occurred_at: string }[]
   open_prompt: { id: number; kind: string; question: string } | null
@@ -86,6 +87,7 @@ function RunControls({ ctx, onChanged }: { ctx: ApplicationsContext; onChanged: 
         <div className="card"><h3>In Progress</h3><div className="num">{ctx.stats.in_progress}</div></div>
         <div className="card"><h3>Successful</h3><div className="num">{ctx.stats.successful}</div></div>
         <div className="card"><h3>Failed/Skipped</h3><div className="num">{ctx.stats.failed_skipped}</div></div>
+        <div className="card"><h3>Interrupted</h3><div className="num">{ctx.stats.resumable}</div></div>
       </div>
 
       {ctx.current_job && (
@@ -97,12 +99,6 @@ function RunControls({ ctx, onChanged }: { ctx: ApplicationsContext; onChanged: 
             <span className="rationale">
               {ctx.open_prompt.question} <Link to={`/chat/${ctx.conversation_id}`}>Answer in chat →</Link>
             </span>
-          ) : mode === 'manual' && s.mode === 'manual' ? (
-            <form onSubmit={(e) => e.preventDefault()}>
-              <span className="rationale">Draft ready — review and send.</span>
-              <button className="btn" onClick={() => act(`/api/send/${ctx.current_job!.job_id}`)}>Send</button>
-              <button className="btn" onClick={() => act(`/api/queue/${ctx.current_job!.job_id}/skip`)}>Skip</button>
-            </form>
           ) : (
             <span className="rationale">Applying…</span>
           )}
@@ -180,7 +176,7 @@ function ActionCell({
       ) : (
         untracked && (
           job.has_draft ? (
-            <span className="rationale">Drafted — review in the status card above.</span>
+            <span className="rationale">Drafted — see the job's chat.</span>
           ) : (
             <button className="btn"
                     onClick={() => apply(job.verdict === 'skip' ? `/api/override/${job.id}` : `/api/apply/${job.id}`)}>

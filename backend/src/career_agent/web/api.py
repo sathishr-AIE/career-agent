@@ -121,15 +121,6 @@ def api_answer(job_id: int, question: str = Body(...), answer: str = Body(...),
     return _result(result)
 
 
-@router.post("/send/{job_id}")
-async def api_send(job_id: int):
-    m = _app()
-    result = await actions.send(m._conn(), job_id, brief_path=m.BRIEF_PATH,
-                                candidate_profile_path=m.CANDIDATE_PROFILE_PATH,
-                                conn_factory=m._chat_conn)
-    return _result(result)
-
-
 @router.post("/dismiss/{job_id}")
 def api_dismiss(job_id: int):
     m = _app()

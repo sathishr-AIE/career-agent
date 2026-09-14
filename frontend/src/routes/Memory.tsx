@@ -2,8 +2,7 @@ import { useEffect, useState } from 'react'
 import { ApiError, get, put } from '../api'
 import '../components/ui.css'
 
-// Types declared locally per the Phase B worktree convention (T13/T15/T17
-// each declare their own types; Task 18 may lift shared ones into api.ts).
+// Types declared locally.
 
 interface MemoryItem {
   id: number

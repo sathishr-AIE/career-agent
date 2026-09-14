@@ -68,7 +68,6 @@ SELECT j.id AS job_id, j.company, j.title, a.weighted_score
   JOIN assessment a ON a.job_id = j.id
  WHERE {QUEUE_WHERE}
  ORDER BY j.priority ASC NULLS LAST, a.weighted_score DESC
- LIMIT 1
 """
 
 
@@ -88,7 +87,11 @@ def set_run_state(conn: sqlite3.Connection, kind: str, **fields) -> None:
 
 
 def next_candidate(conn: sqlite3.Connection) -> sqlite3.Row | None:
-    return conn.execute(CANDIDATE_SQL).fetchone()
+    """The best queued job no request has claimed (ats_apply.PENDING)."""
+    for row in conn.execute(CANDIDATE_SQL):
+        if row["job_id"] not in ats_apply.PENDING:
+            return row
+    return None
 
 
 def guard(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
@@ -141,9 +144,9 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
     """One step of the apply worker: pick a candidate, gate it, draft it,
     and in auto mode send it. Called by the control endpoints (for
     immediate feedback) and by the background loop (to keep going
-    unattended). A no-op unless the apply run is 'running' and not
-    already blocked on a manual-mode draft, or a needs-answer park,
-    awaiting review."""
+    unattended). A no-op unless the apply run is 'running' and not parked
+    on a needs-answer question. A draft never parks: its in-session
+    CONFIRM was the review, so both modes move on to the next job."""
     state = get_run_state(conn, "apply")
     if state["status"] != "running":
         return
@@ -162,6 +165,17 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
         return
 
     job_id = resume_id if resume_id is not None else candidate["job_id"]
+    # Claimed for the whole tick, tailoring included: an Apply or a Continue on
+    # this job is refused meanwhile, and next_candidate skips it.
+    ats_apply.PENDING.add(job_id)
+    try:
+        await _tick_job(conn, state, job_id, resume_id, brief_path, profile_path, conn_factory)
+    finally:
+        ats_apply.PENDING.discard(job_id)
+
+
+async def _tick_job(conn, state, job_id: int, resume_id, brief_path, profile_path,
+                    conn_factory) -> None:
     set_run_state(conn, "apply", current_job_id=job_id)
     # Before any await: a stale needs_answer card answered while this job
     # starts would unpark it and let the next tick run it a second time.
@@ -193,7 +207,7 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
     brief = load_brief(brief_path)
     try:
         # load_candidate_profile raises FileNotFoundError if it's missing --
-        # the agent needs it for every source now (Task 6's submit() raises
+        # the agent needs it for every source now (submit() raises
         # RuntimeError on profile=None), so there's no fallback left: a
         # missing profile is a run_state error, caught below like any other
         # submit()-time failure.
@@ -241,10 +255,7 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
         return
 
     say(conn, job_id, _outcome_text(conn, job_id, result), conn_factory)
-    if state["mode"] == "manual":
-        return  # stays 'running' with current_job_id set: awaiting review
-
-    set_run_state(conn, "apply", current_job_id=None)  # auto: done
+    set_run_state(conn, "apply", current_job_id=None)  # a draft does not park either
 
 
 def startup_sweep(conn: sqlite3.Connection) -> None:
@@ -252,22 +263,35 @@ def startup_sweep(conn: sqlite3.Connection) -> None:
     _conn(), whose sweep_stale_in_flight would otherwise hold a crashed run's row
     first (and sweep_orphans would then read that hold as an ended job).
 
-    A checkpoint left running/waiting by a crashed server becomes resumable. With
-    the kill switch off no run could have clicked Submit, so a crashed run's
-    in_flight row needs no held_unknown adjudication: it is dropped -- after the
-    sweep, which reads that row as "not ended"."""
+    A checkpoint left running/waiting by a crashed server becomes resumable, or
+    done when it could have sent (checkpoint.sweep_orphans). A crashed run's
+    in_flight row is dropped -- after the sweep, which reads that row as "not
+    ended" -- when nothing could have been sent: always with the kill switch
+    off, and with it on only for a session swept resumable. Any other row stays
+    for held_unknown adjudication. Each interrupted job's chat, and Home, say so."""
     live = {jid for jid, run in agent_mod.RUNS.items() if not run.done.is_set()}
+    orphans = [r["job_id"] for r in conn.execute(
+        "SELECT job_id FROM apply_checkpoint WHERE status IN ('running','waiting')"
+        " ORDER BY job_id") if r["job_id"] not in live]
     checkpoint.sweep_orphans(conn, live)
-    if ats_apply.SUBMISSION_IMPLEMENTED:
-        return
+    resumable = {r["job_id"] for r in conn.execute(
+        "SELECT job_id FROM apply_checkpoint WHERE status = 'resumable'")}
     for r in conn.execute("SELECT id, job_id FROM application"
                           " WHERE status = 'in_flight'").fetchall():
-        if r["job_id"] not in live and conn.execute(
-                "DELETE FROM application WHERE id = ? AND status = 'in_flight'",
-                (r["id"],)).rowcount:
+        if r["job_id"] in live or (ats_apply.SUBMISSION_IMPLEMENTED and r["job_id"] not in resumable):
+            continue
+        if conn.execute("DELETE FROM application WHERE id = ? AND status = 'in_flight'",
+                        (r["id"],)).rowcount:
             store.log(conn, r["job_id"], "orphan_in_flight_dropped",
-                      "submission disabled: nothing was sent")
+                      "parked on a card: nothing was sent" if ats_apply.SUBMISSION_IMPLEMENTED
+                      else "submission disabled: nothing was sent")
     conn.commit()
+    for jid in orphans:
+        say(conn, jid, "The server restarted while this job was running — "
+            + ("press Continue to pick it up" if jid in resumable else "it was held for review"))
+    if orphans:
+        say(conn, None, f"{len(orphans)} job(s) interrupted by a restart: "
+            + ", ".join(f"#{j}" for j in orphans) + " — open each chat to continue")
 
 
 async def apply_worker_loop(conn_factory, brief_path, profile_path,

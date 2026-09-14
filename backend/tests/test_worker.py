@@ -493,47 +493,6 @@ async def test_needs_answer_from_auto_send_parks(conn, brief_path,
     assert "needs_answer" in types
 
 
-async def test_manual_mode_still_drafts_and_parks_for_review(
-        conn, brief_path, profile_path, monkeypatch):
-    job_id = _job(conn, "manual-review")
-    worker.set_run_state(conn, "apply", status="running", mode="manual")
-
-    calls = []
-
-    async def fake_submit(conn, job_id, mode, resume_version=None, **kw):
-        calls.append(mode)
-        return {"ok": True, "job_id": job_id, "status": "draft"}
-
-    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
-    await worker.apply_tick(conn, brief_path, profile_path)
-
-    assert calls == ["manual"]
-    assert worker.get_run_state(conn, "apply")["current_job_id"] is not None
-
-
-async def test_tick_manual_mode_stops_after_draft(conn, brief_path, profile_path,
-                                                   monkeypatch):
-    job_id = _job(conn, "manual-me")
-    worker.set_run_state(conn, "apply", status="running", mode="manual")
-
-    calls = []
-
-    async def fake_submit(conn, job_id, mode, resume_version=None, **kw):
-        calls.append(mode)
-        conn.execute("INSERT INTO application (job_id, resume_version,"
-                     " status) VALUES (?, 'v1', 'draft')", (job_id,))
-        conn.commit()
-        return {"ok": True, "job_id": job_id, "status": "draft"}
-
-    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
-    await worker.apply_tick(conn, brief_path, profile_path)
-
-    assert calls == ["manual"]
-    state = worker.get_run_state(conn, "apply")
-    assert state["status"] == "running"
-    assert state["current_job_id"] == job_id
-
-
 async def test_tick_is_a_noop_while_awaiting_manual_review(
         conn, brief_path, profile_path, monkeypatch):
     job_id = _job(conn, "already-drafted")
@@ -745,7 +704,7 @@ async def test_a_chat_write_failure_does_not_change_the_tick(
     monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
     await worker.apply_tick(conn, brief_path, profile_path, broken_factory)
     state = worker.get_run_state(conn, "apply")
-    assert state["status"] == "running" and state["current_job_id"] == job_id
+    assert state["status"] == "running" and state["current_job_id"] is None   # a draft moves on
 
 
 def test_startup_sweep_makes_orphaned_checkpoints_resumable(conn, monkeypatch):
@@ -756,6 +715,7 @@ def test_startup_sweep_makes_orphaned_checkpoints_resumable(conn, monkeypatch):
 
     a, b = _job(conn, "orphan"), _job(conn, "live")
     checkpoint.start(conn, a, "s1", "n", mode="manual", can_submit=True)
+    checkpoint.mark_waiting(conn, a, 1)         # parked on a card: safe to resume
     checkpoint.start(conn, b, "s2", "n", mode="manual", can_submit=True)
 
     class Live:
@@ -925,3 +885,77 @@ def test_startup_sweep_drops_an_old_orphan_before_the_stale_sweep_holds_it(conn,
     assert worker.ats_apply.sweep_stale_in_flight(conn) == 0
     assert conn.execute("SELECT COUNT(*) n FROM application").fetchone()["n"] == 0
     assert checkpoint.get(conn, job_id)["status"] == "resumable"
+
+
+# -- final review ---------------------------------------------------------------
+
+def _texts(conn, job_id):
+    from career_agent import chat
+    cid = chat.home_conversation(conn) if job_id is None else chat.conversation_for_job(conn, job_id)
+    return [m["content"] for m in chat.messages_after(conn, cid)]
+
+
+async def test_a_manual_worker_moves_on_after_a_draft(conn, brief_path, profile_path, monkeypatch):
+    """I1: the in-session CONFIRM was the review; a draft does not park."""
+    first, second = _job(conn, "draft-1", score=90), _job(conn, "draft-2", score=80)
+    worker.set_run_state(conn, "apply", status="running", mode="manual")
+    calls = []
+
+    async def fake_submit(conn, job_id, mode, resume_version=None, **kw):
+        calls.append(job_id)
+        conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                     " VALUES (?, 'v1', 'draft')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(worker.ats_apply, "submit", fake_submit)
+    await worker.apply_tick(conn, brief_path, profile_path)
+    state = worker.get_run_state(conn, "apply")
+    assert (state["status"], state["current_job_id"]) == ("running", None)
+    await worker.apply_tick(conn, brief_path, profile_path)
+    assert calls == [first, second]
+
+
+def test_next_candidate_skips_a_job_with_an_apply_starting(conn):
+    """M1: a job a request is tailoring or running is not the worker's to pick."""
+    a, b = _job(conn, "pending", score=90), _job(conn, "free", score=80)
+    worker.ats_apply.PENDING.add(a)
+    try:
+        assert worker.next_candidate(conn)["job_id"] == b
+    finally:
+        worker.ats_apply.PENDING.discard(a)
+
+
+@pytest.mark.parametrize("implemented", [False, True])
+def test_startup_sweep_tells_each_interrupted_job_and_home(conn, monkeypatch, implemented):
+    """I3 (and I2's crash rule): a waiting manual session is resumable, a running
+    can_submit one is held; each chat says so, and Home gets one summary."""
+    from career_agent.apply import agent as agent_mod
+    from career_agent.apply import checkpoint
+
+    monkeypatch.setattr(agent_mod, "RUNS", {})
+    monkeypatch.setattr(worker.ats_apply, "SUBMISSION_IMPLEMENTED", implemented)
+    parked, busy = _job(conn, "parked"), _job(conn, "busy")
+    checkpoint.start(conn, parked, "s1", "n", mode="manual", can_submit=True)
+    checkpoint.mark_waiting(conn, parked, 7)
+    checkpoint.start(conn, busy, "s2", "n", mode="manual", can_submit=True)
+    for jid in (parked, busy):
+        conn.execute("INSERT INTO application (job_id, resume_version, status, started_at)"
+                     " VALUES (?, 'v', 'in_flight', datetime('now'))", (jid,))
+    conn.commit()
+    worker.startup_sweep(conn)
+    assert checkpoint.get(conn, parked)["status"] == "resumable"
+    assert checkpoint.get(conn, busy)["status"] == "done"
+    left = {r["job_id"] for r in conn.execute("SELECT job_id FROM application WHERE status = 'in_flight'")}
+    assert left == ({busy} if implemented else set()), "a held row stays for adjudication"
+    assert any("press Continue" in t for t in _texts(conn, parked))
+    assert any("held for review" in t for t in _texts(conn, busy))
+    home = _texts(conn, None)
+    assert any(f"2 job(s) interrupted by a restart: #{parked}, #{busy}" in t for t in home), home
+
+
+def test_startup_sweep_says_nothing_when_nothing_was_interrupted(conn, monkeypatch):
+    from career_agent.apply import agent as agent_mod
+    monkeypatch.setattr(agent_mod, "RUNS", {})
+    worker.startup_sweep(conn)
+    assert not any("interrupted" in t for t in _texts(conn, None))

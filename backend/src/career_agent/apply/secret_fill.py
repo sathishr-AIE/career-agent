@@ -13,8 +13,8 @@ fill_and_submit attaches to the apply Chrome over CDP (apply/chrome.py, port
 re-checked before every fill.
 
 Sync Playwright API on purpose: the callers are AgentRun's reader thread
-(ats._chat_events) and the answer route's worker thread (Task 20 runs non-Home
-answers through run_in_threadpool). Neither has a running asyncio loop, the one
+(ats._chat_events) and the answer route's worker thread (non-Home answers run
+through run_in_threadpool). Neither has a running asyncio loop, the one
 place the sync API refuses -- _require_no_running_loop makes a regression fail
 loudly instead of stalling the server."""
 import asyncio

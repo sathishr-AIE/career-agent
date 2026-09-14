@@ -899,3 +899,109 @@ def test_approving_an_account_through_the_route_fills_off_the_event_loop(client,
     assert page.main.submits == ["requestSubmit"]
     assert credentials.get(conn, "careers.ses.com")["password"] == pw
     assert run.sent == ['ANSWER:n0nce:{"id": "acct", "answer": "approve", "submitted": true}']
+
+
+
+# -- final review ----------------------------------------------------------------
+
+async def _async(value):
+    return value
+
+
+async def test_a_draft_does_not_park_apply_continue_or_home(db_path, runs, monkeypatch, tmp_path):
+    """I1: after DRAFT_READY another Apply, a Continue and Home apply_to all proceed."""
+    c = db.connect(db_path)
+    brief = _brief(tmp_path)
+    monkeypatch.setattr(actions.worker, "tailor_for_apply", lambda *a, **kw: _async("base-v1"))
+
+    async def drafts(conn, job_id, **kw):
+        conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                     " VALUES (?, 'base-v1', 'draft')", (job_id,))
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+    monkeypatch.setattr(actions.ats_apply, "submit", drafts)
+    r = await actions.do_apply(c, 1, False, None, brief, tmp_path / "p.toml")
+    assert r["ok"], r
+    assert worker_mod.get_run_state(c, "apply")["current_job_id"] is None
+
+    assert actions._apply_denial(c, 2, True, brief) is None
+    _resumable(c, 2)
+    monkeypatch.setattr(actions, "_resume_run", lambda *a, **kw: _async(None))
+    tasks = set()
+    assert actions.resume_job(c, 2, brief, tmp_path / "p.toml", None, tasks)["ok"]
+    await asyncio.gather(*tasks)
+    checkpoint.finish(c, 2)
+    monkeypatch.setattr(actions, "_home_apply_run", lambda *a, **kw: _async(None))
+    c.execute("UPDATE assessment SET verdict = 'submit' WHERE job_id = 2")
+    c.commit()
+    assert actions._home_apply_to(c, {"job_id": 2}, brief_path=brief, profile_path=None,
+                                  conn_factory=None, tasks=set())["ok"]
+
+
+async def test_two_concurrent_applies_start_one_session(db_path, runs, monkeypatch, tmp_path):
+    """M1: a double click passes _apply_denial twice before any in_flight row exists."""
+    c1, c2 = db.connect(db_path), db.connect(db_path)
+    calls = []
+
+    async def slow_tailor(*a, **kw):
+        await asyncio.sleep(0.05)
+        return "base-v1"
+
+    async def counting(conn, job_id, **kw):
+        calls.append(job_id)
+        await asyncio.sleep(0.05)
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+    monkeypatch.setattr(actions.worker, "tailor_for_apply", slow_tailor)
+    monkeypatch.setattr(actions.ats_apply, "submit", counting)
+    brief = _brief(tmp_path)
+    a, b = await asyncio.gather(actions.do_apply(c1, 1, False, None, brief, tmp_path / "p.toml"),
+                                actions.do_apply(c2, 1, False, None, brief, tmp_path / "p.toml"))
+    assert calls == [1]
+    assert sorted([a["ok"], b["ok"]]) == [False, True]
+    assert 1 not in actions.ats_apply.PENDING, "the claim is released"
+
+
+async def test_skip_never_clears_the_park_of_a_live_run(db_path, runs):
+    """I1: Skip in Applications must not release a job whose agent is still running."""
+    c = db.connect(db_path)
+    runs[1] = _LiveRun()
+    worker_mod.set_run_state(c, "apply", status="running", mode="manual", current_job_id=1)
+    r = await actions.queue_skip(c, 1, "brief", "profile")
+    assert not r["ok"]
+    assert worker_mod.get_run_state(c, "apply")["current_job_id"] == 1
+
+
+def test_the_legacy_answer_route_refuses_while_the_job_runs(conn, runs):
+    """M4: no open card, but a live run -- saving would unpark it mid-run."""
+    runs[1] = _LiveRun()
+    worker_mod.set_run_state(conn, "apply", status="running", mode="manual", current_job_id=1)
+    r = actions.answer_question(conn, 1, "Notice?", "30 days", is_volatile=False)
+    assert not r["ok"]
+    assert worker_mod.get_run_state(conn, "apply")["current_job_id"] == 1
+
+
+def test_resume_pins_only_choice_text_and_confirm_changes(conn):
+    """I4: an approve is never 'use verbatim' on resume."""
+    checkpoint.start(conn, 1, "s", "n", mode="manual", can_submit=False)
+    for kind, payload, body in (
+            ("approve", {"question": "Go?"}, {"answer": "approve"}),
+            ("approve_account", {"question": "Create?"}, {"answer": "approve"}),
+            ("need_password", {"question": "pw"}, {"answer": "by_backend"}),
+            ("text", {"question": "Notice?"}, {"answer": "30"}),
+            ("choice", {"question": "Visa?"}, {"answer": "Yes"}),
+            ("confirm", {}, {"decision": "change", "changes": {"Phone": "+91"}})):
+        actions._checkpoint_answer(conn, 1, 1, kind, payload, body)
+    assert checkpoint.get(conn, 1)["answers"] == {"Notice?": "30", "Visa?": "Yes", "Phone": "+91"}
+
+
+def test_status_reports_interrupted_jobs(conn):
+    """I3."""
+    from career_agent.web import context
+    _resumable(conn, 1)
+    assert "1 interrupted" in actions._status_text(conn)
+    assert context.run_status_context(conn)["stats"]["resumable"] == 1
+
+
+@pytest.mark.parametrize("path", ["/send/1", "/api/send/1"])
+def test_the_retired_send_routes_are_gone(client, path):
+    assert client.post(path).status_code in (404, 405)

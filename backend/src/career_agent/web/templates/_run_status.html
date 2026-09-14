@@ -26,6 +26,7 @@
     <div class="card kpi"><h3>In Progress</h3><div class="num">{{ stats.in_progress }}</div></div>
     <div class="card kpi"><h3>Successful</h3><div class="num">{{ stats.successful }}</div></div>
     <div class="card kpi"><h3>Failed/Skipped</h3><div class="num">{{ stats.failed_skipped }}</div></div>
+    <div class="card kpi"><h3>Interrupted</h3><div class="num">{{ stats.resumable }}</div></div>
   </div>
 
   {% if current_job %}
@@ -40,15 +41,6 @@
         <label><input type="checkbox" name="is_volatile"> This may change later</label>
         <button class="btn" type="submit">Save answer</button>
       </form>
-    {% elif s["mode"] == "manual" %}
-      <span class="rationale">Draft ready — review and send.</span>
-      <button class="btn" hx-post="/send/{{ current_job['job_id'] }}"
-              hx-target="#run-status" hx-swap="outerHTML">Send</button>
-      <button class="btn" hx-post="/queue/{{ current_job['job_id'] }}/skip"
-              hx-target="#run-status" hx-swap="outerHTML">Skip</button>
-      {% if draft_answers %}
-      <pre class="draft-answers">{{ draft_answers | tojson(indent=2) }}</pre>
-      {% endif %}
     {% else %}
       <span class="rationale">Applying…</span>
     {% endif %}

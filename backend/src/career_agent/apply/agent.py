@@ -400,6 +400,10 @@ def _steps_section(mode, can_submit) -> str:
         "of the page you are on. Emit them while ON that form with every other field "
         "complete, then wait: the backend fills the password and submits the form. Never "
         "type a password yourself.\n"
+        "Never ASK for a password, a one-time code, a verification code or any other secret "
+        "(kind choice or text, sensitive or not): the human is never shown such an ASK and "
+        'the answer is "none". Sign in only through need_password; if a site needs a '
+        "one-time or two-factor code, stop and output RESULT:FAILED:account_required.\n"
         "The JSON stays on that one line -- escape any newline inside a value as \\n. kind \"choice\" needs a non-empty options "
         "list. A KNOWN ANSWER marked stale is asked too, with that answer as default. "
         "Always set memory_key for facts that recur across applications (notice_period, "
@@ -496,8 +500,8 @@ def _result_codes_section() -> str:
         "    naukri_platform, not_eligible_location, already_applied, "
         "not_a_job_application,\n"
         "    unsafe_permissions, unsafe_verification, account_required, stuck, page_error,\n"
-        "    cancelled when they fit (account_required: an account or a legal agreement is\n"
-        "    needed; cancelled: the human's DECISION was cancel)"
+        "    cancelled when they fit (account_required: an account, a legal agreement or a\n"
+        "    one-time/two-factor code is needed; cancelled: the human's DECISION was cancel)"
     )
 
 
@@ -766,46 +770,6 @@ _USAGE_KEYS = ("input_tokens", "output_tokens",
                "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
-def consume_stream(lines) -> tuple[str, float | None, dict]:
-    """Fold claude's stream-json stdout into (text transcript, cost, usage).
-
-    cost is None when no `result` message arrived (the watchdog killed the
-    run first): only that message carries total_cost_usd, so the cost is
-    unknown, not zero. usage is the token count summed over the assistant
-    messages seen, the one record of spend such a run leaves. stream-json
-    repeats a message's usage on each content block it emits, so it is
-    taken once per message id (the largest seen), not once per line."""
-    parts, cost, per_msg = [], None, {}
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            parts.append(line)
-            continue
-        if msg.get("type") == "assistant":
-            usage = msg.get("message", {}).get("usage")
-            if usage:
-                seen = per_msg.setdefault(
-                    msg["message"].get("id") or object(), {})
-                for k in _USAGE_KEYS:
-                    seen[k] = max(seen.get(k, 0), usage.get(k) or 0)
-            for block in msg.get("message", {}).get("content", []):
-                if block.get("type") == "text":
-                    parts.append(block["text"])
-                elif block.get("type") == "tool_use":
-                    name = block.get("name", "").replace("mcp__playwright__", "")
-                    parts.append(f"  >> {name} "
-                                 f"{summarize_tool_input(block.get('input', {}))}")
-        elif msg.get("type") == "result":
-            cost = msg.get("total_cost_usd", 0.0) or 0.0
-            parts.append(msg.get("result", "") or "")
-    usage = {k: sum(m.get(k, 0) for m in per_msg.values()) for k in _USAGE_KEYS}
-    return "\n".join(parts), cost, usage
-
-
 def _mcp_config(cdp_port: int) -> dict:
     return {"mcpServers": {"playwright": {
         "command": "npx",
@@ -868,7 +832,7 @@ def build_cmd(model: str, mcp_path, session_id: str,
                         the server has no flag to turn it off; evaluate could
                         read a backend-filled password's .value back, the
                         network tools show the login POST body, and a
-                        screenshot could show a revealed password (Task 15).
+                        screenshot could show a revealed password.
                         The flag is variadic, so it is followed by another
                         flag, never a value.
     Together with WORK_DIR being outside the repo, an injected "run
@@ -905,7 +869,7 @@ def build_cmd(model: str, mcp_path, session_id: str,
             "--resume" if resume else "--session-id", session_id]
 
 
-RUNS: "dict[int, AgentRun]" = {}   # job_id -> its live run; the answer API sends into it (Task 7)
+RUNS: "dict[int, AgentRun]" = {}   # job_id -> its live run; the answer API sends into it
 
 
 def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events,
@@ -1077,7 +1041,7 @@ async def run_agent(prompt: str, *, job_id: int, nonce: str, events,
                     session_id: str | None = None, **kw) -> AgentResult:
     """asyncio.to_thread wrapper over run_session: the same event-loop rule
     as web/pipeline.py's run_once -- the dashboard must stay responsive. A
-    fresh session id per run unless one is given (--resume, Task 7)."""
+    fresh session id per run unless one is given (--resume)."""
     return await asyncio.to_thread(run_session, prompt, job_id=job_id, nonce=nonce,
                                    session_id=session_id or str(uuid.uuid4()),
                                    events=events, **kw)

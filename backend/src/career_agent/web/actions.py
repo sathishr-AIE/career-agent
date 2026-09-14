@@ -1,4 +1,4 @@
-"""The 'do something' half of the dashboard -- Apply, Send, Skip, and the
+"""The 'do something' half of the dashboard -- Apply, Skip, and the
 rest of the action routes. Every function here returns a plain
 {"ok": bool, "message": str, ...} dict rather than an HTMLResponse, so the
 Jinja routes (app.py) and the JSON routes (api.py) share one behavior and
@@ -33,10 +33,10 @@ log = logging.getLogger(__name__)
 
 
 def _unpark(conn: sqlite3.Connection, job_id: int) -> None:
-    """Release a run parked on this job. Manual mode leaves the run 'running'
-    with current_job_id set to a drafted job awaiting review, and apply_tick
-    returns early on every iteration while it is set -- so a run left parked
-    on a job the user has already resolved never advances again."""
+    """Release a run parked on this job. A needs_answer park leaves the run
+    'running' with current_job_id set, and apply_tick returns early on every
+    iteration while it is set -- so a run left parked on a job the user has
+    already resolved never advances again."""
     if worker.get_run_state(conn, "apply")["current_job_id"] == job_id:
         worker.set_run_state(conn, "apply", current_job_id=None)
 
@@ -116,10 +116,11 @@ def _apply_denial(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
     """Why Apply would refuse this job right now, or None."""
     parked = worker.get_run_state(conn, "apply")["current_job_id"]
     if parked is not None and parked != job_id:
-        # Drafting job_id would set current_job_id to it below, silently
-        # orphaning whatever's already parked -- its draft would still exist
-        # but no card would ever point a Send button at it again.
-        return "Another job is already parked awaiting review — resolve it first."
+        # The worker is on another job, or parked on its needs_answer question:
+        # a needs_answer here would overwrite current_job_id and orphan that park.
+        return _PARKED
+    if job_id in ats_apply.PENDING:
+        return _STARTING.format(job_id=job_id)
 
     denial = worker.guard(conn, job_id, allow_skip=allow_skip, brief_path=brief_path)
     if denial:
@@ -143,7 +144,20 @@ async def _do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
     denial = _apply_denial(conn, job_id, allow_skip, brief_path)
     if denial:
         return {"ok": False, "message": denial}
+    # Claimed before any await, released when the run returns: a double click, or
+    # an Apply while the worker or a Continue tailors this job, is refused by
+    # _apply_denial instead of queueing a second session.
+    ats_apply.PENDING.add(job_id)
+    try:
+        return await _claimed_apply(conn, job_id, event, brief_path, candidate_profile_path,
+                                    conn_factory)
+    finally:
+        ats_apply.PENDING.discard(job_id)
 
+
+async def _claimed_apply(conn: sqlite3.Connection, job_id: int, event: str | None,
+                         brief_path: Path, candidate_profile_path: Path,
+                         conn_factory=None) -> dict:
     # Before any await: a stale needs_answer card answered while this job is
     # tailoring would unpark it and let the worker run it a second time.
     chat.expire_open_prompts(conn, job_id)
@@ -179,10 +193,7 @@ async def _do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
                 " job's chat."}
     if not result["ok"]:
         return {"ok": False, "message": result["reason"]}
-    # Park on this job so the status card's Send/Skip review actually finds
-    # the draft just written -- it only ever renders the job matching
-    # current_job_id, same as apply_tick's own park-before-draft pattern.
-    worker.set_run_state(conn, "apply", current_job_id=job_id)
+    # No park: the in-session CONFIRM was the review (a draft blocks nothing).
     return {"ok": True, "message": "Applied"}
 
 
@@ -190,6 +201,12 @@ def answer_question(conn: sqlite3.Connection, job_id: int, question: str,
                     answer: str, is_volatile: bool) -> dict:
     # Legacy (Jinja) path. A live run's own ASK must be answered through the
     # run (answer_prompt); saving it here would unpark a job mid-run.
+    if store.is_secret_card("text", {"question": question}):
+        return {"ok": False, "message": _SECRET}
+    run = agent_mod.RUNS.get(job_id)
+    if run is not None and not run.done.is_set():
+        return {"ok": False, "message":
+                "The agent is still running this job — answer it in the job's chat."}
     open_row = chat.open_prompt_for_job(conn, job_id)
     if open_row and json.loads(open_row["payload"]).get("origin") != "needs_answer":
         return {"ok": False, "message":
@@ -206,16 +223,13 @@ def answer_question(conn: sqlite3.Connection, job_id: int, question: str,
     return {"ok": True, "message": "Answer saved"}
 
 
-async def send(conn: sqlite3.Connection, job_id: int, brief_path: Path,
-               candidate_profile_path: Path, conn_factory=None) -> dict:
-    """Retired in S2: a live run's CONFIRM decision is the send. The route
-    stays so an old page's button gets a clear answer, not a 404."""
-    return {"ok": False, "message": "Answer the review card in the job's chat instead."}
-
-
 _CLOSED = "That question is no longer open"
 _EXPIRED = "That request expired — ask again"
 _NO_RUN = "No live agent run for this job"
+_SECRET = ("Secrets are never typed into chat — saved logins are filled by the backend;"
+           " manage them in Logins.")
+_PARKED = "Another job is running or parked on a question — resolve it first."
+_STARTING = "job {job_id} already has an apply starting"
 
 
 def _refuse(code: int, message: str) -> dict:
@@ -224,13 +238,16 @@ def _refuse(code: int, message: str) -> dict:
 
 def _checkpoint_answer(conn, job_id: int, prompt_id: int, kind: str, payload: dict,
                        body: dict) -> None:
-    """What the run was told, for a resume's PREVIOUSLY ANSWERED. A sensitive
-    answer is never written down; a CONFIRM pins only the human's changes.
-    Never fails the answer: it already reached the agent."""
+    """What the run was told, for a resume's PREVIOUSLY ANSWERED ("use verbatim"):
+    only choice/text answers -- the ones memory keeps -- and a CONFIRM's changes.
+    An approve, approve_account or need_password answer is never pinned, and a
+    secret never reaches here. Never fails the answer: it already reached the agent."""
     if kind == "confirm":
         answers = body.get("changes", {})
+    elif kind in ("choice", "text") and not store.is_secret_card(kind, payload):
+        answers = {payload.get("question", kind): body["answer"]}
     else:
-        answers = {} if payload.get("sensitive") or kind == "need_password" else {payload.get("question", kind): body["answer"]}
+        answers = {}
     try:
         checkpoint.mark_running(conn, job_id, f"answered {prompt_id}", answers)
     except Exception:
@@ -359,6 +376,10 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
         # auto=True): a human answer has nothing to add and must not fill.
         return _refuse(422, "The backend answers password requests itself")
     answer = answer if isinstance(answer, dict) else {}
+    if store.is_secret_card(kind, payload):
+        # Never relayed, never recorded. ats._chat_events opens no such card; this
+        # covers one that got in another way, a needs_answer park included.
+        return _refuse(422, _SECRET)
 
     if kind == "confirm":
         decision = answer.get("decision")
@@ -537,7 +558,9 @@ def _status_text(conn) -> str:
     return (f"Apply run: {state['status']} ({state['mode']} mode){working}."
             f" {stats['queued']} queued, {stats['total_applied']} applied,"
             f" {stats['failed_skipped']} failed or skipped."
-            f" Discovery: {worker.get_run_state(conn, 'pipeline')['status']}.")
+            f" Discovery: {worker.get_run_state(conn, 'pipeline')['status']}."
+            + (f" {stats['resumable']} interrupted — press Continue in each job's chat."
+               if stats["resumable"] else ""))
 
 
 def _ask_home(conn, action: str, args: dict, question: str) -> None:
@@ -729,9 +752,11 @@ def resume_job(conn: sqlite3.Connection, job_id: int, brief_path: Path,
         return _refuse(409, f"job {job_id} already has a live agent run")
     if ats_apply._agent_lock().locked():
         return _refuse(409, "Another application is running — continue when it ends")
+    if job_id in ats_apply.PENDING:
+        return _refuse(409, _STARTING.format(job_id=job_id))
     parked = worker.get_run_state(conn, "apply")["current_job_id"]
     if parked is not None and parked != job_id:
-        return _refuse(409, "Another job is already parked awaiting review — resolve it first.")
+        return _refuse(409, _PARKED)
     denial = worker.guard(conn, job_id, allow_skip=True, brief_path=brief_path)
     if denial:
         return _refuse(409, denial)
@@ -739,13 +764,21 @@ def resume_job(conn: sqlite3.Connection, job_id: int, brief_path: Path,
     checkpoint.set_auto_resumed(conn, job_id, True)
     after = chat.post_message(conn, chat.conversation_for_job(conn, job_id), "system",
                               "Continuing where it left off")
-    task = asyncio.create_task(_resume_run(conn, job_id, brief_path, candidate_profile_path,
-                                           conn_factory))
+    ats_apply.PENDING.add(job_id)       # released by _holding when the run returns
+    task = asyncio.create_task(_holding(job_id, _resume_run(
+        conn, job_id, brief_path, candidate_profile_path, conn_factory)))
     if tasks is not None:
         tasks.add(task)
         task.add_done_callback(tasks.discard)
     # `after`: every outcome of the background run posts a newer chat line.
     return {"ok": True, "message": "Continuing where it left off", "after": after}
+
+
+async def _holding(job_id: int, coro) -> None:
+    try:
+        await coro
+    finally:
+        ats_apply.PENDING.discard(job_id)
 
 
 async def _resume_run(conn, job_id: int, brief_path: Path, candidate_profile_path: Path,
@@ -837,6 +870,12 @@ def record_outcome(conn: sqlite3.Connection, application_id: int, type: str,
 
 async def queue_skip(conn: sqlite3.Connection, job_id: int, brief_path: Path,
                      candidate_profile_path: Path, conn_factory=None) -> dict:
+    run = agent_mod.RUNS.get(job_id)
+    if job_id in ats_apply.PENDING or (run is not None and not run.done.is_set()):
+        # Clearing current_job_id under a live run would let the worker start
+        # another job beside it.
+        return {"ok": False, "message":
+                "This job's agent run is still live — finish or cancel it in the job's chat."}
     store.log(conn, job_id, "job_skipped", "skipped by user")
     state = worker.get_run_state(conn, "apply")
     if state["current_job_id"] == job_id:
