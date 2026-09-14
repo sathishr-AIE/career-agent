@@ -200,6 +200,16 @@ _NARRATED_TOOLS = {"browser_navigate", "browser_file_upload", "browser_click",
                    "browser_fill_form"}
 
 
+def _real_page_urls() -> list[str]:
+    """For an approve_account card: what the browser is really on."""
+    from career_agent.apply import secret_fill
+    try:
+        return secret_fill.page_urls()
+    except Exception as exc:
+        log.warning("could not read the browser's page urls: %s", type(exc).__name__)
+        return []
+
+
 def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual",
                  prompt_baseline: int = 0) -> RunEvents:
     """RunEvents that narrate a run into the job's conversation, or no-ops
@@ -243,9 +253,36 @@ def _chat_events(conn_factory, job_id: int, nonce: str, mode: str = "manual",
 
     def on_ask(payload: dict) -> None:
         heard.set()
-        with_conn(lambda c: _checkpoint(checkpoint.mark_waiting, c, job_id,
-                                        chat.open_prompt(c, job_id, payload["kind"], payload)),
-                  "an ASK")
+
+        def record(c):
+            if payload["kind"] == "approve_account":
+                payload["page_urls"] = _real_page_urls()   # the browser's, never the agent's
+            pid = chat.open_prompt(c, job_id, payload["kind"], payload)
+            _checkpoint(checkpoint.mark_waiting, c, job_id, pid)
+            if payload["kind"] == "need_password":
+                auto_fill_login(c, pid, payload)
+        with_conn(record, "an ASK")
+
+    def auto_fill_login(c, pid: int, payload: dict) -> None:
+        """No human step (spec S5): answer_prompt fills the saved login over
+        CDP. Anything short of a sent answer tells the agent "none" at once --
+        otherwise it waits out answer_wait_s."""
+        from career_agent.web import actions   # web imports this module
+        try:
+            ok = actions.answer_prompt(c, pid, {}, auto=True).get("ok")
+        except Exception as exc:
+            log.warning("need_password auto-answer failed for job %s: %s", job_id,
+                        type(exc).__name__)
+            ok = False
+        if ok:
+            return
+        none = {"id": payload.get("id"), "answer": "none"}
+        chat.answer_prompt_row(c, pid, none)
+        run = agent_mod.RUNS.get(job_id)
+        if run is not None:
+            run.send(agent_mod.answer_line(nonce, "need_password", none))
+        post("system", f"Could not fill the saved login for {payload.get('domain')}; "
+                       "told the agent none")
 
     def on_confirm(payload: dict) -> None:
         heard.set()
@@ -660,7 +697,7 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
                 f"résumé file for version {resume_version!r} is missing at"
                 f" {resume_path}"}
 
-    from career_agent import store  # local: store.py imports this module
+    from career_agent import credentials, store  # local: store.py imports this module
                                     # for RESUME_VERSION, so a top-level
                                     # import back would be circular.
     job = Job(source=row["source"], external_id=row["external_id"],
@@ -699,7 +736,8 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
     nonce = cp["nonce"] if resume else agent_mod.new_nonce()
     pinned = cp["answers"] if resume else None
     prompt = agent_mod.build_prompt(*prompt_args, mode=mode, can_submit=can_submit,
-                                    nonce=nonce, pinned_answers=pinned, score=score)
+                                    nonce=nonce, pinned_answers=pinned, score=score,
+                                    logins=credentials.list_(conn))
     session_id = cp["session_id"] if resume else str(uuid.uuid4())
     # The resumed session already has the prompt: only what is new since.
     first = (checkpoint.continue_message(cp, nonce) + "\n\n" + agent_mod.pinned_section(pinned)
@@ -753,7 +791,8 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
                 _say(conn, job_id, "Could not resume the session; starting a fresh one with your answers")
                 events = _chat_events(conn_factory, job_id, nonce, mode, baseline)
                 prompt = agent_mod.build_prompt(*prompt_args, mode=mode, can_submit=can_submit,
-                                                nonce=nonce, pinned_answers=pinned, score=score)
+                                                nonce=nonce, pinned_answers=pinned, score=score,
+                                                logins=credentials.list_(conn))
                 result, detail = await _run(runner, prompt, job_id, nonce, events,
                                             session_id=session_id, resume=False)
         except asyncio.CancelledError:

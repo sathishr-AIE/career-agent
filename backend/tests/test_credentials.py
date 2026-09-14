@@ -213,3 +213,62 @@ def test_delete_returns_true_then_false(conn):
     assert credentials.delete(conn, cid) is True
     assert credentials.delete(conn, cid) is False
     assert credentials.list_(conn) == []
+
+
+# -- Task 15: host match and the user-row guard ------------------------------
+
+@pytest.mark.parametrize("url,domain,ok", [
+    ("https://careers.ses.com/login", "careers.ses.com", True),
+    ("https://www.careers.ses.com/x", "careers.ses.com", True),
+    ("https://jobs.careers.ses.com/x", "careers.ses.com", True),
+    ("https://evil.com/login", "linkedin.com", False),
+    ("https://notlinkedin.com/", "linkedin.com", False),       # no dot boundary
+    ("https://linkedin.com.evil.com/", "linkedin.com", False),
+    ("https://evil.com\\@linkedin.com/", "linkedin.com", False),
+    ("", "linkedin.com", False),
+    ("https://linkedin.com:8443/login", "linkedin.com", True),     # port
+    ("https://linkedin.com./login", "linkedin.com", True),         # trailing dot
+    ("https://bücher.de/login", "xn--bcher-kva.de", True),         # IDNA
+    ("https://linkedin%2ecom/login", "linkedin.com", False),       # percent in host
+    ("https://link\tedin.com/login", "linkedin.com", False),       # tab
+    ("https://linked\x01in.com/", "linkedin.com", False),          # control char
+])
+def test_host_matches_only_on_the_domain_or_a_dot_boundary_subdomain(url, domain, ok):
+    assert credentials.host_matches(url, domain) is ok
+
+
+def test_an_agent_put_never_overwrites_any_existing_login(conn):
+    credentials.put(conn, "ses.com", "", "me@x.com", "users-own-pw", "user")
+    credentials.put(conn, "b.com", "", "a@x.com", "agent-pw", "agent")
+    for domain in ("ses.com", "b.com"):
+        with pytest.raises(credentials.LoginExists):
+            credentials.put(conn, domain, "", "agent@x.com", "generated", "agent")
+    assert credentials.get(conn, "ses.com")["password"] == "users-own-pw"
+    assert credentials.get(conn, "b.com")["password"] == "agent-pw"
+
+
+@pytest.mark.parametrize("domain", ["careers.ses.com", "ses.wd3.myworkdayjobs.com",
+                                    "acme.wd103.myworkdayjobs.com", "bbc.co.uk",
+                                    "acme.vercel.app", "acme.bamboohr.com",
+                                    "acme.workable.com", "acme.ltd.co.uk",
+                                    "https://www.careers.ses.com/join"])
+def test_account_domain_accepts_a_real_site(domain):
+    assert credentials.account_domain(domain) == credentials.normalize_domain(domain)
+
+
+@pytest.mark.parametrize("domain", [
+    "com", "localhost", "127.0.0.1", "[::1]", "127.1", "0x7f.1", "0x7f000001",
+    "co.in", "www.co.in", "co.uk", "ac.uk", "gov.in", "org.in", "gov.uk", "com.sg", "com.br",
+    "myworkdayjobs.com", "wd3.myworkdayjobs.com", "acme.jobs.myworkdayjobs.com",
+    "github.io", "greenhouse.io", "lever.co", "successfactors.com", "vercel.app",
+    "netlify.app", "pages.dev", "web.app", "firebaseapp.com", "herokuapp.com",
+    "azurewebsites.net", "blogspot.com",
+    # M-1: path-based ATS hosts every company shares, and wildcard-DNS suffixes
+    "wd5.myworkday.com", "wd12.myworkday.com", "wd1.myworkdaysite.com",
+    "career2.successfactors.eu", "career10.successfactors.com", "jobs.smartrecruiters.com",
+    "apply.workable.com", "jobs.lever.co", "boards.greenhouse.io",
+    "job-boards.greenhouse.io", "jobs.ashbyhq.com", "bamboohr.com", "workable.com",
+    "s3.amazonaws.com", "ltd.co.uk", "nip.io", "10.0.0.1.nip.io", "app.sslip.io"])
+def test_account_domain_refuses_bare_ip_and_shared_suffixes(domain):
+    with pytest.raises(ValueError):
+        credentials.account_domain(domain)

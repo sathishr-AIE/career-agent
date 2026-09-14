@@ -11,7 +11,8 @@ from typing import Callable
 
 from career_agent.apply.agent import (_USAGE_KEYS, _kill_tree, parse_ask,
                                       parse_confirm, strip_decoration,
-                                      summarize_tool_input, user_message)
+                                      redact_secrets, summarize_tool_input,
+                                      user_message)
 
 # Sent when a turn ends with no recognised line -- often a CONFIRM the parser
 # refused. It must never read as "go ahead": with submission enabled, that
@@ -49,6 +50,9 @@ class AgentRun:
         self._reader_thread: threading.Thread | None = None
         self.proc = None
         self.transcript = ""
+        # Passwords answer_prompt sent to this run (the agent types them via a
+        # tool call): scrubbed from every event and transcript line.
+        self.secrets: set[str] = set()
         self._turn_buf: list[str] = []
         self._per_msg: dict = {}
         self.cost_total: float | None = None
@@ -134,6 +138,7 @@ class AgentRun:
 
     # -- stream (same parsing rules as agent.consume_stream) ----------------
     def _append(self, line: str) -> None:
+        line = redact_secrets(line, self.secrets)
         self.transcript += line + "\n"
         self._turn_buf.append(line)
 
@@ -155,11 +160,12 @@ class AgentRun:
                     self._add_usage(msg.get("message", {}))
                     for block in msg.get("message", {}).get("content", []):
                         if block.get("type") == "text":
-                            self._append(block["text"])
-                            self.events.on_text(block["text"])
+                            text = redact_secrets(block["text"], self.secrets)
+                            self._append(text)
+                            self.events.on_text(text)
                         elif block.get("type") == "tool_use":
                             name = block.get("name", "").replace("mcp__playwright__", "")
-                            summary = summarize_tool_input(block.get("input", {}))
+                            summary = summarize_tool_input(block.get("input", {}), secrets=self.secrets)
                             self._append(f"  >> {name} {summary}")
                             self.events.on_tool(name, summary)
                 elif t == "result":

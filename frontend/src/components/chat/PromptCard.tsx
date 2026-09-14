@@ -4,8 +4,9 @@ import { useAnswer } from './useAnswer'
 import '../ui.css'
 import './cards.css'
 
-/** An open ASK: choice buttons, a text field, or Approve/Reject. Account
- * kinds render read-only -- the backend refuses them until a later slice. */
+/** An open ASK: choice buttons, a text field, or Approve/Reject (also for
+ * approve_account). need_password is answered by the backend on arrival, so
+ * its card is informational only. */
 export function PromptCard({ prompt, onAnswered }: { prompt: OpenPrompt; onAnswered: () => void }) {
   const p = prompt.payload as unknown as AskPayload
   const { busy, error, send } = useAnswer(prompt.id, onAnswered)
@@ -82,14 +83,43 @@ export function PromptCard({ prompt, onAnswered }: { prompt: OpenPrompt; onAnswe
         </div>
       )}
 
-      {(p.kind === 'approve_account' || p.kind === 'need_password') && (
+      {p.kind === 'approve_account' && (
         <>
           <div className="kv">
             {p.domain && <div><span>Domain</span>{p.domain}</div>}
             {p.email && <div><span>Email</span>{p.email}</div>}
+            {p.login_url && <div><span>Sign-up page</span>{p.login_url}</div>}
             {p.terms_summary && <div><span>Terms</span>{p.terms_summary}</div>}
+            <div>
+              <span>Browser is on</span>
+              {p.page_urls?.length ? p.page_urls.join(', ') : 'unknown'}
+            </div>
           </div>
-          <div className="qcard__note">Account actions arrive in a later slice.</div>
+          <div className="qcard__note">
+            Approving creates this account and accepts these terms: the backend generates a
+            password, types it in and submits the sign-up form (never shown to the agent), then
+            saves it to Logins.
+          </div>
+          <div className="qcard__actions">
+            <button type="button" className="btn primary" disabled={busy} onClick={() => send({ answer: 'approve' })}>
+              Approve
+            </button>
+            <button type="button" className="btn" disabled={busy} onClick={() => send({ answer: 'reject' })}>
+              Reject
+            </button>
+          </div>
+        </>
+      )}
+
+      {p.kind === 'need_password' && (
+        <>
+          <div className="kv">
+            {p.domain && <div><span>Domain</span>{p.domain}</div>}
+          </div>
+          <div className="qcard__note">
+            The backend types the saved password in and submits the sign-in form when the browser
+            is really on this site; the agent never sees it.
+          </div>
         </>
       )}
 

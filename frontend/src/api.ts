@@ -138,6 +138,10 @@ export interface AskPayload {
   sensitive: boolean
   domain?: string
   email?: string
+  login_url?: string
+  url?: string
+  /** approve_account: the browser's real page urls, added by the backend. */
+  page_urls?: string[]
   terms_summary?: string
 }
 

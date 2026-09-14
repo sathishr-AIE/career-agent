@@ -19,13 +19,14 @@ from pathlib import Path
 import docx
 from pydantic import ValidationError
 
-from career_agent import chat, outcomes, store, tailor
+from career_agent import chat, credentials, outcomes, store, tailor
 from career_agent.apply import agent as agent_mod
 from career_agent.apply import ats as ats_apply
-from career_agent.apply import checkpoint
+from career_agent.apply import checkpoint, secret_fill
 from career_agent.config import (SCORING_MODELS, CandidateProfile,
                                  CareerBrief, load_brief, save_brief,
                                  save_candidate_profile)
+from career_agent.security import load_key
 from career_agent.web import context, intent, pipeline, worker
 
 log = logging.getLogger(__name__)
@@ -229,15 +230,109 @@ def _checkpoint_answer(conn, job_id: int, prompt_id: int, kind: str, payload: di
     if kind == "confirm":
         answers = body.get("changes", {})
     else:
-        answers = {} if payload.get("sensitive") else {payload.get("question", kind): body["answer"]}
+        answers = {} if payload.get("sensitive") or kind == "need_password" else {payload.get("question", kind): body["answer"]}
     try:
         checkpoint.mark_running(conn, job_id, f"answered {prompt_id}", answers)
     except Exception:
         log.warning("could not checkpoint answer %s for job %s", prompt_id, job_id, exc_info=True)
 
 
+class _NotSubmitted(Exception):
+    """No empty password field on a real https page of the domain."""
+
+
+_NOT_SUBMITTED_WHY = {
+    "no_field": "no empty password field on an https {domain} page",
+    "ambiguous_form": "the page shows more than one login form -- open just the sign-in "
+                      "or sign-up form",
+    "navigated": "the page changed during the fill",
+    "no_submit": "the form did not submit",
+    "value_persists": "the page kept the password in a field after it was cleared",
+}
+
+
+def _not_submitted(result: dict, domain: str) -> str:
+    why = _NOT_SUBMITTED_WHY.get(result["reason"], result["reason"]).format(domain=domain)
+    return f"{why}; the browser is on: {', '.join(result['pages']) or 'no pages'}"
+
+
+def _uncleared(result: dict) -> str:
+    return "" if result["cleared"] else "; the password field could not be cleared"
+
+
+def _submit_saved_login(conn, run, payload: dict) -> tuple[dict, str]:
+    """need_password: secret_fill types the saved password into the REAL page
+    of the domain and submits the sign-in form; the agent continues from the
+    resulting page. Its `url` is informational (an injected page can make it
+    lie), and a stored row for a shared suffix is never used."""
+    domain = payload.get("domain") or ""
+    none = {"id": payload.get("id"), "answer": "none"}
+    try:
+        credentials.account_domain(domain)
+    except ValueError:
+        return none, f"Did not use a saved login for {domain}: not a site a login can belong to"
+    cred = credentials.get(conn, domain)
+    if cred is None:
+        return none, f"No saved login for {domain}"
+    run.secrets.add(cred["password"])       # defence in depth: scrubbed if it ever echoes
+    result = secret_fill.fill_and_submit(domain, cred["password"], max_fields=1)
+    if not result["submitted"]:
+        return none, f"Did not use the saved login for {domain}: {_not_submitted(result, domain)}"
+    return ({"id": payload.get("id"), "submitted": True},
+            f"Submitted the saved login for {domain} on {result['page_url']}"
+            + _uncleared(result))
+
+
+def _create_login(conn, run, payload: dict, body: dict) -> tuple[dict, str]:
+    """approve_account's approve: a generated password is filled into the
+    sign-up form and submitted by secret_fill -- that submit is the Create
+    click -- and stored right after the submit, before the field is cleared.
+    ponytail: a sign-up the site rejects server-side still leaves the row
+    (a failed creation looks like a success from here); the user deletes it
+    in Logins."""
+    domain = payload["domain"]
+    pw = credentials.generate_password()
+    load_key()                              # a key problem surfaces before anything is typed
+    run.secrets.add(pw)                     # defence in depth: scrubbed if it ever echoes
+    result = secret_fill.fill_and_submit(domain, pw, after_submit=lambda: credentials.put(
+        conn, domain, payload["login_url"], payload["email"], pw, "agent"))
+    if not result["submitted"]:
+        raise _NotSubmitted(f"Did not create the login for {domain}: "
+                            f"{_not_submitted(result, domain)}")
+    return ({**body, "submitted": True},
+            f"Saved login for {domain} (submitted on {result['page_url']})" + _uncleared(result))
+
+
+def _account_refusal(conn, run, row, prompt_id: int, payload: dict) -> dict | None:
+    """approve_account's checks before the claim. The domain must be one an
+    account can be saved for, and the agent's login_url must be on it (the
+    fill itself is checked against the REAL page). An existing login is never
+    re-created: the agent is told "exists" so it signs in with it."""
+    try:
+        domain = credentials.account_domain(payload.get("domain") or "")
+    except ValueError as exc:
+        return _refuse(422, str(exc))
+    if not credentials.host_matches(payload.get("login_url") or "", domain):
+        shown = secret_fill.display_url(payload.get("login_url") or "") or "(none)"
+        return _refuse(409, f"the sign-up page {shown} "
+                            f"is not on {domain}")
+    if not any(l["domain"] == domain for l in credentials.list_(conn)):
+        return None
+    exists = {"id": payload.get("id"), "answer": "exists"}
+    if chat.answer_prompt_row(conn, prompt_id, exists) is None:
+        return _refuse(409, _CLOSED)
+    if not run.send(agent_mod.answer_line(run.nonce, "approve_account", exists)):
+        chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
+        return _refuse(409, _NO_RUN)
+    chat.post_message(conn, row["conversation_id"], "system",
+                      f"A login already exists for {domain}; the agent will sign in with it")
+    return _refuse(409, f"a login already exists for {domain}; use it, or delete it in "
+                        "Logins first")
+
+
 def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
-                  conn_factory=None, *, brief_path: Path | None = None,
+                  conn_factory=None, *, auto: bool = False,
+                  brief_path: Path | None = None,
                   profile_path: Path | None = None, db_path: Path | None = None,
                   tasks: set | None = None, run_conn_factory=None) -> dict:
     """Answer one open ASK/CONFIRM card: validate it against the prompt's
@@ -259,8 +354,10 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
     if row["status"] != "open":
         return _refuse(409, _CLOSED)
     kind, payload = row["kind"], json.loads(row["payload"])
-    if kind in ("need_password", "approve_account"):
-        return _refuse(422, "Account actions arrive in a later slice.")
+    if kind == "need_password" and not auto:
+        # Only the backend's own on-ASK path answers these (ats._chat_events,
+        # auto=True): a human answer has nothing to add and must not fill.
+        return _refuse(422, "The backend answers password requests itself")
     answer = answer if isinstance(answer, dict) else {}
 
     if kind == "confirm":
@@ -285,7 +382,7 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
             return _refuse(422, "Pick one of the offered options")
         if kind == "text" and not (isinstance(value, str) and value.strip()):
             return _refuse(422, "The answer can't be empty")
-        if kind == "approve" and value not in ("approve", "reject"):
+        if kind in ("approve", "approve_account") and value not in ("approve", "reject"):
             return _refuse(422, "answer must be approve or reject")
         if kind == "text":
             value = value.strip()
@@ -293,6 +390,10 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
                 "remember": bool(answer.get("remember", True))}
         shown = "(hidden)" if payload.get("sensitive") else value
         summary = f"{payload.get('question', kind)} → {shown}"
+        if kind == "approve_account":
+            body = {"id": payload.get("id"), "answer": value}
+            summary = (f"{'Approved' if value == 'approve' else 'Rejected'} creating an "
+                       f"account at {payload.get('domain')}")
 
     if payload.get("origin") == "needs_answer":
         # A parked job, not a live run: nothing to relay. The answer goes to
@@ -314,22 +415,48 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
     if (prompt_id <= getattr(getattr(run, "events", None), "prompt_baseline", float("inf"))
             or newest is None or newest["id"] != prompt_id):
         return _refuse(409, _CLOSED)
+    sent, notice = body, None   # what the agent gets; neither it nor `body` holds a password
+    if kind == "approve_account" and value == "approve":
+        refused = _account_refusal(conn, run, row, prompt_id, payload)
+        if refused:
+            return refused
+    if kind == "need_password":
+        body, summary = {"id": payload.get("id"), "answer": "by_backend"}, None
     if chat.answer_prompt_row(conn, prompt_id, body) is None:
         return _refuse(409, _CLOSED)            # answered concurrently
+    # Claimed first: a double answer can't fill twice, or store one password and
+    # submit another. A failure reopens the card; nothing is stored unsubmitted.
+    try:
+        if kind == "need_password":
+            sent, notice = _submit_saved_login(conn, run, payload)
+        elif kind == "approve_account" and value == "approve":
+            sent, notice = _create_login(conn, run, payload, body)
+    except _NotSubmitted as exc:
+        chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
+        chat.post_message(conn, row["conversation_id"], "system", str(exc))
+        return _refuse(409, str(exc))
+    except Exception as exc:
+        log.warning("%s fill/submit failed for prompt %s: %s", kind, prompt_id,
+                    type(exc).__name__)
+        chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
+        return _refuse(503, "Could not use the login in the browser; try again")
     if kind == "confirm" and decision == "approve":
         # Before the send: a crash just after it must never leave the session resumable.
         try:
             checkpoint.mark_approve_sent(conn, row["job_id"])
         except Exception:
             log.warning("could not checkpoint the approve for job %s", row["job_id"], exc_info=True)
-    if not run.send(agent_mod.answer_line(run.nonce, kind, body)):
+    if not run.send(agent_mod.answer_line(run.nonce, kind, sent)):
         chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
         return _refuse(409, _NO_RUN)
     _checkpoint_answer(conn, row["job_id"], prompt_id, kind, payload, body)
     # The answer is already sent and recorded at this point -- posting the
     # summary first means a memory-store hiccup below can never turn a
     # delivered answer into a failed response (see the two try/excepts).
-    chat.post_message(conn, row["conversation_id"], "user", summary)
+    if summary:
+        chat.post_message(conn, row["conversation_id"], "user", summary)
+    if notice:                                  # never the password itself
+        chat.post_message(conn, row["conversation_id"], "system", notice)
     # Remember a successfully-sent choice/text answer for next time, unless
     # the human opted out or the card was marked sensitive (never store a
     # password/SSN-shaped answer in qa_bank; qa_remember itself also

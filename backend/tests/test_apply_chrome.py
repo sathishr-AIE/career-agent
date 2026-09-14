@@ -56,3 +56,15 @@ def test_ensure_profile_returns_an_absolute_path(tmp_path, monkeypatch):
     (tmp_path / "prof" / "Default").mkdir(parents=True)  # already cloned: no copy
     monkeypatch.setattr(chrome, "PROFILE_DIR", Path("prof"))
     assert chrome.ensure_profile().is_absolute()
+
+
+def test_saved_passwords_are_never_cloned_into_the_agent_profile():
+    """M-4: the agent's Chrome must not carry the user's saved passwords
+    (Login Data is Chrome's password store, in the profile's Default dir)."""
+    import shutil
+    ignore = shutil.ignore_patterns(*chrome._SKIP_ON_CLONE)
+    names = ["Login Data", "Login Data-journal", "Login Data For Account",
+             "Login Data For Account-journal", "Cookies", "Preferences"]
+    assert ignore("Default", names) == {"Login Data", "Login Data-journal",
+                                        "Login Data For Account",
+                                        "Login Data For Account-journal"}

@@ -18,7 +18,12 @@ PROFILE_DIR = Path("data/chrome-profile")
 _SKIP_ON_CLONE = {"Cache", "Code Cache", "GPUCache", "ShaderCache",
                   "GrShaderCache", "Service Worker", "CacheStorage",
                   "Crashpad", "Temp", "SingletonLock", "SingletonSocket",
-                  "SingletonCookie", "BrowserMetrics", "SafeBrowsing"}
+                  "SingletonCookie", "BrowserMetrics", "SafeBrowsing",
+                  # Chrome's saved-password store (and its journals): the agent's
+                  # browser must never autofill or expose the user's own logins.
+                  # A profile cloned before this was added keeps its copy --
+                  # delete data/chrome-profile to re-clone without it.
+                  "Login Data*", "Login Data For Account*"}
 
 _CHROME_CANDIDATES = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -78,7 +83,9 @@ def _user_profile_source() -> Path:
 def ensure_profile() -> Path:
     """One-time clone of the user's Chrome profile (cookies, sessions,
     fingerprint). Chrome must be closed during the first clone or files
-    are locked -- the copy skips what it can't read."""
+    are locked -- the copy skips what it can't read. Saved passwords (Login
+    Data*) are never copied; an existing clone is left as it is, so one made
+    before that rule keeps its copy until data/chrome-profile is deleted."""
     if (PROFILE_DIR / "Default").exists():
         return PROFILE_DIR.resolve()  # relative makes Chrome join a running session
     src = _user_profile_source()
