@@ -529,6 +529,17 @@ def _record_outcome(conn, job_id: int, app_id: int, url: str, result,
         conn.commit()
         return {"ok": True, "job_id": job_id, "status": "draft"}
 
+    from career_agent import store      # local: store imports this module
+    if code == "needs_answer" and store.is_secret_card("text", {"question": result.reason}):
+        # A secret is never asked in chat, so this can't park on a card: a
+        # permanent failure, the same account_required a 2FA/OTP code ends in.
+        conn.execute("UPDATE application SET status = 'failed_permanent', failure_reason ="
+                     " 'account_required', transcript_path = ? WHERE id = ? AND status = 'in_flight'",
+                     (result.transcript_path or None, app_id))
+        event("failed_permanent", f"account_required: secret asked ({result.reason})")
+        conn.commit()
+        return {"ok": False, "secret_question": result.reason,
+                "reason": "failed_permanent: account_required"}
     if code in ("captcha", "needs_answer"):
         # Nothing was sent: the attempt leaves no row.
         conn.execute("DELETE FROM application WHERE id = ?"
@@ -858,6 +869,11 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
     _checkpoint(checkpoint.mark_resumable if outcome.get("resumable") else checkpoint.finish,
                 conn, job_id)
     chat.expire_open_prompts(conn, job_id)
+    if outcome.get("secret_question"):
+        q = outcome.pop("secret_question")
+        _say(conn, job_id, f"The agent asked for a secret ({q if len(q) <= 80 else q[:79] + '…'})."
+             " Secrets are never typed into chat — saved logins are filled by the backend;"
+             " manage them in Logins.")
     if outcome.get("needs_answer"):
         # The worker parks on this; the card is how the human unparks it
         # (actions.answer_prompt answers origin needs_answer with no live run).

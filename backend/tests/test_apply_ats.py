@@ -2586,3 +2586,23 @@ async def test_two_queued_submits_for_one_job_run_one_session(conn):
     assert calls == [1]
     assert sorted([a["ok"], b["ok"]]) == [False, True]
     assert len(_apps(conn)) == 1
+
+
+# -- final review follow-up: a secret-shaped NEEDS_ANSWER never parks ----------
+
+async def test_a_secret_needs_answer_opens_no_card_and_fails_permanently(conn):
+    r = await _submit(conn, mode="manual",
+                      run_agent=fake_agent(AgentResult("needs_answer", "Enter the one-time OTP")))
+    assert not r["ok"] and not r.get("needs_answer")
+    assert chat.open_prompt_for_job(conn, 1) is None
+    row = _apps(conn)[-1]
+    assert (row["status"], row["failure_reason"]) == ("failed_permanent", "account_required")
+    texts = [m["content"] for m in chat.messages_after(conn, chat.conversation_for_job(conn, 1))]
+    assert any("Secrets are never typed into chat" in t for t in texts), texts
+
+
+async def test_an_ordinary_needs_answer_still_opens_its_card(conn):
+    r = await _submit(conn, mode="manual",
+                      run_agent=fake_agent(AgentResult("needs_answer", "Do you have a PMP?")))
+    assert r["needs_answer"] == "Do you have a PMP?" and _apps(conn) == []
+    assert chat.open_prompt_for_job(conn, 1) is not None

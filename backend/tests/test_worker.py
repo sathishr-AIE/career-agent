@@ -959,3 +959,34 @@ def test_startup_sweep_says_nothing_when_nothing_was_interrupted(conn, monkeypat
     monkeypatch.setattr(agent_mod, "RUNS", {})
     worker.startup_sweep(conn)
     assert not any("interrupted" in t for t in _texts(conn, None))
+
+
+async def test_a_secret_needs_answer_does_not_park_the_worker(conn, brief_path, profile_path, monkeypatch):
+    """Follow-up to C1: the real submit() records it as a failure, so the worker moves on."""
+    import functools
+    from career_agent import chat
+    from career_agent.apply.agent import AgentResult
+
+    first, second = _job(conn, "secret-q", score=90), _job(conn, "next", score=80)
+    conn.execute("INSERT INTO resume (version, path) VALUES ('base-v1', 'r.docx')")
+    conn.commit()
+    seen = []
+
+    async def runner(prompt, jid, nonce, events, session_id=None, resume=False):
+        seen.append(jid)
+        return AgentResult("needs_answer", "Your account password?")
+
+    async def fake_tailor(conn, job_id, brief_path):
+        return "base-v1"
+    monkeypatch.setattr(worker, "tailor_for_apply", fake_tailor)
+    monkeypatch.setattr(worker.ats_apply, "_stage_resume", lambda *a: "r.docx")
+    monkeypatch.setattr(worker.ats_apply.Path, "exists", lambda self: True)
+    monkeypatch.setattr(worker.ats_apply, "submit",
+                        functools.partial(worker.ats_apply.submit, run_agent=runner))
+    worker.set_run_state(conn, "apply", status="running", mode="manual")
+    await worker.apply_tick(conn, brief_path, profile_path)
+    state = worker.get_run_state(conn, "apply")
+    assert (state["status"], state["current_job_id"]) == ("running", None)
+    assert chat.open_prompt_for_job(conn, first) is None
+    await worker.apply_tick(conn, brief_path, profile_path)
+    assert seen == [first, second]
