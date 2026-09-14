@@ -1,5 +1,14 @@
 # LLD v2 — The Apply Flow, Agentic Edition
 
+> **Status (2026-09-14): superseded for interaction** by
+> [the chat-first agent spec](superpowers/specs/2026-09-13-chat-first-agent-design.md).
+> The one-shot draft/send prompt modes, `dry_run`, draft pinning and the
+> `/applications` "Answer needed" card below are historical. A run is now a live
+> stream-json session that asks questions in chat (ASK/CONFIRM), checkpoints and
+> resumes, and handles site logins without the agent holding a password. The engine,
+> sandbox flags, `application` state machine and kill switch described here remain the
+> substrate. See §5's note for the current `submit()` contract.
+
 *Status: implemented, on branch `feat/agentic-apply-p0` (commits `8059203..1dbd5cf`).
 Supersedes the apply-engine half of
 [lld-apply-button.md](lld-apply-button.md); everything upstream of `submit()` (queue
@@ -245,6 +254,27 @@ gap — a draft review can take hours).
 ---
 
 ## 5. `apply/ats.py` — `submit()` rewritten internals
+
+> **Note (chat-first, 2026-09-14): the signature below is historical.** The current one is
+> `submit(conn, job_id, mode, brief, profile, resume_version=None, run_agent=None,
+> conn_factory=None, resume=False)`.
+>
+> - **`mode` replaces `dry_run`.** `"manual"`: every CONFIRM waits for a human DECISION in
+>   the job chat. `"auto"`: the CONFIRM is approved on the spot.
+> - **`can_submit` decides what an approval means.** `can_submit = SUBMISSION_IMPLEMENTED
+>   or run_agent is not None`. It either clicks Submit (`APPLIED`) or stops at
+>   `DRAFT_READY`. One session per job in both modes: there is no separate draft run
+>   followed by a send run, and no draft pinning.
+> - **`conn_factory`** narrates the run into the job's conversation.
+> - **`resume=True`** continues a `resumable` `apply_checkpoint` with `--resume` on the same
+>   session and nonce. It falls back to a fresh session with the checkpoint's answers
+>   pinned, and is capped at `MAX_RESUMES`.
+> - **`run_agent`**, the test seam, is now called as `(prompt, job_id, nonce, events,
+>   session_id=None, resume=False)`.
+>
+> Outcomes still resolve through the §5.2 buckets, with `held_unknown` only when
+> `can_submit`. See the [chat-first spec](superpowers/specs/2026-09-13-chat-first-agent-design.md)
+> §3–S3.
 
 Public contract unchanged: `submit(conn, job_id, dry_run, brief, profile, resume_version,
 run_agent=None)` returning the same `{"ok": ..., "reason": ...}` dicts. The
