@@ -1511,7 +1511,8 @@ async def test_need_password_is_submitted_on_ask_and_logins_reach_the_prompt(con
     async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
         run = runs[jid] = FakeRun(nonce, events)
         seen["prompt"] = prompt
-        _waiting_on(run, events, "ask", _need())
+        # on_ask runs on AgentRun's reader thread in production, never the loop
+        await asyncio.to_thread(_waiting_on, run, events, "ask", _need())
         seen["sent"] = list(run.sent)
         return AgentResult("draft_ready")
 

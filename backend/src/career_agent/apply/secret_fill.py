@@ -13,8 +13,11 @@ fill_and_submit attaches to the apply Chrome over CDP (apply/chrome.py, port
 re-checked before every fill.
 
 Sync Playwright API on purpose: the callers are AgentRun's reader thread
-(ats._chat_events) and FastAPI's threadpool (api_chat's answer route is a plain
-def). Neither has a running asyncio loop, the one place the sync API refuses."""
+(ats._chat_events) and the answer route's worker thread (Task 20 runs non-Home
+answers through run_in_threadpool). Neither has a running asyncio loop, the one
+place the sync API refuses -- _require_no_running_loop makes a regression fail
+loudly instead of stalling the server."""
+import asyncio
 import time
 from contextlib import contextmanager
 from urllib.parse import urlsplit
@@ -52,6 +55,18 @@ def display_url(url: str) -> str:
     if not parts.netloc:
         return f"{parts.scheme}:{parts.path}" if parts.scheme else parts.path
     return f"{parts.scheme}://{parts.hostname or ''}{port}{parts.path}"
+
+
+def _require_no_running_loop() -> None:
+    """Fail loudly on an asyncio event loop: Playwright's sync API raises there
+    anyway, and a blocking CDP fill would stall the whole server. Callers run
+    this from a worker thread (the runner's reader thread, run_in_threadpool)."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise RuntimeError("secret_fill must not run on an asyncio event loop -- "
+                       "call it from a worker thread (e.g. run_in_threadpool)")
 
 
 def _pages(browser) -> list:
@@ -97,6 +112,7 @@ def _submit_and_wait(page, frame, handles, wait_s: float) -> None:
 
 def page_urls(*, cdp_url: str = CDP_URL, connect=None) -> list[str]:
     """The browser's real page urls (display form) -- never what the agent says."""
+    _require_no_running_loop()
     with (connect or _live_connect)(cdp_url) as browser:
         return [display_url(page.url) for page in _pages(browser)]
 
@@ -114,6 +130,7 @@ def fill_and_submit(domain: str, password: str, *, cdp_url: str = CDP_URL,
     password. A frame that navigates away mid-fill is cleared, never
     submitted. `connect` (cdp_url -> context manager yielding a browser) is
     the test seam."""
+    _require_no_running_loop()
     wait_s = SUBMIT_WAIT_S if wait_s is None else wait_s
     with (connect or _live_connect)(cdp_url) as browser:
         pages = _pages(browser)

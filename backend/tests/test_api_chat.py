@@ -39,7 +39,11 @@ def conn(db_path):
 
 @pytest.fixture
 def client(db_path, monkeypatch):
+    from career_agent.web import intent
     monkeypatch.setattr(web, "DB_PATH", db_path)
+    # A Home message routes through `claude`: never spawn it from a test.
+    monkeypatch.setattr(intent, "_default_runner",
+                        lambda prompt, schema: {"intent": "help", "job_ref": None, "reply": "hi"})
     return TestClient(web.app)
 
 
@@ -407,3 +411,297 @@ async def test_a_continue_never_re_arms_a_checkpoint_it_no_longer_holds(db_path,
     assert actions.resume_job(c, 1, "brief", "profile", None, tasks)["ok"]
     await asyncio.gather(*tasks)
     assert checkpoint.get(c, 1)["auto_resumed"] == 1
+
+
+# -- Task 20: Home chat commands ----------------------------------------------
+
+import asyncio      # noqa: E402
+import json         # noqa: E402
+import threading    # noqa: E402
+
+from career_agent.apply import agent as agent_mod   # noqa: E402
+from career_agent.web import intent as intent_mod   # noqa: E402
+from career_agent.web import worker as worker_mod   # noqa: E402
+
+_EXPIRED = "That request expired — ask again"
+
+
+def _runner(name, job_ref=None, reply="Sure."):
+    return lambda prompt, schema: {"intent": name, "job_ref": job_ref, "reply": reply}
+
+
+async def _say(conn, text, runner, tmp_path, tasks=None):
+    return await actions.home_message(conn, text, _brief(tmp_path), tmp_path / "profile.toml",
+                                      None, runner=runner, tasks=tasks)
+
+
+def _home(conn):
+    return chat.messages_after(conn, chat.home_conversation(conn))
+
+
+def _home_prompt(conn):
+    return chat.open_prompt_for_conversation(conn, chat.home_conversation(conn))
+
+
+def _open_home(conn, action="apply_to", args=None, question="Start?"):
+    return chat.open_home_prompt(conn, "approve", {
+        "origin": "home", "kind": "approve", "action": action,
+        "args": {"job_id": 1} if args is None else args, "question": question})
+
+
+async def test_home_help_replies_straight_away(conn, tmp_path):
+    r = await _say(conn, "what can you do", _runner("help"), tmp_path)
+    msgs = _home(conn)
+    assert r["ok"] and msgs[-2]["role"] == "user" and msgs[-2]["id"] == r["message_id"]
+    assert msgs[-1]["role"] == "agent" and "apply to" in msgs[-1]["content"]
+    assert _home_prompt(conn) is None
+
+
+async def test_home_show_queue_lists_queued_jobs_only(conn, tmp_path):
+    await _say(conn, "what's my queue?", _runner("show_queue"), tmp_path)
+    reply = _home(conn)[-1]["content"]
+    assert "#1 Acme — AI Engineer" in reply and "Globex" not in reply
+
+
+async def test_home_status_reports_the_run_and_the_queue(conn, tmp_path):
+    await _say(conn, "status?", _runner("status"), tmp_path)
+    reply = _home(conn)[-1]["content"]
+    assert "Apply run: idle" in reply and "1 queued" in reply and "Discovery: idle" in reply
+
+
+async def test_home_find_jobs_asks_first(conn, tmp_path):
+    await _say(conn, "find me jobs", _runner("find_jobs"), tmp_path)
+    row = _home_prompt(conn)
+    payload = json.loads(row["payload"])
+    assert row["kind"] == "approve" and row["job_id"] is None
+    assert payload == {"origin": "home", "kind": "approve", "action": "find_jobs", "args": {},
+                       "question": "Run discovery now? (uses Apify + scoring credits)"}
+    assert worker_mod.get_run_state(conn, "pipeline")["status"] == "idle"   # nothing ran yet
+
+
+async def test_home_apply_to_one_match_asks_first(conn, tmp_path):
+    await _say(conn, "apply to #1", _runner("apply_to", "#1"), tmp_path)
+    payload = json.loads(_home_prompt(conn)["payload"])
+    assert (payload["action"], payload["args"]) == ("apply_to", {"job_id": 1})
+    assert payload["question"] == "Start applying to AI Engineer at Acme (#1)?"
+    assert _home(conn)[-1]["role"] == "prompt"
+
+
+async def test_home_apply_to_no_match_replies_without_a_prompt(conn, tmp_path):
+    await _say(conn, "apply to Initech", _runner("apply_to", "Initech"), tmp_path)
+    assert _home_prompt(conn) is None
+    assert "Initech" in _home(conn)[-1]["content"]
+
+
+async def test_home_apply_to_many_matches_lists_them(conn, tmp_path):
+    conn.execute("INSERT INTO job (fingerprint, source, external_id, company,"
+                 " company_normalized, title, title_normalized, url)"
+                 " VALUES ('fp3','ats','3','Acme','acme','Data Engineer','dataengineer','https://x/3')")
+    conn.execute("INSERT INTO assessment (job_id, stage, role_fit, credibility, opportunity,"
+                 " application_quality, eligibility_soft, weighted_score, verdict, rationale,"
+                 " model, prompt_version) VALUES (3,'scored',90,90,90,90,90,88,'hold','ok','m','gate-v1')")
+    conn.commit()
+    await _say(conn, "apply to acme", _runner("apply_to", "acme"), tmp_path)
+    assert _home_prompt(conn) is None
+    reply = _home(conn)[-1]["content"]
+    assert "#1" in reply and "#3" in reply
+
+
+async def test_home_pause_resume_stop_call_the_run_controls(conn, tmp_path, monkeypatch):
+    ticks = []
+
+    async def fake_tick(*a, **kw):
+        ticks.append(1)
+    monkeypatch.setattr(actions.worker, "apply_tick", fake_tick)
+    await _say(conn, "pause", _runner("pause_apply"), tmp_path)
+    assert worker_mod.get_run_state(conn, "apply")["status"] == "paused"
+    assert "paused" in _home(conn)[-1]["content"]
+    tasks = set()
+    await _say(conn, "resume", _runner("resume_apply"), tmp_path, tasks)
+    await asyncio.gather(*tasks)
+    assert worker_mod.get_run_state(conn, "apply")["status"] == "running" and ticks == [1]
+    await _say(conn, "stop", _runner("stop_apply"), tmp_path)
+    assert worker_mod.get_run_state(conn, "apply")["status"] == "stopped"
+    assert _home_prompt(conn) is None
+
+
+async def test_home_routing_failure_gets_a_helpful_reply(conn, tmp_path):
+    def broken(prompt, schema):
+        raise RuntimeError("claude CLI not found")
+    r = await _say(conn, "apply to #1", broken, tmp_path)
+    reply = _home(conn)[-1]
+    assert r["ok"] and reply["role"] == "agent" and "claude" in reply["content"]
+    assert "help" in reply["content"].lower() and _home_prompt(conn) is None
+
+
+async def test_home_unknown_intent_suggests_help(conn, tmp_path):
+    await _say(conn, "sing", _runner("unknown", reply="I can't sing."), tmp_path)
+    reply = _home(conn)[-1]["content"]
+    assert reply.startswith("I can't sing.") and "apply to" in reply
+
+
+async def test_home_routing_does_not_block_the_event_loop(conn, tmp_path):
+    started, release = threading.Event(), threading.Event()
+
+    def slow(prompt, schema):
+        started.set()
+        release.wait(2)
+        return {"intent": "help", "job_ref": None, "reply": "hi"}
+    task = asyncio.create_task(_say(conn, "help", slow, tmp_path))
+    await asyncio.to_thread(started.wait, 2)
+    assert started.is_set() and not task.done()     # the loop ran while the runner waits
+    release.set()
+    assert (await task)["ok"]
+
+
+def test_home_post_routes_and_surfaces_the_card(client, conn, monkeypatch):
+    monkeypatch.setattr(intent_mod, "_default_runner", _runner("apply_to", "#1"))
+    home = client.get("/api/chat/conversations").json()["home_id"]
+    assert client.post(f"/api/chat/{home}/messages", json={"text": "apply to #1"}).json()["ok"]
+    r = client.get(f"/api/chat/{home}/messages").json()
+    assert r["open_prompt"]["kind"] == "approve"
+    assert r["open_prompt"]["payload"]["question"] == "Start applying to AI Engineer at Acme (#1)?"
+    assert "Commands arrive" not in str(r["messages"])
+
+
+def test_a_job_conversation_post_is_unchanged(client, conn, monkeypatch):
+    monkeypatch.setattr(intent_mod, "_default_runner", lambda *a: pytest.fail("routed a job chat"))
+    cid = chat.conversation_for_job(conn, 1)
+    assert client.post(f"/api/chat/{cid}/messages", json={"text": "hi"}).json()["ok"]
+    assert [m["role"] for m in chat.messages_after(conn, cid)] == ["user"]
+
+
+@pytest.fixture
+def fake_apply(monkeypatch):
+    calls = []
+
+    async def fake(conn, job_id, allow_skip, event, brief_path, candidate_profile_path,
+                   conn_factory=None):
+        calls.append((job_id, allow_skip, event))
+        return {"ok": True, "message": "Applied"}
+    monkeypatch.setattr(actions, "do_apply", fake)
+    return calls
+
+
+def _answer(conn, pid, decision, tmp_path, tasks=None):
+    return actions.answer_prompt(conn, pid, {"answer": decision}, None,
+                                 brief_path=_brief(tmp_path), profile_path=tmp_path / "p.toml",
+                                 db_path=tmp_path / "t.db", tasks=tasks)
+
+
+async def test_approving_apply_to_dispatches_do_apply(conn, runs, tmp_path, fake_apply):
+    pid = _open_home(conn)
+    tasks = set()
+    r = _answer(conn, pid, "approve", tmp_path, tasks)
+    assert r["ok"] and r["job_id"] == 1
+    await asyncio.gather(*tasks)
+    assert fake_apply == [(1, False, "human_applied")]
+    msgs = _home(conn)
+    started = next(m for m in msgs if m["content"].startswith("Started — follow along"))
+    assert "#1" in started["content"]
+    assert started["payload"] == {"job_id": 1, "conversation_id": chat.conversation_for_job(conn, 1)}
+    assert msgs[-1]["content"] == "#1: Applied"
+    assert conn.execute("SELECT status FROM agent_prompt WHERE id = ?", (pid,)).fetchone()[0] == "answered"
+
+
+async def test_approving_apply_to_respects_a_blocking_status(conn, runs, tmp_path, fake_apply):
+    conn.execute("INSERT INTO application (job_id, resume_version, status) VALUES (1, 'v', 'held_unknown')")
+    conn.commit()
+    pid = _open_home(conn)
+    tasks = set()
+    r = _answer(conn, pid, "approve", tmp_path, tasks)
+    assert r["code"] == 409 and "held_unknown" in r["message"]
+    assert not tasks and fake_apply == []
+    assert "held_unknown" in _home(conn)[-1]["content"]
+
+
+async def test_approving_apply_to_a_vanished_job_refuses(conn, runs, tmp_path, fake_apply):
+    pid = _open_home(conn, args={"job_id": 999})
+    r = _answer(conn, pid, "approve", tmp_path)
+    assert r["code"] == 409 and "#999" in r["message"] and fake_apply == []
+
+
+async def test_approving_find_jobs_uses_run_now(conn, runs, tmp_path, monkeypatch):
+    ran = []
+
+    async def fake_background(*a, **kw):
+        ran.append(a)
+    monkeypatch.setattr(actions.pipeline, "run_background", fake_background)
+    pid = _open_home(conn, action="find_jobs", args={})
+    tasks = set()
+    assert _answer(conn, pid, "approve", tmp_path, tasks)["ok"]
+    await asyncio.gather(*tasks)
+    assert ran and worker_mod.get_run_state(conn, "pipeline")["status"] == "running"
+    assert "Discovery started" in _home(conn)[-1]["content"]
+    again = _open_home(conn, action="find_jobs", args={})
+    r = _answer(conn, again, "approve", tmp_path, set())
+    assert r["code"] == 409 and "already in progress" in _home(conn)[-1]["content"]
+
+
+async def test_rejecting_a_home_prompt_cancels(conn, runs, tmp_path, fake_apply):
+    pid = _open_home(conn)
+    tasks = set()
+    r = _answer(conn, pid, "reject", tmp_path, tasks)
+    assert r["ok"] and not tasks and fake_apply == []
+    assert _home(conn)[-1]["content"] == "Cancelled"
+    assert conn.execute("SELECT status FROM agent_prompt WHERE id = ?", (pid,)).fetchone()[0] == "answered"
+
+
+async def test_a_stale_home_prompt_is_expired(conn, runs, tmp_path, fake_apply):
+    pid = _open_home(conn)
+    conn.execute("UPDATE agent_prompt SET created_at = datetime('now', '-11 minutes') WHERE id = ?", (pid,))
+    conn.commit()
+    r = _answer(conn, pid, "approve", tmp_path)
+    assert (r["code"], r["message"]) == (409, _EXPIRED) and fake_apply == []
+    assert conn.execute("SELECT status FROM agent_prompt WHERE id = ?", (pid,)).fetchone()[0] == "expired"
+
+
+async def test_a_superseded_home_prompt_is_expired(conn, runs, tmp_path, fake_apply):
+    older = _open_home(conn)
+    newer = _open_home(conn, action="find_jobs", args={})
+    r = _answer(conn, older, "approve", tmp_path)
+    assert (r["code"], r["message"]) == (409, _EXPIRED) and fake_apply == []
+    assert _home_prompt(conn)["id"] == newer
+
+
+async def test_a_non_allowlisted_home_action_is_422(conn, runs, tmp_path, fake_apply):
+    pid = _open_home(conn, action="run_stop", args={})
+    r = _answer(conn, pid, "approve", tmp_path)
+    assert r["code"] == 422 and fake_apply == []
+    assert worker_mod.get_run_state(conn, "apply")["status"] == "idle"
+
+
+async def test_an_agent_ask_cannot_spoof_a_home_action(conn, runs, tmp_path, fake_apply):
+    line = agent_mod.ask_prefix("n0nce") + json.dumps({
+        "id": "x", "kind": "approve", "question": "Approve?", "origin": "home",
+        "action": "apply_to", "args": {"job_id": 1}})
+    parsed = agent_mod.parse_ask(line, "n0nce")
+    assert parsed and "origin" not in parsed
+    # Even with origin intact, an agent card lives in the job's conversation.
+    parsed["origin"] = "home"
+    pid = chat.open_prompt(conn, 1, "approve", parsed)
+    tasks = set()
+    r = _answer(conn, pid, "approve", tmp_path, tasks)
+    assert (r["code"], r["message"]) == (409, "No live agent run for this job")
+    assert not tasks and fake_apply == [] and _home(conn) == []
+
+
+def test_answering_a_home_card_over_http(client, conn, runs, monkeypatch, tmp_path):
+    monkeypatch.setattr(web, "BRIEF_PATH", _brief(tmp_path))
+    pid = _open_home(conn)
+    r = client.post(f"/api/chat/prompts/{pid}/answer", json={"answer": "reject"})
+    assert r.status_code == 200 and r.json()["message"] == "Cancelled"
+
+
+def test_an_old_db_gets_a_nullable_prompt_job_id(tmp_path):
+    c = db.connect(tmp_path / "old.db")
+    db.init_schema(c)
+    c.executescript("DROP TABLE agent_prompt; CREATE TABLE agent_prompt (id INTEGER PRIMARY KEY,"
+                    " job_id INTEGER NOT NULL REFERENCES job(id), conversation_id INTEGER NOT NULL"
+                    " REFERENCES conversation(id), kind TEXT NOT NULL, payload TEXT NOT NULL,"
+                    " status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','answered','expired')),"
+                    " answer TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT);")
+    db.init_schema(c)
+    db.init_schema(c)
+    notnull = {r["name"]: r["notnull"] for r in c.execute("PRAGMA table_info(agent_prompt)")}
+    assert notnull["job_id"] == 0 and notnull["conversation_id"] == 1

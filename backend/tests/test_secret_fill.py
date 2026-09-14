@@ -187,6 +187,17 @@ def test_display_url_drops_userinfo_query_and_fragment():
     assert secret_fill.display_url("about:blank") == "about:blank"
 
 
+async def test_it_refuses_to_run_on_an_event_loop():
+    """The answer route is async: a fill reached on the loop must fail loudly,
+    before any connection or keystroke, not stall the server."""
+    field = Field()
+    with pytest.raises(RuntimeError, match="event loop"):
+        _fill("ses.com", Page("https://ses.com/login", [field]))
+    with pytest.raises(RuntimeError, match="event loop"):
+        secret_fill.page_urls(connect=connect_to())
+    assert field.fills == []
+
+
 def test_the_conftest_guard_refuses_a_real_cdp_connection(_no_live_apply_agent):
     with pytest.raises(RuntimeError):
         secret_fill.fill_and_submit("ses.com", PW)

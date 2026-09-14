@@ -191,26 +191,10 @@ async def api_pipeline_run_now():
     Jinja route (app.pipeline_run_now) -- reusing app.py's own task registry
     here, via the deferred import, rather than a second one, so a run
     started from either frontend is tracked and cancelled the same way."""
-    import asyncio
-
     m = _app()
-    conn = m._conn()
-    state = m.worker.get_run_state(conn, "pipeline")
-    if state["status"] not in ("idle", "error"):
-        return JSONResponse(status_code=409, content={
-            "ok": False, "message": "A pipeline run is already in progress."})
-    m.worker.set_run_state(conn, "pipeline", status="running", last_error=None,
-                           stage=None, found=0, duplicates=0, passed=0,
-                           scored=0, shortlisted=0)
-    conn.execute("UPDATE run_state SET started_at = datetime('now')"
-                 " WHERE kind = 'pipeline'")
-    conn.commit()
-    m.store.log(conn, None, "pipeline_started")
-    task = asyncio.create_task(
-        m.pipeline.run_background(m._conn, m.DB_PATH, m.BRIEF_PATH))
-    m._background_tasks.add(task)
-    task.add_done_callback(m._background_tasks.discard)
-    return {"ok": True, "message": "ok"}
+    result = actions.pipeline_run_now(m._conn(), m._conn, m.DB_PATH, m.BRIEF_PATH,
+                                      m._background_tasks)
+    return result if result["ok"] else JSONResponse(status_code=409, content=result)
 
 
 @router.get("/pipeline/status")
