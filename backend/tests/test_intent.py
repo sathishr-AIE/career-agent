@@ -54,7 +54,8 @@ def test_route_coerces_invalid_runner_output_to_unknown(bad):
 
     result = intent.route("whatever", runner=runner)
     assert result == {"intent": "unknown", "job_ref": None,
-                      "reply": "Sorry, I didn't understand that. Try 'help'."}
+                      "reply": "Sorry, I didn't understand that. Try 'help'.",
+                      "failed": True}
 
 
 def test_route_runner_exception_falls_back_to_unknown_without_raising():
@@ -63,7 +64,8 @@ def test_route_runner_exception_falls_back_to_unknown_without_raising():
 
     result = intent.route("find jobs", runner=runner)
     assert result == {"intent": "unknown", "job_ref": None,
-                      "reply": "Sorry, I didn't understand that. Try 'help'."}
+                      "reply": "Sorry, I didn't understand that. Try 'help'.",
+                      "failed": True}
 
 
 def test_route_runner_timeout_falls_back_to_unknown():
@@ -90,7 +92,8 @@ def test_default_runner_refuses_when_anthropic_api_key_is_set(monkeypatch):
     result = intent.route("find me new jobs")
 
     assert result == {"intent": "unknown", "job_ref": None,
-                      "reply": "Sorry, I didn't understand that. Try 'help'."}
+                      "reply": "Sorry, I didn't understand that. Try 'help'.",
+                      "failed": True}
     assert calls == []  # subprocess.run was never reached
 
 

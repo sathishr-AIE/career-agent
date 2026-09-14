@@ -42,6 +42,9 @@ SCHEMA = {
 _MAX_INPUT = 2000
 _UNKNOWN = {"intent": "unknown", "job_ref": None,
             "reply": "Sorry, I didn't understand that. Try 'help'."}
+# What route() returns when the router itself failed (bad output, exception,
+# timeout) -- distinct from a genuine "unknown" classification.
+_FAILED = {**_UNKNOWN, "failed": True}
 
 _INTENT_MEANINGS = """\
 find_jobs   -- run a new discovery+score pass
@@ -102,14 +105,14 @@ def _default_runner(prompt: str, schema: dict) -> dict:
 
 def _coerce(result) -> dict:
     if not isinstance(result, dict):
-        return dict(_UNKNOWN)
+        return dict(_FAILED)
     intent_val = result.get("intent")
     reply = result.get("reply")
     job_ref = result.get("job_ref")
     if intent_val not in INTENTS or not isinstance(reply, str) or not reply:
-        return dict(_UNKNOWN)
+        return dict(_FAILED)
     if job_ref is not None and not isinstance(job_ref, str):
-        return dict(_UNKNOWN)
+        return dict(_FAILED)
     return {"intent": intent_val, "job_ref": job_ref, "reply": reply}
 
 
@@ -124,7 +127,7 @@ def route(text: str, *, runner=None) -> dict:
         result = runner(_build_prompt(text), SCHEMA)
     except Exception:
         log.warning("intent router: runner failed", exc_info=True)
-        return dict(_UNKNOWN)
+        return dict(_FAILED)
     return _coerce(result)
 
 

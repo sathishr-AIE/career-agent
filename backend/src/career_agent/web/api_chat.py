@@ -2,6 +2,7 @@
 api.py: app.py mounts this router, so app.py is imported at call time."""
 import json
 from fastapi import APIRouter, Body, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from career_agent import chat
@@ -38,6 +39,7 @@ def api_messages(cid: int, after: int = 0):
                          and not ats_apply._blocking_status(conn, conv["job_id"]))
         row = chat.open_prompt_for_job(conn, conv["job_id"])
     elif conv:     # Home: its confirmation cards carry no job
+        chat.expire_stale_home_prompts(conn, cid)
         row = chat.open_prompt_for_conversation(conn, cid)
     if row:
         open_prompt = {"id": row["id"], "kind": row["kind"],
@@ -85,8 +87,18 @@ async def api_answer_prompt(prompt_id: int, answer: dict = Body(...)):
     {"decision": "approve"|"change"|"cancel", "changes": {...}} for CONFIRM.
     Refusals keep the {ok, message} body with 404/409/422."""
     m = _app()
-    # On the loop: an approved Home card starts its work as a background task.
-    result = actions.answer_prompt(m._conn(), prompt_id, answer, m._chat_conn,
-                                   brief_path=m.BRIEF_PATH, profile_path=m.CANDIDATE_PROFILE_PATH,
-                                   db_path=m.DB_PATH, tasks=m._background_tasks)
+    probe = m._chat_conn()
+    try:
+        row = probe.execute("SELECT * FROM agent_prompt WHERE id = ?", (prompt_id,)).fetchone()
+        home = row is not None and actions.is_home_prompt(probe, row)
+    finally:
+        probe.close()
+    if home:    # on the loop: an approved Home card starts its work as a background task
+        result = actions.answer_prompt(m._conn(), prompt_id, answer, m._chat_conn,
+                                       brief_path=m.BRIEF_PATH, profile_path=m.CANDIDATE_PROFILE_PATH,
+                                       db_path=m.DB_PATH, tasks=m._background_tasks,
+                                       run_conn_factory=m._conn)
+    else:       # off the loop: a live run's answer does blocking work; the conn is made in the thread
+        result = await run_in_threadpool(
+            lambda: actions.answer_prompt(m._conn(), prompt_id, answer, m._chat_conn))
     return JSONResponse(status_code=200 if result["ok"] else result["code"], content=result)
