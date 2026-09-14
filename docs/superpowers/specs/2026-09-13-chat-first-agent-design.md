@@ -104,7 +104,7 @@ CONTINUE:<nonce>:{"step":"...","answers":{...}}                            # res
 
 Rules the prompt states: after emitting ASK or CONFIRM, end the turn and do nothing else
 until the matching ANSWER/DECISION arrives; never create an account or accept terms except
-after an approved `approve_account`; never type, read, or ask for a password — the backend fills it into the real page over CDP,
+after an approved `approve_account`; never type, read, or ask for a password, one-time code or other secret (a `choice`/`text` ASK that is `sensitive` or secret-shaped is never shown as a card: the backend answers `none` and posts a notice, and the answer API refuses such a card) — the backend fills a password into the real page over CDP,
 submits the form and clears the field while the agent waits (the page is untrusted, so the
 LLM must never hold the secret); emit `need_password`/`approve_account` only with every other
 field of the form complete;
@@ -156,7 +156,10 @@ checkpoint is `resumable` → new run with `--resume <session_id>` and a CONTINU
 if resume fails → fresh run with checkpoint answers pinned. Worker: on startup, any
 `running` checkpoint whose process is gone becomes `resumable`; a **Continue** button
 appears in the job chat; auto mode auto-resumes once. Answer-wait expiry → checkpoint
-`resumable`, process closed cleanly, no attempt consumed. Done when: killing the process
+`resumable`, process closed cleanly, no attempt consumed. When the run could submit, only a
+stop while parked on a card with no approve sent (answer-wait expiry, a cancel while waiting,
+a crash while `waiting`) is resumable; a timeout, crash or cancel mid-turn holds as
+`held_unknown` (the prompt alone forbids Submit without approve, and pages can inject). Done when: killing the process
 mid-form and clicking Continue finishes the same form.
 
 ### S4 — Personalized memory

@@ -187,7 +187,9 @@ Setup:
 
 Questions the agent can't answer from your profile or memory show up as cards in the
 job's chat. The session waits while you answer, and the answer reaches that same
-session. Answers are remembered for future applications; review or edit them in the
+session. A question asking for a password, one-time code or other secret is never shown
+as a card: the agent is told "none", and the chat says so. A finished draft doesn't hold
+up the queue, since the review card in the chat was the review. Answers are remembered for future applications; review or edit them in the
 Memory panel. A site that needs an account shows an Approve card. On approval the
 backend (never the agent) generates a password, fills it into the real page, submits the
 form, and saves the login encrypted. The agent is told only that the form was submitted.

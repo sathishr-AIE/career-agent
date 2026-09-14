@@ -157,9 +157,16 @@ refuses unless the job's run is live and waiting, the card is newer than the run
 card's kind. It claims the row before sending and reopens it if `run.send` refuses, so an
 answer the agent never received never reads as given. A CONFIRM approve writes
 `checkpoint.mark_approve_sent` before the DECISION goes out. Only the backend answers
-`need_password` (`auto=True`). The old needs-answer park survives as a fallback: on
-`RESULT:NEEDS_ANSWER`, `submit` opens a text card with `origin: needs_answer`, the worker
-keeps `current_job_id` set, and answering the card writes `qa_bank` and unparks the job.
+`need_password` (`auto=True`). A secret never goes through a question card: a
+`choice`/`text` ASK marked `sensitive`, or whose question or `memory_key` matches
+`store._SECRET_QA_RE` (`store.is_secret_card`), opens no card — `on_ask` answers `none`
+and posts a notice — and `answer_prompt` refuses such a card with 422. The old
+needs-answer park survives as a fallback: on `RESULT:NEEDS_ANSWER`, `submit` opens a text
+card with `origin: needs_answer`, the worker keeps `current_job_id` set, and answering
+the card writes `qa_bank` and unparks the job. That is the only park: a draft does not
+park the run (its in-session CONFIRM was the review), so a manual worker moves on and
+Apply/Continue/Home `apply_to` are not blocked. `ats.PENDING` (process-local) claims a job
+from Apply/Continue/worker tick until its run returns, so a second start is refused.
 
 **Outcomes** (`_record_outcome`; every non-submit update is guarded on
 `status = 'in_flight'`):
@@ -181,7 +188,10 @@ The row is written at start, on every card and answer, and at the end.
 
 - **Resumable stops.** A `RESUMABLE_REASONS` stop (`timeout`, `answer_timeout`,
   `agent_error`) drops its `in_flight` row and marks the checkpoint `resumable` without
-  using an attempt. This only happens if `_might_have_sent` is false. `QUEUE_WHERE` keeps
+  using an attempt. This only happens if `_might_have_sent` is false: with `can_submit`,
+  only a stop while parked on a card (`answer_timeout`, or a cancel while `run.waiting`)
+  with no approve sent is resumable; `timeout`, `agent_error` and a cancel mid-turn hold
+  as `held_unknown`, since "no Submit without approve" is only a prompt rule. `QUEUE_WHERE` keeps
   the job out of the queue meanwhile.
 - **Resuming.** `submit(resume=True)` reuses the session id and nonce with `--resume`, and
   sends a `CONTINUE` line plus PREVIOUSLY ANSWERED.
@@ -195,9 +205,12 @@ The row is written at start, on every card and answer, and at the end.
 - **Startup sweep.** `app.lifespan` runs `worker.startup_sweep` on a plain connection
   before the first `_conn()`. `sweep_orphans` makes an orphaned running or waiting
   checkpoint `resumable`, with two exceptions that are swept `done`: a session that could
-  have submitted (`can_submit`, and `approve_sent` or a non-manual mode), and a job whose
-  latest application is terminal. With the kill switch off, orphaned `in_flight` rows are
-  dropped.
+  have submitted (`can_submit`, and `approve_sent`, a non-manual mode, or status
+  `running` — a crash mid-turn), and a job whose latest application is terminal.
+  Orphaned `in_flight` rows are dropped when nothing could have been sent (kill switch
+  off, or a session swept resumable); others stay for `held_unknown`. Each interrupted
+  job's chat and Home get a notice, and the resumable count shows in Home `status` and
+  the Applications stats.
 
 **Memory.** Remembering an answer stores it under its literal question
 (`store.qa_remember`). If the card's `memory_key` is valid snake_case, it also writes a
