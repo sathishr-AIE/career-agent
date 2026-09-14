@@ -163,7 +163,8 @@ export function Chat() {
             {resumeError && <div className="qcard__error" role="alert">{resumeError}</div>}
           </div>
         )}
-        <Composer onSend={send} disabled={!cid} />
+        <Composer onSend={send} disabled={!cid}
+                 placeholder={jobId ? 'Add a note for the agent' : 'Message the agent'} />
       </main>
       <nav className="chat__rail" aria-label="Panels">
         {PANEL_KEYS.map((p) => (

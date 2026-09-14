@@ -9,8 +9,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable
 
-from career_agent.apply.agent import (_USAGE_KEYS, _kill_tree, parse_ask,
-                                      parse_confirm, strip_decoration,
+from career_agent.apply.agent import (_USAGE_KEYS, _kill_tree, note_lines,
+                                      parse_ask, parse_confirm, strip_decoration,
                                       redact_secrets, summarize_tool_input,
                                       user_message)
 
@@ -65,6 +65,7 @@ class AgentRun:
         self.done = threading.Event()
         self.waiting = threading.Event()   # ASK/CONFIRM emitted, turn ended
         self.nudges = 0
+        self.notes: list[str] = []          # queued human chat notes; see add_note()/send()
         self._lock = threading.Lock()       # send()'s check-and-clear only; never held across I/O
         # Only the writer thread touches proc.stdin: a blocking pipe write must
         # never stall the reader (nudges, close) or an HTTP answer's send().
@@ -108,14 +109,30 @@ class AgentRun:
     def send(self, text: str) -> bool:
         """Answer the agent's open ASK/CONFIRM. Refuses (False, nothing
         written) unless it is waiting on one: a stale or double answer must
-        never land mid-turn."""
+        never land mid-turn. Any notes queued by add_note() ride along in
+        this same write -- a note is never sent on its own turn, since that
+        would burn a nudge against the RESULT/CONFIRM/ASK turn logic."""
         with self._lock:
             if self.done.is_set() or not self.waiting.is_set():
                 return False
             # Clear BEFORE writing: the reader may see the next turn's ASK the
             # instant the answer lands, and its set() must not be undone.
             self.waiting.clear()
+            if self.notes:
+                notes, self.notes = self.notes, []
+                text = note_lines(self.nonce, notes) + "\n" + text
             self._write_user(text)
+            return True
+
+    def add_note(self, text: str) -> bool:
+        """Queue a human chat note for delivery with the run's next send()
+        (an ANSWER or a DECISION). Refuses once the run is done -- there is
+        no later send() to carry it, and web/actions.job_message pins it to
+        the job's checkpoint instead so a --resume still picks it up."""
+        with self._lock:
+            if self.done.is_set():
+                return False
+            self.notes.append(text)
             return True
 
     def _close_stdin(self) -> None:

@@ -21,7 +21,8 @@ def start(conn, job_id: int, session_id: str, nonce: str, mode: str | None = Non
           can_submit: bool | None = None, resume_count: int = 0) -> None:
     """A fresh session: everything resets, the counters included (resume_count
     only carries over a mode-mismatch restart). mode and can_submit are what a
-    resume must match (see ats.submit)."""
+    resume must match (see ats.submit). Notes reset too -- they were guidance
+    for the session that just ended, not for a new, unrelated one."""
     conn.execute(
         "INSERT INTO apply_checkpoint (job_id, session_id, nonce, status, mode, can_submit,"
         " resume_count) VALUES (?, ?, ?, 'running', ?, ?, ?)"
@@ -29,10 +30,21 @@ def start(conn, job_id: int, session_id: str, nonce: str, mode: str | None = Non
         " nonce = excluded.nonce, step = 'start', answers = '{}', form_url = NULL,"
         " open_prompt_id = NULL, status = 'running', mode = excluded.mode,"
         " can_submit = excluded.can_submit, approve_sent = 0, resume_count = excluded.resume_count,"
-        " auto_resumed = 0, updated_at = datetime('now')",
+        " auto_resumed = 0, notes = '[]', updated_at = datetime('now')",
         (job_id, session_id, nonce, mode, None if can_submit is None else int(can_submit),
          resume_count))
     conn.commit()
+
+
+def add_note(conn, job_id: int, text: str) -> bool:
+    """Pin a human chat note to the job's checkpoint, so a --resume's
+    CONTINUE line still carries it once a dead run's own in-memory queue
+    (runner.AgentRun.notes) is gone. Best-effort: a job with no checkpoint
+    row yet (never applied) has nothing to pin to and this is a no-op."""
+    cur = conn.execute("UPDATE apply_checkpoint SET notes = json_insert(notes, '$[#]', ?),"
+                       " updated_at = datetime('now') WHERE job_id = ?", (text, job_id))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def restart(conn, job_id: int, session_id: str, nonce: str) -> None:
@@ -109,12 +121,17 @@ def finish(conn, job_id: int) -> None:
 
 def get(conn, job_id: int) -> dict | None:
     row = conn.execute("SELECT * FROM apply_checkpoint WHERE job_id = ?", (job_id,)).fetchone()
-    return None if row is None else {**dict(row), "answers": json.loads(row["answers"])}
+    return None if row is None else {**dict(row), "answers": json.loads(row["answers"]),
+                                     "notes": json.loads(row["notes"])}
 
 
 def continue_message(cp: dict, nonce: str) -> str:
+    # Local import: agent.py has no reason to know about checkpoints, so the
+    # dependency only runs this direction.
+    from career_agent.apply.agent import note_lines
     body = json.dumps({"step": cp["step"], "answers": cp["answers"]}, ensure_ascii=False)
-    return f"CONTINUE:{nonce}:{body}\n{RESUMED_TEXT}"
+    notes = note_lines(nonce, cp.get("notes") or [])
+    return f"CONTINUE:{nonce}:{body}\n{RESUMED_TEXT}" + (f"\n{notes}" if notes else "")
 
 
 # A latest application row in one of these means the run reached an outcome

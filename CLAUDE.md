@@ -37,11 +37,11 @@ uv pip install -e ".[dev]"
 cp .env.example .env               # CLAUDE_CODE_OAUTH_TOKEN + APIFY_TOKEN + CREDENTIAL_KEY
 ```
 
-- **Run the full test suite:** `cd backend && pytest` (uses the `[dev]` extras: pytest + pytest-asyncio; `asyncio_mode = "auto"` in `pyproject.toml`, so async tests need no marker)
+- **Run the full test suite:** `cd backend && pytest` (uses the `[dev]` extras: pytest + pytest-asyncio; `asyncio_mode = "auto"` in `pyproject.toml`, so async tests need no marker). On this Windows machine use `.venv/Scripts/python -m pytest -q -p no:cacheprovider`; the full suite takes about 4 minutes — run it in the foreground and wait for it
 - **Run one file:** `pytest tests/test_apply_ats.py -v`
 - **Run one test:** `pytest tests/test_worker.py -k test_apply_tick_parks_on_needs_answer -v`
 - **CLI, one-shot discovery+score run:** `career-agent run` (writes to `backend/data/career.db`; this is what a scheduled task calls — see `scripts/install-scheduler.ps1`)
-- **CLI, backend:** `career-agent serve` → http://localhost:8000 — the JSON API at `/api/*` plus the legacy Jinja pages
+- **CLI, backend:** `career-agent serve` → http://localhost:8000 — the JSON API at `/api/*` plus the legacy Jinja pages. uvicorn does not auto-reload, so restart it after backend changes. When launching it from inside a Claude Code session, strip the session's env first (`env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT career-agent serve`): the server spawns `claude -p` (the apply agent and the Home intent router), which must not inherit the parent session's variables
 - **Frontend dev server:** `cd frontend && npm install && npm run dev` → http://localhost:5173, proxies `/api` and `/resume/*` to `:8000` (see `frontend/vite.config.ts`) — needs the backend running to have anything to talk to
 - No linter or type checker is configured for the backend. The frontend has `npm run build` (`tsc -b && vite build`) as its type check; `vite build` itself needs a native rolldown binary that this machine's Application Control policy (WDAC) blocks, so `tsc -b` alone is the practical type-check command here — `npm run dev` is unaffected and is what you actually run.
 
@@ -62,6 +62,15 @@ returning dicts, not `HTMLResponse`s. `web/app.py`'s Jinja routes and the JSON r
 (`web/api.py`, `web/api_chat.py`, ...) are thin wrappers around the same functions.
 Changing behavior almost always means editing `context.py`/`actions.py`, not a route
 file, or the frontends drift.
+
+**Not yet integrated in the React app.** A 2026-09-14 audit found three JSON routes the
+React app never calls, kept rather than deleted because something else still needs them:
+`POST /api/answer/{job_id}` is the pre-chat answer-needed path, superseded by chat's
+answer cards but still reachable directly; `GET /api/pipeline/status` duplicates data
+`GET /api/overview` already returns, so nothing calls it standalone; `GET
+/api/applications` with the default `show=queue` (the React app always passes
+`show=skipped`, which returns every verdict) is still what the Jinja `/applications`
+page requests. Before deleting any of the three, grep for other callers first.
 
 The API routers reach shared state (`DB_PATH`, `BRIEF_PATH`, `_conn()`,
 `_background_tasks`) through a deferred, call-time import of `app.py` (their `_app()`
@@ -113,7 +122,11 @@ concurrent dashboard polling don't deadlock on `database is locked`.
    jobs are persisted via `store.save_hard_skip` so a future run never re-considers them.
 3. **Scored gate** (`gate.py`) — the LLM call. Scores five weighted dimensions
    (`Verdict` in `models.py`) against the `CareerBrief`'s facts store, refusing to run at
-   all below `MIN_FACTS_HARD` (10) facts. `PROMPT_VERSION` must bump in the same commit
+   all below `MIN_FACTS_HARD` (10) facts. The `fact` table (verified claims, each with its
+   own evidence) is edited from the Facts drawer panel (`web/api_facts.py`,
+   `store.fact_list`/`fact_add`/`fact_update`/`fact_delete`) — a delete is refused with 409
+   if a tailored resume's `resume.content` JSON still cites that fact id
+   (`store.fact_cited_by`). `PROMPT_VERSION` must bump in the same commit
    as any prompt edit — it invalidates every stored assessment and forces a re-score,
    which is what makes a prompt change measurable against `tests/golden/`.
 4. **Tailoring** (`tailor.py`) — one resume render per job, memoized. `ensure_tailored`
@@ -144,12 +157,22 @@ CONFIRM over ASK (the last line of a kind wins), and nudges a turn that has none
 `MAX_NUDGES` times. The backend writes `ANSWER:`, `DECISION:` (`approve`/`change`/`cancel`)
 or, on a resume, `CONTINUE:`. `timeout_s` counts work time only: the clock pauses while
 `run.waiting` is set, and each wait gets `answer_wait_s` before an `answer_timeout` kill.
+A message typed into a job's chat (`actions.job_message`) is guidance, not an answer: it
+never interrupts a live turn, riding along instead as a `NOTE:<nonce>:{"text": ...}` line
+that `AgentRun.add_note`/`send` queues onto the run's next `ANSWER`/`DECISION` write, and
+that `apply_checkpoint.notes` pins so a `--resume`'s `CONTINUE:` still carries it. A NOTE
+is never a DECISION or an ANSWER and can never authorize a submit on its own — the prompt
+teaches the agent that in its own NOTES FROM THE HUMAN section.
 
 **Modes.** `mode` is `manual` (every CONFIRM waits for the human's DECISION) or `auto`
 (`_chat_events` approves the CONFIRM on the spot, the only approval not given through
 `answer_prompt`). `can_submit = SUBMISSION_IMPLEMENTED or run_agent is not None` decides
 what an approval means: click Submit and report `APPLIED`, or stop at `DRAFT_READY`.
 `SUBMISSION_IMPLEMENTED` still **ships `False`** and gates a real send for every source.
+Everything in this section has been verified only against stubs; don't flip the switch
+or claim live behaviour until README's "Pending live checks" (real `--resume`, real
+`secret_fill`, CONFIRM flows, auto mode, a prompt-injection page, kill/timeout recovery,
+Home `apply_to`) have been run — each spends real credits, so ask first.
 
 **Cards.** Humans answer cards in the job chat through `actions.answer_prompt`. It
 refuses unless the job's run is live and waiting, the card is newer than the run's
@@ -293,3 +316,13 @@ Configuration is split by who owns it and how sensitive it is — don't conflate
 - Datetime comparisons against SQLite's naive-UTC `datetime('now')` strings stay naive
   UTC throughout (never local time, never a timezone-aware "now") — this project has hit
   local-vs-UTC mismatches as a recurring bug class.
+
+## Knowledge graph (graphify)
+
+`graphify-out/` (gitignored) holds a graphify knowledge graph of the repo:
+`GRAPH_REPORT.md` (communities, god nodes, suggested questions), `graph.json`, and
+`graph.html`. For "how does X connect to Y" questions, `graphify query "<question>"` is
+cheaper than reading files. A post-commit hook rebuilds it incrementally for code
+changes; run `/graphify . --update` after doc changes. `graphify-out/.graphify_root` and
+`.graphify_python` must be written without a UTF-8 BOM (PowerShell's `Out-File -Encoding
+utf8` adds one) — a BOM makes every hook rebuild fail with `WinError 123`.

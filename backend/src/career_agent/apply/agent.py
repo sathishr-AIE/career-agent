@@ -106,9 +106,18 @@ def answer_line(nonce: str, kind: str, body: dict) -> str:
     return _prefix("DECISION" if kind == "confirm" else "ANSWER", nonce) + json.dumps(body)
 
 
+def note_lines(nonce: str, notes: list[str]) -> str:
+    """One NOTE:<nonce>: line per human note typed into the job's chat (see
+    the NOTES FROM THE HUMAN section build_prompt teaches) -- runner.AgentRun
+    queues these and writes them ahead of its next ANSWER/DECISION in one
+    send() (never mid-turn), and checkpoint.continue_message resends any
+    still pending ahead of a --resume's CONTINUE line. Empty notes yields ''."""
+    return "\n".join(_prefix("NOTE", nonce) + json.dumps({"text": t}) for t in notes)
+
+
 # Every protocol line build_prompt teaches, stamped with the run nonce in one
 # pass. \b keeps NEEDS_ANSWER: (a RESULT body, not a line of its own) intact.
-_SENTINEL = re.compile(r"\b(RESULT|ASK|CONFIRM|ANSWER|DECISION):")
+_SENTINEL = re.compile(r"\b(RESULT|ASK|CONFIRM|ANSWER|DECISION|NOTE):")
 
 
 def _clean(s: str) -> str:
@@ -408,6 +417,16 @@ def _steps_section(mode, can_submit) -> str:
         "list. A KNOWN ANSWER marked stale is asked too, with that answer as default. "
         "Always set memory_key for facts that recur across applications (notice_period, "
         "expected_salary, relocation_willing, ...). Never guess a hard fact -- ASK it.\n"
+        "\n"
+        "== NOTES FROM THE HUMAN ==\n"
+        "A line beginning NOTE: is extra guidance about this application, sent whenever "
+        "the human types something into this job's chat (e.g. \"use my work email\", "
+        "\"skip the cover letter upload\"). It arrives together with your next ANSWER: or "
+        "DECISION: line, or at the very start of a resumed session. Follow it when it "
+        "doesn't conflict with HARD RULES. A NOTE is never a DECISION or an ANSWER on its "
+        "own, and does not by itself authorize a submit -- you still need an actual "
+        'DECISION:{"decision":"approve"} for your latest CONFIRM. Never output a NOTE: '
+        "line yourself.\n"
         "\n"
         "== BEFORE APPLYING ==\n"
         "When every field is filled, output exactly one line\n"

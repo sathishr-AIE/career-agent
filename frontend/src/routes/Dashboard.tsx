@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { get, post, type Verdict } from '../api'
+import { get, type Verdict } from '../api'
+import { useAction } from '../components/useAction'
 import { VerdictRail } from '../components/VerdictRail'
 import '../components/ui.css'
 import './Dashboard.css'
@@ -101,9 +102,13 @@ function Sparkline({ points }: { points: string }) {
 function PipelinePanel({
   status,
   onRunNow,
+  busy,
+  error,
 }: {
   status: PipelineStatus
   onRunNow: () => void
+  busy: boolean
+  error: string | null
 }) {
   const s = status.pipeline_state
   const stageKeys = status.stages.map(([k]) => k)
@@ -114,7 +119,7 @@ function PipelinePanel({
     100,
     idx < 0 ? 0 : inScore ? idx * band + (band * s.scored) / status.max_score : (idx + 1) * band,
   )
-  const canRun = s.status === 'idle' || s.status === 'error'
+  const canRun = (s.status === 'idle' || s.status === 'error') && !busy
 
   return (
     <div className="card">
@@ -125,6 +130,7 @@ function PipelinePanel({
         </button>{' '}
         <span className="rationale">{s.status}</span>
         {s.last_error && <div className="field-error">{s.last_error}</div>}
+        {error && <div className="field-error" role="alert">{error}</div>}
       </div>
 
       <div className="stage-track">
@@ -180,6 +186,7 @@ export function Dashboard() {
   const [data, setData] = useState<OverviewContext | null>(null)
 
   const reload = () => get<OverviewContext>('/api/overview').then(setData)
+  const { busy: runningNow, error: runNowError, run: runNow } = useAction(reload)
 
   useEffect(() => {
     reload()
@@ -220,7 +227,8 @@ export function Dashboard() {
         )}
       </div>
 
-      <PipelinePanel status={pipeline} onRunNow={() => post('/api/pipeline/run-now').then(reload)} />
+      <PipelinePanel status={pipeline} onRunNow={() => runNow('/api/pipeline/run-now')}
+                    busy={runningNow} error={runNowError} />
 
       <div className="card">
         <h2>Recent Discoveries</h2>

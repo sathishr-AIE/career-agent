@@ -5,6 +5,7 @@ import { App } from './App'
 import { Applications } from './routes/Applications'
 import { Chat } from './routes/Chat'
 import { Dashboard } from './routes/Dashboard'
+import { Facts } from './routes/Facts'
 import { Logins } from './routes/Logins'
 import { Memory } from './routes/Memory'
 import { Profile } from './routes/Profile'
@@ -22,6 +23,7 @@ createRoot(document.getElementById('root')!).render(
           <Route path="dashboard" element={<Dashboard />} />
           <Route path="applications" element={<Applications />} />
           <Route path="resumes" element={<Resumes />} />
+          <Route path="facts" element={<Facts />} />
           <Route path="memory" element={<Memory />} />
           <Route path="logins" element={<Logins />} />
           <Route path="profile" element={<Profile />} />

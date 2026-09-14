@@ -97,6 +97,67 @@ def fact_rows(conn) -> list[tuple[int, str]]:
     return [(r["id"], f"{r['claim']} (evidence: {r['evidence']})") for r in rows]
 
 
+FACT_CONFIDENCE = ("high", "medium", "low")
+
+
+def fact_list(conn) -> list[dict]:
+    return [dict(r) for r in conn.execute(
+        "SELECT id, claim, evidence, project, metric, confidence FROM fact ORDER BY id")]
+
+
+def fact_validate(body: dict) -> tuple[dict, dict[str, str]]:
+    """Trimmed row values plus {field: message}; blanks in optional fields become NULL."""
+    row = {k: str(body.get(k) or "").strip()
+           for k in ("claim", "evidence", "project", "metric", "confidence")}
+    row["confidence"] = row["confidence"] or "high"
+    errors = {}
+    for field in ("claim", "evidence"):
+        if not row[field]:
+            errors[field] = f"{field.capitalize()} is required"
+    if row["confidence"] not in FACT_CONFIDENCE:
+        errors["confidence"] = f"Confidence must be one of {', '.join(FACT_CONFIDENCE)}"
+    row["project"] = row["project"] or None
+    row["metric"] = row["metric"] or None
+    return row, errors
+
+
+def fact_add(conn, row: dict) -> int:
+    cur = conn.execute(
+        "INSERT INTO fact (claim, evidence, project, metric, confidence) VALUES (?,?,?,?,?)",
+        (row["claim"], row["evidence"], row["project"], row["metric"], row["confidence"]))
+    conn.commit()
+    return cur.lastrowid
+
+
+def fact_update(conn, fact_id: int, row: dict) -> bool:
+    cur = conn.execute(
+        "UPDATE fact SET claim = ?, evidence = ?, project = ?, metric = ?, confidence = ?"
+        " WHERE id = ?",
+        (row["claim"], row["evidence"], row["project"], row["metric"], row["confidence"],
+         fact_id))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def fact_cited_by(conn, fact_id: int) -> list[str]:
+    """Resume versions whose tailored bullets cite this fact (resume.content JSON)."""
+    cited = []
+    for r in conn.execute("SELECT version, content FROM resume WHERE content IS NOT NULL"):
+        try:
+            bullets = json.loads(r["content"]).get("bullets", [])
+        except (ValueError, AttributeError):
+            continue
+        if any(fact_id in (b.get("fact_ids") or []) for b in bullets):
+            cited.append(r["version"])
+    return cited
+
+
+def fact_delete(conn, fact_id: int) -> bool:
+    cur = conn.execute("DELETE FROM fact WHERE id = ?", (fact_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def latest_resume_version(conn, job_id: int) -> str | None:
     row = conn.execute(
         "SELECT version FROM resume WHERE job_id = ? ORDER BY id DESC LIMIT 1",

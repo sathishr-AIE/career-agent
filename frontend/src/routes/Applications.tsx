@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ApiError, get, post, type ActionResult, type Job, type RunState } from '../api'
+import { useAction } from '../components/useAction'
 import { VerdictRail } from '../components/VerdictRail'
 import '../components/ui.css'
 import './Applications.css'
@@ -32,7 +33,7 @@ interface ApplicationsContext {
     resumable: number
   }
   recent_events: { type: string; payload: string | null; occurred_at: string }[]
-  open_prompt: { id: number; kind: string; question: string } | null
+  open_prompt: { id: number; kind: string; question: string; needs_answer: boolean } | null
   conversation_id: number | null
 }
 
@@ -42,8 +43,7 @@ function RunControls({ ctx, onChanged }: { ctx: ApplicationsContext; onChanged: 
   const [mode, setMode] = useState<'auto' | 'manual'>(ctx.run_state.mode === 'auto' ? 'auto' : 'manual')
   const running = ctx.run_state.status === 'running'
   const s = ctx.run_state
-
-  const act = (path: string, body?: unknown) => post(path, body).then(onChanged)
+  const { busy, error, run: act } = useAction(onChanged)
 
   return (
     <div className="card">
@@ -61,24 +61,25 @@ function RunControls({ ctx, onChanged }: { ctx: ApplicationsContext; onChanged: 
       </span>
       <div>
         {(s.status === 'idle' || s.status === 'stopped' || s.status === 'error') && (
-          <button className="btn primary" onClick={() => act('/api/run/start', { mode })}>
+          <button className="btn primary" disabled={busy} onClick={() => act('/api/run/start', { mode })}>
             ▶ Start
           </button>
         )}
         {s.status === 'running' && (
           <>
-            <button className="btn" onClick={() => act('/api/run/pause')}>⏸ Pause</button>
-            <button className="btn" onClick={() => act('/api/run/stop')}>⏹ Stop</button>
+            <button className="btn" disabled={busy} onClick={() => act('/api/run/pause')}>⏸ Pause</button>
+            <button className="btn" disabled={busy} onClick={() => act('/api/run/stop')}>⏹ Stop</button>
           </>
         )}
         {s.status === 'paused' && (
           <>
-            <button className="btn primary" onClick={() => act('/api/run/resume')}>▶ Resume</button>
-            <button className="btn" onClick={() => act('/api/run/stop')}>⏹ Stop</button>
+            <button className="btn primary" disabled={busy} onClick={() => act('/api/run/resume')}>▶ Resume</button>
+            <button className="btn" disabled={busy} onClick={() => act('/api/run/stop')}>⏹ Stop</button>
           </>
         )}{' '}
         <span className="rationale">{s.status}</span>
         {s.last_error && <div className="denied">{s.last_error}</div>}
+        {error && <div className="denied" role="alert">{error}</div>}
       </div>
 
       <div className="stats-row">
@@ -121,6 +122,55 @@ function VerdictLabel({ verdict }: { verdict: Job['verdict'] }) {
   return <span className={`verdict-${verdict}`}>{verdict}</span>
 }
 
+const DIMENSIONS: { key: keyof Job; label: string }[] = [
+  { key: 'role_fit', label: 'Role fit' },
+  { key: 'credibility', label: 'Credibility' },
+  { key: 'opportunity', label: 'Opportunity' },
+  { key: 'application_quality', label: 'Application quality' },
+  { key: 'eligibility_soft', label: 'Eligibility' },
+]
+
+function ScoreDetails({ job }: { job: Job }) {
+  if (job.role_fit == null) return null
+  return (
+    <details>
+      <summary className="rationale">Why this score</summary>
+      <div className="kv">
+        {DIMENSIONS.map((d) => (
+          <div key={d.key}>
+            <span>{d.label}</span>
+            <b>{job[d.key] ?? '—'}</b>
+          </div>
+        ))}
+      </div>
+    </details>
+  )
+}
+
+/** Shared by ActionCell and QueueRow: `run` fires-and-forgets an action,
+ * `apply` additionally opens the job's chat, since the apply request lasts
+ * the whole agent run (a CONFIRM waits on the human there). Both rows must
+ * navigate on Apply, or the review card is invisible until you go find the
+ * chat yourself. */
+function useApply(onChanged: () => void) {
+  const nav = useNavigate()
+  const [msg, setMsg] = useState<ActionResult | null>(null)
+  const run = (path: string, body?: unknown) =>
+    post<ActionResult>(path, body)
+      .then((r) => {
+        setMsg(r)
+        onChanged()
+      })
+      .catch((e) => setMsg({ ok: false, message: e instanceof ApiError ? e.message : 'Failed.' }))
+  const openChat = (jobId: number) =>
+    get<{ id: number }>(`/api/chat/jobs/${jobId}/conversation`).then((c) => nav(`/chat/${c.id}`))
+  const apply = (jobId: number, path: string) => {
+    run(path)
+    openChat(jobId)
+  }
+  return { run, apply, openChat, msg }
+}
+
 function ActionCell({
   job, ctx, onChanged, variant,
 }: {
@@ -129,21 +179,7 @@ function ActionCell({
   onChanged: () => void
   variant: 'all' | 'skipped'
 }) {
-  const [msg, setMsg] = useState<ActionResult | null>(null)
-  const run = (path: string) =>
-    post<ActionResult>(path)
-      .then((r) => {
-        setMsg(r)
-        onChanged()
-      })
-      .catch((e) => setMsg({ ok: false, message: e instanceof ApiError ? e.message : 'Failed.' }))
-  const nav = useNavigate()
-  // The apply request lasts the whole agent run (a CONFIRM waits on the
-  // human in chat), so open the job's chat as soon as it starts.
-  const apply = (path: string) => {
-    run(path)
-    get<{ id: number }>(`/api/chat/jobs/${job.id}/conversation`).then((c) => nav(`/chat/${c.id}`))
-  }
+  const { run, apply, openChat, msg } = useApply(onChanged)
 
   const tracked = ctx.applied[job.id]
   const untracked = !tracked && job.terminal_status !== 'held_unknown' &&
@@ -164,7 +200,10 @@ function ActionCell({
       ) : job.terminal_status === 'held_unknown' ? (
         <HeldCell job={job} today={ctx.today} onChanged={onChanged} run={run} />
       ) : job.terminal_status === 'failed_permanent' ? (
-        <span className="denied">Failed permanently — see the event log</span>
+        <div className="denied">
+          Failed permanently{job.failure_reason ? `: ${job.failure_reason}` : ''}
+          <TranscriptLink applicationId={job.application_id} />
+        </div>
       ) : (
         <MarkAppliedForm job={job} today={ctx.today} onChanged={onChanged} />
       )}
@@ -176,10 +215,18 @@ function ActionCell({
       ) : (
         untracked && (
           job.has_draft ? (
-            <span className="rationale">Drafted — see the job's chat.</span>
+            <>
+              <span className="rationale">Drafted</span>
+              <button className="btn" onClick={() => openChat(job.id)}>Open draft chat</button>
+              <button className="btn"
+                      onClick={() => apply(job.id, job.verdict === 'skip' ? `/api/override/${job.id}` : `/api/apply/${job.id}`)}
+                      title="Runs the apply agent again from the start, replacing the current draft.">
+                Redo draft
+              </button>
+            </>
           ) : (
             <button className="btn"
-                    onClick={() => apply(job.verdict === 'skip' ? `/api/override/${job.id}` : `/api/apply/${job.id}`)}>
+                    onClick={() => apply(job.id, job.verdict === 'skip' ? `/api/override/${job.id}` : `/api/apply/${job.id}`)}>
               Apply
             </button>
           )
@@ -200,6 +247,7 @@ function OutcomeCell({
   const [type, setType] = useState(ctx.manual_types[0] ?? '')
   const [occurredAt, setOccurredAt] = useState(ctx.today)
   const [notes, setNotes] = useState('')
+  const { busy, error, run } = useAction(onChanged)
   return (
     <div>
       <span className={tracked.outcome ? 'done' : 'rationale'}>
@@ -209,20 +257,22 @@ function OutcomeCell({
         className="outcome-form"
         onSubmit={(e) => {
           e.preventDefault()
-          post(`/api/outcome/${tracked.application_id}`, { type, occurred_at: occurredAt, notes }).then(onChanged)
+          run(`/api/outcome/${tracked.application_id}`, { type, occurred_at: occurredAt, notes })
         }}
       >
-        <select value={type} onChange={(e) => setType(e.target.value)}>
+        <select value={type} disabled={busy} onChange={(e) => setType(e.target.value)}>
           {ctx.manual_types.map((t) => (
             <option key={t} value={t}>
               {ctx.outcome_labels[t]}
             </option>
           ))}
         </select>
-        <input type="date" value={occurredAt} onChange={(e) => setOccurredAt(e.target.value)} />
-        <input type="text" placeholder="notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} />
-        <button className="btn" type="submit">Record</button>
+        <input type="date" value={occurredAt} disabled={busy} onChange={(e) => setOccurredAt(e.target.value)} />
+        <input type="text" placeholder="notes (optional)" value={notes} disabled={busy}
+              onChange={(e) => setNotes(e.target.value)} />
+        <button className="btn" type="submit" disabled={busy}>Record</button>
       </form>
+      {error && <div className="field-error" role="alert">{error}</div>}
     </div>
   )
 }
@@ -232,6 +282,20 @@ function OutcomeCell({
 // (queue_retry took only 'failed', Mark applied hit the live-application
 // index), so raw SQL was the only way out of a state the label tells the
 // user to clear.
+/** application_id names the latest attempt; the route itself 404s if that
+ * attempt never wrote a transcript, so this always offers the link rather
+ * than guessing whether one exists. */
+function TranscriptLink({ applicationId }: { applicationId: number | null }) {
+  if (!applicationId) return null
+  return (
+    <div>
+      <a href={`/api/transcript/${applicationId}`} target="_blank" rel="noreferrer">
+        Transcript
+      </a>
+    </div>
+  )
+}
+
 function HeldCell({
   job, today, onChanged, run,
 }: {
@@ -243,9 +307,10 @@ function HeldCell({
   return (
     <div>
       <span className="denied">
-        Held — the agent may already have submitted this. Check the employer's site,
-        then say which:
+        Held{job.failure_reason ? `: ${job.failure_reason}` : ''} — the agent may already have
+        submitted this. Check the employer's site, then say which:
       </span>
+      <TranscriptLink applicationId={job.application_id} />
       <MarkAppliedForm job={job} today={today} onChanged={onChanged} label="It was submitted" />
       <button
         className="btn"
@@ -268,24 +333,28 @@ function MarkAppliedForm({
   job, today, onChanged, label = 'Mark applied',
 }: { job: Job; today: string; onChanged: () => void; label?: string }) {
   const [when, setWhen] = useState(today)
+  const { busy, error, run } = useAction(onChanged)
   return (
-    <form
-      className="outcome-form"
-      onSubmit={(e) => {
-        e.preventDefault()
-        post(`/api/applied/${job.id}`, { when }).then(onChanged)
-      }}
-    >
-      <input type="date" value={when} onChange={(e) => setWhen(e.target.value)} />
-      <button className="btn" type="submit" title="You applied on the site yourself.">
-        {label}
-      </button>
-    </form>
+    <div>
+      <form
+        className="outcome-form"
+        onSubmit={(e) => {
+          e.preventDefault()
+          run(`/api/applied/${job.id}`, { when })
+        }}
+      >
+        <input type="date" value={when} disabled={busy} onChange={(e) => setWhen(e.target.value)} />
+        <button className="btn" type="submit" disabled={busy} title="You applied on the site yourself.">
+          {label}
+        </button>
+      </form>
+      {error && <div className="field-error" role="alert">{error}</div>}
+    </div>
   )
 }
 
 function QueueRow({ job, onChanged }: { job: Job; onChanged: () => void }) {
-  const run = (path: string, body?: unknown) => post(path, body).then(onChanged)
+  const { run, apply, openChat, msg } = useApply(onChanged)
   return (
     <tr>
       <td style={{ width: 8 }}>
@@ -296,13 +365,19 @@ function QueueRow({ job, onChanged }: { job: Job; onChanged: () => void }) {
       <td className="data">{Math.round(job.score ?? 0)}</td>
       <td>
         <a href={job.url} target="_blank" rel="noreferrer">{job.title}</a> at {job.company}
+        {job.has_draft && <span className="pill">Drafted</span>}
+        {msg && <div className={msg.ok ? 'done' : 'denied'}>{msg.message}</div>}
       </td>
       <td>{job.source}</td>
       <td><VerdictLabel verdict={job.verdict} /></td>
       <td>
-        <button className="btn" onClick={() => run(`/api/apply/${job.id}`)} title="Draft this job now.">
-          Apply
-        </button>
+        {job.has_draft ? (
+          <button className="btn" onClick={() => openChat(job.id)}>Open draft chat</button>
+        ) : (
+          <button className="btn" onClick={() => apply(job.id, `/api/apply/${job.id}`)} title="Draft this job now.">
+            Apply
+          </button>
+        )}
         <button onClick={() => run(`/api/queue/${job.id}/priority`, { direction: 'up' })}>▲</button>
         <button onClick={() => run(`/api/queue/${job.id}/priority`, { direction: 'down' })}>▼</button>
         <button onClick={() => run(`/api/queue/${job.id}/skip`)}>Skip</button>
@@ -322,12 +397,17 @@ export function Applications() {
 
   useEffect(() => {
     reload()
+    // Every action button tracks its own busy/error locally (useAction,
+    // useApply), so a poll landing mid-click can't undo a disabled state or
+    // lose in-progress form input -- it only refreshes read-only context.
+    const id = setInterval(reload, 3000)
+    return () => clearInterval(id)
   }, [])
 
   if (!ctx) return null
 
   const queueRows = ctx.jobs.filter(
-    (j) => (j.verdict === 'submit' || j.verdict === 'hold') && !j.terminal_status && !j.has_draft,
+    (j) => (j.verdict === 'submit' || j.verdict === 'hold') && !j.terminal_status,
   )
 
   return (
@@ -387,6 +467,7 @@ export function Applications() {
                   <a href={j.url} target="_blank" rel="noreferrer">{j.title}</a> at {j.company}
                   <br />
                   <span className="rationale">{j.rationale}</span>
+                  <ScoreDetails job={j} />
                 </td>
                 <td>{j.source}</td>
                 <td><VerdictLabel verdict={j.verdict} /></td>
@@ -417,6 +498,7 @@ export function Applications() {
                     <a href={j.url} target="_blank" rel="noreferrer">{j.title}</a> at {j.company}
                     <br />
                     <span className="rationale">{j.rationale}</span>
+                    <ScoreDetails job={j} />
                   </td>
                   <td>{j.source}</td>
                   <td>

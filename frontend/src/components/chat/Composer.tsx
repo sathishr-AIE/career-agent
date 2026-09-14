@@ -5,9 +5,11 @@ import { useState } from 'react'
 export function Composer({
   onSend,
   disabled,
+  placeholder = 'Message the agent',
 }: {
   onSend: (text: string) => Promise<unknown>
   disabled?: boolean
+  placeholder?: string
 }) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
@@ -37,7 +39,7 @@ export function Composer({
         rows={2}
         value={text}
         disabled={disabled}
-        placeholder={disabled ? 'Pick a conversation' : 'Message the agent'}
+        placeholder={disabled ? 'Pick a conversation' : placeholder}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && !e.shiftKey) {

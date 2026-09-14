@@ -13,9 +13,12 @@ CANDIDATE_PROFILE_PATH a single source of truth: tests monkeypatch them on
 the app module (`monkeypatch.setattr(web, "DB_PATH", ...)`), and reading
 them through the app module here picks up that same patched value, exactly
 like every Jinja route already does."""
-from fastapi import APIRouter, Body, File, UploadFile
-from fastapi.responses import JSONResponse
+from pathlib import Path
 
+from fastapi import APIRouter, Body, File, UploadFile
+from fastapi.responses import JSONResponse, PlainTextResponse
+
+from career_agent.apply import agent as agent_mod
 from career_agent.web import actions, context
 
 router = APIRouter(prefix="/api")
@@ -37,6 +40,25 @@ def api_applications(show: str = "queue"):
     m = _app()
     return context.applications_context(
         m._conn(), show, m.BRIEF_PATH, scheduled=m.scheduled_task_installed())
+
+
+@router.get("/transcript/{application_id}")
+def api_transcript(application_id: int):
+    """The agent's redacted transcript for one application attempt -- so a
+    failed/held row's chat can point somewhere other than the 10-line event
+    log. Path is confined to LOG_DIR: an application_id is a plain integer,
+    but the path it names came from a live run and is worth double-checking
+    before it's read off disk and served."""
+    m = _app()
+    row = m._conn().execute(
+        "SELECT transcript_path FROM application WHERE id = ?", (application_id,)).fetchone()
+    if row is None or not row["transcript_path"]:
+        return JSONResponse(status_code=404, content={"ok": False, "message": "No transcript"})
+    path = Path(row["transcript_path"]).resolve()
+    log_dir = agent_mod.LOG_DIR.resolve()
+    if log_dir not in path.parents or not path.is_file():
+        return JSONResponse(status_code=404, content={"ok": False, "message": "No transcript"})
+    return PlainTextResponse(path.read_text(encoding="utf-8", errors="replace"))
 
 
 @router.get("/resumes")

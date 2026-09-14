@@ -168,6 +168,16 @@ def open_prompt_for_job(conn, job_id: int):
                         " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
 
 
+def open_prompt_for_any_job(conn):
+    """The newest open job-scoped card, for a manual Apply/Override click --
+    those never set run_state.current_job_id (that would park the worker on
+    a job it didn't start), so the status bar has nothing to key off without
+    this. job_id IS NOT NULL excludes Home's own cards, which carry none."""
+    return conn.execute(
+        "SELECT * FROM agent_prompt WHERE job_id IS NOT NULL AND status = 'open'"
+        " ORDER BY id DESC LIMIT 1").fetchone()
+
+
 def answer_prompt_row(conn, prompt_id: int, answer: dict):
     """The answered row, or None when this call did not answer it (already
     answered or expired) -- two answers racing must not both be relayed."""

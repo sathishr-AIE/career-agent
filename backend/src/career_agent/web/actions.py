@@ -225,6 +225,29 @@ def answer_question(conn: sqlite3.Connection, job_id: int, question: str,
     return {"ok": True, "message": "Answer saved"}
 
 
+def job_message(conn: sqlite3.Connection, cid: int, job_id: int, text: str) -> dict:
+    """A message typed into a job's chat: guidance for the agent, delivered
+    with its next ANSWER/DECISION line (or a --resume's CONTINUE) rather than
+    interrupting a live turn -- see runner.AgentRun.add_note/send. Refuses a
+    secret the same way a question card does; a password never goes through
+    chat. Never raises."""
+    if store._SECRET_QA_RE.search(text):
+        return _refuse(422, _SECRET)
+    mid = chat.post_message(conn, cid, "user", text)
+    try:
+        checkpoint.add_note(conn, job_id, text)
+    except Exception:
+        log.exception("could not pin a chat note to job %s's checkpoint", job_id)
+    run = agent_mod.RUNS.get(job_id)
+    if run is not None and run.add_note(text):
+        chat.post_message(conn, cid, "system",
+                          "Noted — the agent gets this with your next answer.")
+    else:
+        chat.post_message(conn, cid, "system",
+                          "No live session for this job — the note was saved but not sent.")
+    return {"ok": True, "message_id": mid}
+
+
 _CLOSED = "That question is no longer open"
 _EXPIRED = "That request expired — ask again"
 _NO_RUN = "No live agent run for this job"

@@ -18,6 +18,7 @@ from career_agent.web import overview, worker
 LIST_SQL = """
 SELECT j.id, j.company, j.title, j.location, j.source, j.url,
        a.verdict, a.rationale, a.stage, a.weighted_score AS score,
+       a.role_fit, a.credibility, a.opportunity, a.application_quality, a.eligibility_soft,
        (SELECT ap.status FROM application ap
          WHERE ap.job_id = j.id
            AND ap.status IN ('in_flight','submitted','held_unknown','failed_permanent')
@@ -25,7 +26,11 @@ SELECT j.id, j.company, j.title, j.location, j.source, j.url,
        (SELECT ap.status FROM application ap WHERE ap.job_id = j.id
          ORDER BY ap.id DESC LIMIT 1) IS 'draft' AS has_draft,
        (SELECT ap.resume_version FROM application ap WHERE ap.job_id = j.id
-         ORDER BY ap.id DESC LIMIT 1) AS resume_version
+         ORDER BY ap.id DESC LIMIT 1) AS resume_version,
+       (SELECT ap.id FROM application ap WHERE ap.job_id = j.id
+         ORDER BY ap.id DESC LIMIT 1) AS application_id,
+       (SELECT ap.failure_reason FROM application ap WHERE ap.job_id = j.id
+         ORDER BY ap.id DESC LIMIT 1) AS failure_reason
   FROM job j JOIN assessment a ON a.job_id = j.id
  WHERE j.merged_into_job_id IS NULL AND a.verdict IN ({placeholders})
  ORDER BY a.weighted_score DESC NULLS LAST, j.discovered_at DESC
@@ -203,6 +208,21 @@ def run_status_context(conn: sqlite3.Connection) -> dict:
             open_prompt = {"id": row["id"], "kind": row["kind"],
                            "question": chat.prompt_title(row["kind"], payload),
                            "needs_answer": payload.get("origin") == "needs_answer"}
+    else:
+        # A manual Apply/Override click runs outside the worker loop, so it
+        # never sets current_job_id -- fall back to the newest open job card
+        # so the status bar still shows "Answer in chat" for it.
+        row = chat.open_prompt_for_any_job(conn)
+        if row:
+            current_job = conn.execute(
+                "SELECT j.id AS job_id, j.company, j.title FROM job j"
+                " WHERE j.id = ?", (row["job_id"],)).fetchone()
+            if current_job:
+                conversation_id = row["conversation_id"]
+                payload = json.loads(row["payload"])
+                open_prompt = {"id": row["id"], "kind": row["kind"],
+                               "question": chat.prompt_title(row["kind"], payload),
+                               "needs_answer": payload.get("origin") == "needs_answer"}
     submitted = conn.execute(
         "SELECT COUNT(*) n FROM application WHERE status = 'submitted'"
     ).fetchone()["n"]

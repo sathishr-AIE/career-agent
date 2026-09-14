@@ -241,6 +241,10 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # whether a DECISION approve went out, the resume cap, the worker's one auto-resume.
     _add_column_if_missing(conn, "apply_checkpoint", "mode", "TEXT")
     _add_column_if_missing(conn, "apply_checkpoint", "can_submit", "INTEGER")
+    # Human notes from the job's chat (web/actions.job_message), pinned here
+    # so a --resume's CONTINUE line still carries them once the live run's
+    # own in-memory queue (apply/runner.AgentRun.notes) is gone.
+    _add_column_if_missing(conn, "apply_checkpoint", "notes", "TEXT NOT NULL DEFAULT '[]'")
     for col in ("approve_sent", "resume_count", "auto_resumed"):
         _add_column_if_missing(conn, "apply_checkpoint", col, "INTEGER NOT NULL DEFAULT 0")
     # A Home confirmation card has no job. SQLite can't drop NOT NULL

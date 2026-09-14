@@ -61,9 +61,16 @@ export interface Job {
   rationale: string | null
   stage: string | null
   score: number | null
+  role_fit: number | null
+  credibility: number | null
+  opportunity: number | null
+  application_quality: number | null
+  eligibility_soft: number | null
   terminal_status: string | null
   has_draft: number
   resume_version: string | null
+  application_id: number | null
+  failure_reason: string | null
 }
 
 export interface RunState {
@@ -87,7 +94,7 @@ export interface RunStatusContext {
     resumable: number
   }
   recent_events: { type: string; payload: string | null; occurred_at: string }[]
-  open_prompt: { id: number; kind: string; question: string } | null
+  open_prompt: { id: number; kind: string; question: string; needs_answer: boolean } | null
   conversation_id: number | null
   submission_implemented: boolean
 }

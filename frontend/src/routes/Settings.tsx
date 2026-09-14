@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { ApiError, get, put } from '../api'
 import '../components/ui.css'
 
@@ -17,18 +18,9 @@ interface CareerBrief {
   non_negotiables: string[]
 }
 
-interface CandidateProfile {
-  candidate_name: string
-  candidate_email: string
-  candidate_phone: string
-  linkedin_url: string | null
-  portfolio_url: string | null
-}
-
 interface SettingsContext {
   brief: CareerBrief | null
   brief_error: string | null
-  candidate: CandidateProfile | null
   candidate_error: string | null
   settings: { scoring_model: string; max_score_per_run: number }
   scoring_models: string[]
@@ -42,7 +34,6 @@ const join = (xs: string[]) => xs.join(', ')
 
 function formFromContext(ctx: SettingsContext): FormState {
   const b = ctx.brief
-  const c = ctx.candidate
   return {
     target_titles: b ? join(b.target_titles) : '',
     title_families: b ? join(b.title_families) : '',
@@ -58,11 +49,6 @@ function formFromContext(ctx: SettingsContext): FormState {
     staleness_days: b ? String(b.staleness_days) : '',
     scoring_model: ctx.settings.scoring_model,
     max_score_per_run: String(ctx.settings.max_score_per_run),
-    candidate_name: c?.candidate_name ?? '',
-    candidate_email: c?.candidate_email ?? '',
-    candidate_phone: c?.candidate_phone ?? '',
-    linkedin_url: c?.linkedin_url ?? '',
-    portfolio_url: c?.portfolio_url ?? '',
   }
 }
 
@@ -121,7 +107,10 @@ export function Settings() {
     const body = {
       ...form,
       brief_present: !!ctx?.brief,
-      candidate_present: true,
+      // Contact details are edited on the Profile page now -- this never
+      // carries candidate_* fields, so actions.save_settings leaves
+      // candidate_profile.toml untouched (see its candidate_present docstring).
+      candidate_present: false,
     }
     try {
       const next = await put<SettingsContext>('/api/settings', body)
@@ -218,12 +207,10 @@ export function Settings() {
         <div className="card">
           <h2>Candidate Profile</h2>
           {ctx.candidate_error && <div className="banner banner--denied">{ctx.candidate_error}</div>}
-          <Field label="Full name" name="candidate_name" form={form} setForm={setForm}
-                errors={errors} hint="Used to fill Greenhouse's name fields." />
-          <Field label="Email" name="candidate_email" form={form} setForm={setForm} errors={errors} />
-          <Field label="Phone" name="candidate_phone" form={form} setForm={setForm} errors={errors} />
-          <Field label="LinkedIn URL (optional)" name="linkedin_url" form={form} setForm={setForm} errors={errors} />
-          <Field label="Portfolio URL (optional)" name="portfolio_url" form={form} setForm={setForm} errors={errors} />
+          <p className="rationale">
+            Name, contact details, work history and education are edited on the Profile page.
+          </p>
+          <Link className="btn" to="/profile">Open Profile →</Link>
         </div>
 
         <div className="card">

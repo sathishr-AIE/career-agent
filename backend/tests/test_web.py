@@ -1309,6 +1309,28 @@ def test_settings_page_saves_a_new_candidate_profile(client, tmp_path):
     assert saved.candidate_name == "Jane Doe"
 
 
+def test_put_api_settings_with_candidate_present_false_leaves_the_profile_file_untouched(
+        client, brief_path, tmp_path):
+    """M6: Settings.tsx dropped its Candidate Profile card in favor of a link
+    to Profile, so it always sends candidate_present: false -- that must
+    never touch candidate_profile.toml, existing or not."""
+    target = tmp_path / "candidate_profile.toml"
+    target.write_text('candidate_name = "Jane Doe"\ncandidate_email = "jane@x.com"\n'
+                      'candidate_phone = "+91-1"\n', encoding="utf-8")
+    web.CANDIDATE_PROFILE_PATH = target
+    before = target.read_text(encoding="utf-8")
+
+    r = client.put("/api/settings", json={
+        "target_titles": "AI Engineer", "search_locations": "Chennai",
+        "locations": "Chennai, Remote", "remote_ok": True,
+        "daily_cap": 5, "gate_threshold": 72, "staleness_days": 30,
+        "scoring_model": "claude-sonnet-5", "max_score_per_run": 25,
+        "brief_present": True, "candidate_present": False,
+    })
+    assert r.status_code == 200
+    assert target.read_text(encoding="utf-8") == before
+
+
 def test_settings_page_rejects_a_blank_candidate_name(client, tmp_path):
     target = tmp_path / "fresh_candidate_profile.toml"
     web.CANDIDATE_PROFILE_PATH = target
@@ -1608,6 +1630,63 @@ def test_all_applications_apply_uses_override_for_a_skip_verdict(client):
     all_tab = _all_tab(client.get("/applications?show=skipped").text)
     assert 'hx-post="/override/2"' in all_tab
     assert 'hx-post="/apply/2"' not in all_tab
+
+
+def test_api_applications_reports_failure_reason_and_score_dimensions(client):
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status, failure_reason)"
+                 " VALUES (1, 'tailored-1-r1', 'failed_permanent', 'stuck')")
+    conn.commit()
+
+    r = client.get("/api/applications?show=skipped").json()
+    row = next(j for j in r["jobs"] if j["id"] == 1)
+    assert row["failure_reason"] == "stuck"
+    assert row["application_id"] is not None
+    assert (row["role_fit"], row["credibility"], row["opportunity"],
+           row["application_quality"], row["eligibility_soft"]) == (90, 90, 90, 90, 90)
+
+    other = next(j for j in r["jobs"] if j["id"] == 2)   # never applied
+    assert other["failure_reason"] is None and other["application_id"] is None
+
+
+def test_transcript_route_serves_a_file_inside_log_dir(client, tmp_path, monkeypatch):
+    from career_agent.apply import agent as agent_mod
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    transcript = log_dir / "job-1.txt"
+    transcript.write_text("redacted transcript", encoding="utf-8")
+    monkeypatch.setattr(agent_mod, "LOG_DIR", log_dir)
+
+    conn = db.connect(web.DB_PATH)
+    cur = conn.execute(
+        "INSERT INTO application (job_id, resume_version, status, transcript_path)"
+        " VALUES (1, 'tailored-1-r1', 'failed_permanent', ?)", (str(transcript),))
+    app_id = cur.lastrowid
+    conn.commit()
+
+    r = client.get(f"/api/transcript/{app_id}")
+    assert r.status_code == 200 and r.text == "redacted transcript"
+
+
+def test_transcript_route_404s_outside_log_dir_or_missing(client, tmp_path, monkeypatch):
+    from career_agent.apply import agent as agent_mod
+    monkeypatch.setattr(agent_mod, "LOG_DIR", tmp_path / "logs")
+
+    conn = db.connect(web.DB_PATH)
+    outside = tmp_path / "elsewhere.txt"
+    outside.write_text("not a transcript", encoding="utf-8")
+    cur = conn.execute(
+        "INSERT INTO application (job_id, resume_version, status, transcript_path)"
+        " VALUES (1, 'tailored-1-r1', 'failed_permanent', ?)", (str(outside),))
+    app_id = cur.lastrowid
+    conn.commit()
+    assert client.get(f"/api/transcript/{app_id}").status_code == 404
+
+    cur2 = conn.execute(
+        "INSERT INTO application (job_id, resume_version, status) VALUES (1, 'tailored-1-r1', 'failed')")
+    conn.commit()
+    assert client.get(f"/api/transcript/{cur2.lastrowid}").status_code == 404
+    assert client.get("/api/transcript/999999").status_code == 404
 
 
 def test_the_skipped_tab_does_not_gain_a_duplicate_apply_button(client):
@@ -2072,6 +2151,29 @@ def test_run_status_context_exposes_the_open_prompt_and_conversation(client):
     cpid = chat.open_prompt(conn, 1, "confirm", {"fields": []})
     assert web._run_status_context(conn)["open_prompt"] == {
         "id": cpid, "kind": "confirm", "question": "Review before applying", "needs_answer": False}
+
+
+def test_run_status_falls_back_to_a_manual_applys_open_card(client):
+    """A manual Apply/Override click never sets current_job_id (only the
+    worker loop does) -- without the fallback, its CONFIRM card is invisible
+    from the status bar."""
+    from career_agent import chat
+    conn = db.connect(web.DB_PATH)
+    worker.set_run_state(conn, "apply", status="idle", current_job_id=None)
+    assert web._run_status_context(conn)["current_job"] is None
+
+    pid = chat.open_prompt(conn, 1, "confirm", {"fields": []})
+    ctx = web._run_status_context(conn)
+    assert ctx["current_job"]["job_id"] == 1
+    assert ctx["conversation_id"] == chat.conversation_for_job(conn, 1)
+    assert ctx["open_prompt"] == {
+        "id": pid, "kind": "confirm", "question": "Review before applying", "needs_answer": False}
+
+    # A Home card (no job_id) must never be picked up here.
+    chat.expire_open_prompts(conn, 1)
+    chat.open_home_prompt(conn, "approve", {"origin": "home", "action": "find_jobs",
+                                            "args": {}, "question": "Run discovery now?"})
+    assert web._run_status_context(conn)["current_job"] is None
 
 
 # -- Task 9 fix round 1 ---------------------------------------------------------

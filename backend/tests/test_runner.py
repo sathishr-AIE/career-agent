@@ -80,6 +80,50 @@ def test_ask_sets_waiting_and_answer_is_sent_on_stdin():
     assert run.wait(5) and run.cost_total == 0.2
 
 
+def test_queued_notes_ride_the_next_send_ahead_of_the_answer():
+    run, fake = _run()
+    fake.emit(_assistant(f'ASK:{NONCE}:{{"id":"q1","kind":"text","question":"q"}}'))
+    fake.emit(_result())
+    assert run.waiting.wait(5)
+
+    assert run.add_note("use my work email") is True
+    assert run.add_note("skip the cover letter") is True
+    assert run.notes == ["use my work email", "skip the cover letter"]
+
+    answer = f'ANSWER:{NONCE}:{{"id":"q1","answer":"30 days"}}'
+    assert run.send(answer) is True
+    assert run.notes == []                                # cleared once sent
+    assert _until(lambda: "ANSWER:" in fake.stdin.getvalue())
+    last_line = fake.stdin.getvalue().splitlines()[-1]
+    payload = json.loads(last_line)["message"]["content"][0]["text"]
+    lines = payload.splitlines()
+    assert lines[-1] == answer                             # the answer is last
+    assert lines[0] == f'NOTE:{NONCE}:{{"text": "use my work email"}}'
+    assert lines[1] == f'NOTE:{NONCE}:{{"text": "skip the cover letter"}}'
+    fake.emit(_assistant(f"RESULT:{NONCE}:APPLIED")); fake.emit(_result()); fake.close()
+    assert run.wait(5)
+
+
+def test_add_note_refuses_once_the_run_is_done_and_a_note_alone_writes_nothing():
+    run, fake = _run()
+    fake.emit(_assistant(f"RESULT:{NONCE}:APPLIED")); fake.emit(_result()); fake.close()
+    assert run.wait(5)
+    assert run.add_note("too late") is False
+    assert run.notes == []
+    assert "too late" not in fake.stdin.getvalue()
+
+
+def test_a_note_alone_never_writes_before_a_send():
+    run, fake = _run()
+    fake.emit(_assistant(f'ASK:{NONCE}:{{"id":"q1","kind":"text","question":"q"}}'))
+    fake.emit(_result())
+    assert run.waiting.wait(5)
+    assert run.add_note("just a note") is True
+    time.sleep(0.05)
+    assert "just a note" not in fake.stdin.getvalue()      # queued, not written
+    fake.close(); assert run.wait(5)                        # kill() closes stdin; no hang
+
+
 def test_turn_without_ask_or_result_is_nudged_then_given_up():
     run, fake = _run()
     for _ in range(4):

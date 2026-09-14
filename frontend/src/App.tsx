@@ -8,6 +8,10 @@ const NAV = [
   { to: '/dashboard', label: 'Dashboard' },
   { to: '/applications', label: 'Applications' },
   { to: '/resumes', label: 'Resumes' },
+  { to: '/facts', label: 'Facts' },
+  { to: '/memory', label: 'Memory' },
+  { to: '/logins', label: 'Logins' },
+  { to: '/profile', label: 'Profile' },
   { to: '/settings', label: 'Settings' },
 ]
 

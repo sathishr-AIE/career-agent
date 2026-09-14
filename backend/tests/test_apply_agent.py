@@ -298,6 +298,19 @@ def test_prompt_teaches_ask_and_confirm_with_nonce():
     assert "RESULT:n1:APPLIED" not in p.split("== RESULT CODES")[0]
 
 
+def test_prompt_teaches_notes_from_the_human_with_nonce_and_no_submit_authority():
+    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual",
+                     can_submit=True, nonce=N)
+    notes = p.split("== NOTES FROM THE HUMAN ==")[1].split("== BEFORE APPLYING ==")[0]
+    assert f"NOTE:{N}:" in notes
+    assert "never a DECISION or an ANSWER" in notes
+    assert "does not by itself authorize a submit" in notes
+    assert "Never output a NOTE:" in notes
+    # Comes after HOW TO ASK THE HUMAN, still inside the BEFORE APPLYING boundary check above.
+    assert p.index("== HOW TO ASK THE HUMAN ==") < p.index("== NOTES FROM THE HUMAN ==")
+    assert p.index("== NOTES FROM THE HUMAN ==") < p.index("== BEFORE APPLYING ==")
+
+
 def test_end_your_turn_follows_both_ask_and_confirm():
     p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx", mode="manual",
                      can_submit=False, nonce="n1")

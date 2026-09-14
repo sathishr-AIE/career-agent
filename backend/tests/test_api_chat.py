@@ -95,12 +95,13 @@ def test_second_conversations_poll_does_no_backfill(client, conn):
 
 
 class _LiveRun:
-    """A registered run waiting on its prompt: same send() contract as AgentRun."""
+    """A registered run waiting on its prompt: same send()/add_note() contract
+    as AgentRun."""
     def __init__(self):
         import threading
         from career_agent.apply.runner import RunEvents
         self.events = RunEvents()
-        self.nonce, self.sent = "n0nce", []
+        self.nonce, self.sent, self.notes = "n0nce", [], []
         self.waiting, self.done = threading.Event(), threading.Event()
         self.waiting.set()
 
@@ -109,6 +110,12 @@ class _LiveRun:
             return False
         self.waiting.clear()
         self.sent.append(text)
+        return True
+
+    def add_note(self, text):
+        if self.done.is_set():
+            return False
+        self.notes.append(text)
         return True
 
 
@@ -565,11 +572,45 @@ def test_home_post_routes_and_surfaces_the_card(client, conn, monkeypatch):
     assert "Commands arrive" not in str(r["messages"])
 
 
-def test_a_job_conversation_post_is_unchanged(client, conn, monkeypatch):
+def test_a_job_conversation_post_never_routes_through_intent(client, conn, monkeypatch):
     monkeypatch.setattr(intent_mod, "_default_runner", lambda *a: pytest.fail("routed a job chat"))
     cid = chat.conversation_for_job(conn, 1)
     assert client.post(f"/api/chat/{cid}/messages", json={"text": "hi"}).json()["ok"]
-    assert [m["role"] for m in chat.messages_after(conn, cid)] == ["user"]
+    roles = [m["role"] for m in chat.messages_after(conn, cid)]
+    assert roles == ["user", "system"]     # the "not sent" notice -- no live run
+
+
+def test_a_job_message_is_forwarded_to_a_live_run_as_a_note(client, conn, runs):
+    run = runs[1] = _LiveRun()
+    cid = chat.conversation_for_job(conn, 1)
+    r = client.post(f"/api/chat/{cid}/messages", json={"text": "use my work email"})
+    assert r.status_code == 200 and r.json()["ok"]
+    assert run.notes == ["use my work email"]
+    roles_and_content = [(m["role"], m["content"]) for m in chat.messages_after(conn, cid)]
+    assert roles_and_content[0] == ("user", "use my work email")
+    assert roles_and_content[1][0] == "system" and "Noted" in roles_and_content[1][1]
+    from career_agent.apply import checkpoint as cp_mod
+    cp_mod.start(conn, 1, "sess", "n0nce")     # a checkpoint row must exist to pin onto
+    client.post(f"/api/chat/{cid}/messages", json={"text": "second note"})
+    assert cp_mod.get(conn, 1)["notes"] == ["second note"]
+
+
+def test_a_job_message_with_no_live_run_is_saved_but_not_sent(client, conn):
+    cid = chat.conversation_for_job(conn, 1)
+    r = client.post(f"/api/chat/{cid}/messages", json={"text": "skip the cover letter"})
+    assert r.status_code == 200 and r.json()["ok"]
+    roles_and_content = [(m["role"], m["content"]) for m in chat.messages_after(conn, cid)]
+    assert roles_and_content[0] == ("user", "skip the cover letter")
+    assert roles_and_content[1][0] == "system" and "not sent" in roles_and_content[1][1]
+
+
+def test_a_secret_shaped_job_message_is_refused_and_never_stored(client, conn, runs):
+    run = runs[1] = _LiveRun()
+    cid = chat.conversation_for_job(conn, 1)
+    r = client.post(f"/api/chat/{cid}/messages", json={"text": "my password is hunter2"})
+    assert r.status_code == 422
+    assert chat.messages_after(conn, cid) == []
+    assert run.notes == []
 
 
 @pytest.fixture

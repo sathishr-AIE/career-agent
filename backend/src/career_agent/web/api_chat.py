@@ -66,10 +66,12 @@ def api_job_conversation(job_id: int):
 @router.post("/{cid}/messages")
 async def api_post_message(cid: int, text: str = Body(..., embed=True)):
     """A Home message is routed (off the event loop) and answered there; a
-    job chat message is only recorded."""
+    job chat message is guidance for its agent (actions.job_message) --
+    delivered with the run's next answer, never mid-turn, and never
+    something that alone can approve a submission."""
     m = _app()
     conn = m._conn()
-    conv = conn.execute("SELECT kind FROM conversation WHERE id = ?", (cid,)).fetchone()
+    conv = conn.execute("SELECT kind, job_id FROM conversation WHERE id = ?", (cid,)).fetchone()
     if not conv:
         raise HTTPException(status_code=404, detail="conversation not found")
     stripped = text.strip()
@@ -78,7 +80,8 @@ async def api_post_message(cid: int, text: str = Body(..., embed=True)):
     if conv["kind"] == "home":
         return await actions.home_message(conn, stripped, m.BRIEF_PATH, m.CANDIDATE_PROFILE_PATH,
                                           m._chat_conn, tasks=m._background_tasks)
-    return {"ok": True, "message_id": chat.post_message(conn, cid, "user", stripped)}
+    result = actions.job_message(conn, cid, conv["job_id"], stripped)
+    return JSONResponse(status_code=200 if result["ok"] else result["code"], content=result)
 
 
 @router.post("/prompts/{prompt_id}/answer")

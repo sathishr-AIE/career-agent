@@ -71,6 +71,32 @@ def test_continue_message(conn):
     assert json.loads(first.split(":", 2)[2]) == {"step": "answered q1", "answers": {"Notice?": "30"}}
     assert "You were interrupted" in rest and "emit it again now" in rest
     assert "PREVIOUSLY ANSWERED" in rest
+    assert "NOTE:" not in msg                             # nothing pinned -- nothing to carry
+
+
+def test_add_note_pins_to_the_checkpoint_and_continue_message_carries_it(conn):
+    checkpoint.start(conn, 1, "s1", "abc")
+    assert checkpoint.get(conn, 1)["notes"] == []
+    assert checkpoint.add_note(conn, 1, "use my work email") is True
+    assert checkpoint.add_note(conn, 1, "skip the cover letter") is True
+    assert checkpoint.get(conn, 1)["notes"] == ["use my work email", "skip the cover letter"]
+
+    msg = checkpoint.continue_message(checkpoint.get(conn, 1), "abc")
+    lines = msg.splitlines()
+    assert lines[-2] == 'NOTE:abc:{"text": "use my work email"}'
+    assert lines[-1] == 'NOTE:abc:{"text": "skip the cover letter"}'
+
+
+def test_add_note_is_a_no_op_without_a_checkpoint_row(conn):
+    assert checkpoint.get(conn, 1) is None
+    assert checkpoint.add_note(conn, 1, "too early") is False
+
+
+def test_start_resets_notes_for_a_genuinely_fresh_session(conn):
+    checkpoint.start(conn, 1, "s1", "abc")
+    checkpoint.add_note(conn, 1, "carried over?")
+    checkpoint.start(conn, 1, "s2", "def")     # e.g. a mode-mismatch restart
+    assert checkpoint.get(conn, 1)["notes"] == []
 
 
 def test_a_late_answer_never_reopens_a_finished_checkpoint(conn):
