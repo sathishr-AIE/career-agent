@@ -187,8 +187,8 @@ def _preferences_section(qa_rows) -> str:
     """PREFERENCES section (S4 personalized memory): one line per qa_bank row
     carrying a memory_key -- a preference a human confirmed once that should
     apply across every job, not just the one it was first asked on. Not
-    wired into build_prompt's section list here; Task 18 places it ahead of
-    KNOWN ANSWERS per the precedence order in the design spec. Rows with no
+    build_prompt places it ahead of KNOWN ANSWERS per the precedence order in
+    the design spec. Rows with no
     memory_key (the ordinary literal-question qa_bank rows) are skipped."""
     from career_agent.apply.ats import _confirmed_within_days, QA_VOLATILE_WINDOW_DAYS
 
@@ -211,7 +211,7 @@ def _hard_rules_section() -> str:
         "== HARD RULES ==\n"
         "Never lie about work authorization, citizenship, sponsorship needs, criminal "
         "history, education credentials, or security clearance. These are hard facts: "
-        "answer them only from PROFILE, PREVIOUSLY ANSWERED, KNOWN ANSWERS, or the "
+        "answer them only from PROFILE, PREVIOUSLY ANSWERED, PREFERENCES, KNOWN ANSWERS, or the "
         "human's reply to an ASK. If a hard-fact question is not covered by any of "
         "those, do NOT guess -- ask the human for it with an ASK line (see HOW TO ASK "
         "THE HUMAN).\n"
@@ -387,8 +387,9 @@ def _steps_section(mode, can_submit) -> str:
         "9. When every field is filled, follow BEFORE APPLYING.\n"
         "\n"
         "== HOW TO ASK THE HUMAN ==\n"
-        "When a field is not covered by APPLICANT PROFILE, PREVIOUSLY ANSWERED, KNOWN "
-        "ANSWERS, or SCREENING STRATEGY, or when a rule in this prompt requires "
+        "When a field is not covered by APPLICANT PROFILE, PREVIOUSLY ANSWERED, "
+        "PREFERENCES, KNOWN ANSWERS, or SCREENING STRATEGY -- check them all first -- "
+        "or when a rule in this prompt requires "
         "approval, output exactly one line\n"
         '  ASK:{"id":"<short id>","kind":"choice|text|approve|approve_account|need_password",'
         '"question":"...","options":[...],"why":"...","memory_key":"<snake_case or null>",'
@@ -401,7 +402,7 @@ def _steps_section(mode, can_submit) -> str:
         "type a password yourself.\n"
         "The JSON stays on that one line -- escape any newline inside a value as \\n. kind \"choice\" needs a non-empty options "
         "list. A KNOWN ANSWER marked stale is asked too, with that answer as default. "
-        "Use memory_key for facts that recur across applications (notice_period, "
+        "Always set memory_key for facts that recur across applications (notice_period, "
         "expected_salary, relocation_willing, ...). Never guess a hard fact -- ASK it.\n"
         "\n"
         "== BEFORE APPLYING ==\n"
@@ -538,7 +539,14 @@ def build_prompt(job, profile, brief, qa_rows, resume_text, resume_path, *,
         mark = "  [stale -- reconfirm before relying on this]" if stale else ""
         return f"- {row['question_normalized']} -> {row['answer']}{mark}"
 
-    known_answers = "\n".join(qa_line(r) for r in qa_rows) or "(none recorded)"
+    # Twins of a keyed row are history (store.without_twins); a keyed row goes
+    # to PREFERENCES, not KNOWN ANSWERS. Secret-looking rows never reach the
+    # prompt, whichever path stored them (qa_remember already refuses them).
+    from career_agent.store import _SECRET_QA_RE, without_twins
+    qa_rows = [r for r in without_twins(qa_rows) if not _SECRET_QA_RE.search(
+        f"{r['question_normalized']} {r['memory_key'] or ''}")]
+    known_answers = "\n".join(
+        qa_line(r) for r in qa_rows if not r["memory_key"]) or "(none recorded)"
     locations = ", ".join(getattr(brief, "locations", []) or []) or "remote only"
 
     # Data the agent is given vs. instructions it is told to follow. Only
@@ -550,10 +558,12 @@ def build_prompt(job, profile, brief, qa_rows, resume_text, resume_path, *,
         _files_section(resume_path),
         f"== RESUME TEXT ==\n{resume_text}",
         _profile_section(profile),
-        f"== KNOWN ANSWERS (prefer these verbatim) ==\n{known_answers}",
     ]
     if logins:      # credentials.list_ rows: domain + email, never a password
         data.append(_known_logins_section(logins))
+    if preferences := _preferences_section(qa_rows):
+        data.append(preferences)
+    data.append(f"== KNOWN ANSWERS (prefer these verbatim) ==\n{known_answers}")
     if pinned_answers is not None:
         data.append(pinned_section(pinned_answers))
     rules = [

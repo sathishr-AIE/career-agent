@@ -2207,3 +2207,16 @@ def test_do_apply_never_expires_a_live_runs_card(client, monkeypatch):
     assert conn.execute("SELECT status FROM agent_prompt WHERE id = ?", (pid,)).fetchone()[0] == "open"
     texts = [m["content"] for m in chat.messages_after(conn, chat.conversation_for_job(conn, 1))]
     assert any(t.startswith("Apply refused:") and "in_flight" in t for t in texts)
+
+
+def test_chat_side_routers_are_mounted(client, monkeypatch):
+    """Task 18: memory, logins and profile answer through the real app, and
+    mounting them broke neither an existing /api route nor a Jinja page."""
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv("CREDENTIAL_KEY", Fernet.generate_key().decode())
+    for path in ("/api/memory", "/api/logins", "/api/profile",
+                 "/api/chat/conversations", "/api/overview", "/"):
+        assert client.get(path).status_code == 200, path
+    assert client.get("/api/profile").json()["profile"]["candidate_name"] == "Jane Doe"
+    assert client.get("/api/memory").json() == {"items": []}
+    assert client.get("/api/logins").json() == {"items": []}

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { Link } from 'react-router-dom'
 import type { ChatMessage, OpenPrompt } from '../../api'
 import { ConfirmCard } from './ConfirmCard'
 import { PromptCard } from './PromptCard'
@@ -39,6 +40,12 @@ export function MessageList({
         return (
           <div key={m.id} className={`msg msg--${m.role}`}>
             <div className="msg__body">{m.content}</div>
+            {/* Home's "Started — follow along" line carries the job's conversation */}
+            {typeof m.payload?.conversation_id === 'number' && (
+              <Link className="btn" to={`/chat/${m.payload.conversation_id}`}>
+                Open the job's chat
+              </Link>
+            )}
             {m.role === 'prompt' && (
               <div className="msg__tag">{m.prompt_status === 'answered' ? 'answered' : 'closed'}</div>
             )}

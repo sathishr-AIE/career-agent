@@ -1,5 +1,8 @@
 import { useEffect, type ReactNode } from 'react'
 import { Applications } from '../../routes/Applications'
+import { Logins } from '../../routes/Logins'
+import { Memory } from '../../routes/Memory'
+import { Profile } from '../../routes/Profile'
 import { Resumes } from '../../routes/Resumes'
 import { Settings } from '../../routes/Settings'
 
@@ -8,6 +11,9 @@ import { Settings } from '../../routes/Settings'
 const PANELS: Record<string, { title: string; el: () => ReactNode }> = {
   applications: { title: 'Queue', el: () => <Applications /> },
   resumes: { title: 'Résumés', el: () => <Resumes /> },
+  memory: { title: 'Memory', el: () => <Memory /> },
+  logins: { title: 'Logins', el: () => <Logins /> },
+  profile: { title: 'Profile', el: () => <Profile /> },
   settings: { title: 'Settings', el: () => <Settings /> },
 }
 

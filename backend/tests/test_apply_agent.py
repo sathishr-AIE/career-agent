@@ -171,15 +171,61 @@ def test_preferences_section_empty_when_no_row_has_a_key():
     assert _preferences_section(QA) == ""
 
 
-def test_preferences_section_not_wired_into_build_prompt_yet():
-    """Task 18 wires this in -- until then build_prompt must not emit it,
-    even when a qa_row carries a memory_key."""
-    keyed = QA + [{"question_normalized": "notice_period", "answer": "30 days",
-                   "is_volatile": 0, "last_confirmed_at": "2026-09-13 00:00:00",
-                   "memory_key": "notice_period"}]
-    p = build_prompt(_job(), _profile(), _brief(), keyed, "r", "x.docx",
+def _pref(key, answer, **kw):
+    return {"question_normalized": key.replace("_", " "), "answer": answer,
+            "is_volatile": 0, "last_confirmed_at": "2026-09-13 00:00:00",
+            "memory_key": key, "twin_key": None, **kw}
+
+
+def test_build_prompt_orders_profile_logins_preferences_known_answers():
+    logins = [{"domain": "careers.ses.com", "email": "asha@example.com"}]
+    rows = QA + [_pref("notice_period", "30 days")]
+    p = build_prompt(_job(), _profile(), _brief(), rows, "r", "x.docx",
+                     mode="auto", can_submit=True, nonce=N, logins=logins)
+    order = [p.index(h) for h in ("== APPLICANT PROFILE", "== KNOWN LOGINS ==",
+                                  "== PREFERENCES ==", "== KNOWN ANSWERS")]
+    assert order == sorted(order)
+    # the ASK protocol points the agent at both memory sections before asking
+    assert "PREFERENCES" in agent_mod._steps_section("manual", True).split("HOW TO ASK THE HUMAN ==")[1]
+
+
+def test_build_prompt_hides_literal_twin_of_a_keyed_preference():
+    twin = {"question_normalized": "what is your notice period", "answer": "30 days",
+            "is_volatile": 0, "last_confirmed_at": None, "memory_key": None,
+            "twin_key": "notice_period"}
+    orphan = dict(twin, question_normalized="orphan twin question", twin_key="gone_key")
+    p = build_prompt(_job(), _profile(), _brief(), QA + [_pref("notice_period", "30 days"), twin, orphan],
+                     "r", "x.docx", mode="auto", can_submit=True, nonce=N)
+    known = p.split("== KNOWN ANSWERS")[1]
+    assert "- notice_period: 30 days" in p.split("== PREFERENCES ==")[1]
+    assert "what is your notice period" not in p
+    assert "orphan twin question" in known     # twin_key naming no keyed row stays
+    assert "years of python experience" in known
+
+
+def test_build_prompt_known_logins_domain_and_email_only():
+    logins = [{"id": 7, "domain": "careers.ses.com", "email": "asha@example.com",
+               "password": "hunter2-secret", "ciphertext": "gAAAA-cipher",
+               "login_url": "https://careers.ses.com/login-xyz"}]
+    p = build_prompt(_job(), _profile(), _brief(), [], "r", "x.docx",
+                     mode="auto", can_submit=True, nonce=N, logins=logins)
+    section = p.split("== KNOWN LOGINS ==")[1].split(chr(10) * 2 + "==")[0]
+    assert "careers.ses.com (sign in as asha@example.com)" in section
+    for leak in ("hunter2-secret", "gAAAA-cipher", "login-xyz"):
+        assert leak not in p
+
+
+def test_build_prompt_never_renders_secret_looking_rows():
+    rows = [
+        {"question_normalized": "what is your bank account number", "answer": "SECRET-A",
+         "is_volatile": 0, "last_confirmed_at": None, "memory_key": None, "twin_key": None},
+        _pref("portal_password", "SECRET-B"),
+        _pref("notice_period", "30 days"),
+    ]
+    p = build_prompt(_job(), _profile(), _brief(), rows, "r", "x.docx",
                      mode="auto", can_submit=True, nonce=N)
-    assert "== PREFERENCES ==" not in p
+    assert "SECRET-A" not in p and "SECRET-B" not in p
+    assert "- notice_period: 30 days" in p
 
 
 def test_parse_ask_requires_nonce_and_shape():
@@ -327,7 +373,7 @@ def test_prompt_contains_safety_and_platform_rules():
 
 def test_unconfirmed_volatile_row_is_marked_stale():
     qa = [{"question_normalized": "sponsorship needed", "answer": "No",
-           "is_volatile": 1, "last_confirmed_at": None}]
+           "is_volatile": 1, "last_confirmed_at": None, "memory_key": None}]
     p = build_prompt(_job(), _profile(), _brief(), qa, "r", "x.docx", mode="auto", can_submit=True, nonce=N)
     assert "sponsorship needed -> No  [stale" in p
 

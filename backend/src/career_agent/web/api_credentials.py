@@ -1,7 +1,6 @@
 """GET/DELETE /api/logins: the Logins drawer (slice S5). Metadata only --
 credentials.list_ never returns a password or its ciphertext. Same
-deferred-import rule as api_memory.py, and deliberately NOT mounted in
-app.py -- Task 18 wires routers together."""
+deferred-import rule as api_memory.py. Mounted in app.py."""
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 

@@ -1,6 +1,5 @@
 """GET/PUT /api/profile: the candidate_profile.toml editor (Task 17's half
-of slice S6). Same deferred-import rule as api.py/api_chat.py, and
-deliberately NOT mounted in app.py -- Task 18 wires routers together."""
+of slice S6). Same deferred-import rule as api.py/api_chat.py. Mounted in app.py."""
 from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError

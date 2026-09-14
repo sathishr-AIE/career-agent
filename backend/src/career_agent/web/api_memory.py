@@ -1,7 +1,6 @@
 """GET/PUT/DELETE /api/memory: the qa_bank editor (Task 13's half of slice
 S4 -- personalized agent memory). Same deferred-import rule as api.py/
-api_chat.py, and deliberately NOT mounted in app.py -- Task 18 wires
-routers together."""
+api_chat.py. Mounted in app.py."""
 from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 

@@ -270,7 +270,17 @@ def qa_all(conn) -> list:
     return conn.execute(
         "SELECT question_normalized, answer, is_volatile, last_confirmed_at,"
         " memory_key, kind, options_json, source_job_id, use_count,"
-        " last_used_at FROM qa_bank ORDER BY question_normalized").fetchall()
+        " last_used_at, twin_key FROM qa_bank ORDER BY question_normalized").fetchall()
+
+
+def without_twins(rows) -> list:
+    """Drop literal rows that are a keyed row's twin -- twin_key equalling
+    some keyed row's memory_key (see qa_remember). Shared by the /memory
+    drawer and build_prompt so a preference is never shown twice. A row
+    with no twin_key field at all counts as not a twin."""
+    keyed_keys = {r["memory_key"] for r in rows if r["memory_key"]}
+    return [r for r in rows if r["memory_key"]
+            or ("twin_key" not in r.keys() or r["twin_key"] not in keyed_keys)]
 
 
 def qa_update(conn, row_id: int, answer: str, is_volatile: bool) -> bool:
@@ -326,13 +336,9 @@ def memory_list(conn) -> list[dict]:
         "SELECT id, question_normalized, answer, is_volatile, last_confirmed_at,"
         " memory_key, kind, options_json, source_job_id, use_count,"
         " last_used_at, twin_key FROM qa_bank ORDER BY question_normalized").fetchall()
-    keyed_keys = {r["memory_key"] for r in rows if r["memory_key"]}
-
     items = []
-    for r in rows:
+    for r in without_twins(rows):
         is_keyed = bool(r["memory_key"])
-        if not is_keyed and r["twin_key"] and r["twin_key"] in keyed_keys:
-            continue
         items.append({
             "id": r["id"],
             "label": r["memory_key"] or r["question_normalized"],
