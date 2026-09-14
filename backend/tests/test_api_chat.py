@@ -873,3 +873,29 @@ def test_a_job_card_answer_runs_off_the_event_loop(client, conn, runs, monkeypat
     pid = _confirm_prompt(conn)
     assert client.post(f"/api/chat/prompts/{pid}/answer", json={"decision": "approve"}).status_code == 200
     assert seen == ["off loop"]
+
+
+def test_approving_an_account_through_the_route_fills_off_the_event_loop(client, conn, runs, monkeypatch):
+    """The real answer route with the real secret_fill (its running-loop guard
+    active) and a fake CDP connect: the fill runs in the threadpool, the login
+    is stored, and the agent hears only "submitted"."""
+    from cryptography.fernet import Fernet
+    from test_secret_fill import Field, Page, connect_to
+    from career_agent import credentials
+    from career_agent.apply import secret_fill
+    monkeypatch.setenv("CREDENTIAL_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(secret_fill, "SUBMIT_WAIT_S", 0)
+    page = Page("https://careers.ses.com/join", [Field()])
+    monkeypatch.setattr(secret_fill, "_live_connect", connect_to(page))
+    run = runs[1] = _LiveRun()
+    run.secrets = set()
+    pid = chat.open_prompt(conn, 1, "approve_account", {
+        "id": "acct", "kind": "approve_account", "question": "Create an account?",
+        "domain": "careers.ses.com", "email": "a@x.com",
+        "login_url": "https://careers.ses.com/join"})
+    r = client.post(f"/api/chat/prompts/{pid}/answer", json={"answer": "approve"})
+    assert r.status_code == 200, r.json()
+    pw = page.main.fields[0].fills[0]
+    assert page.main.submits == ["requestSubmit"]
+    assert credentials.get(conn, "careers.ses.com")["password"] == pw
+    assert run.sent == ['ANSWER:n0nce:{"id": "acct", "answer": "approve", "submitted": true}']
