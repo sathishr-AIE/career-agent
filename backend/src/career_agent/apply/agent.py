@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from career_agent import credentials
+from career_agent.apply import secret_fill
 
 if TYPE_CHECKING:
     from career_agent.apply.runner import AgentRun   # runner imports this module
@@ -267,7 +268,9 @@ ACCOUNT_RULES_S5 = (
     'page, while "none" means there is no login you may use. You never type, read, or '
     "ask for a password -- never choose one, never type into a password field, never "
     "click a show-password control, never ask the human for one, and never take a "
-    "screenshot on a sign-in or sign-up page."
+    "screenshot on a sign-in or sign-up page. If a page shows both a sign-in and a "
+    "sign-up form, first open the specific one you need (its tab, link or button) so "
+    "only that form is on the page, then ASK."
 )
 
 
@@ -620,6 +623,9 @@ def _account_ask_ok(p: dict) -> bool:
             return False
         if not _allowed_url(p.get("login_url")):
             return False
+        # M-2: stored and shown as scheme+host+path -- an invite token in the
+        # query must reach neither the card nor the credential row.
+        p["login_url"] = secret_fill.display_url(p["login_url"].strip())
         p.setdefault("question", f"Create an account at {p['domain']} as {email}?")
     else:
         if not _allowed_url(p.get("url")):

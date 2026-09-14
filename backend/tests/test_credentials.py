@@ -249,7 +249,8 @@ def test_an_agent_put_never_overwrites_any_existing_login(conn):
 
 @pytest.mark.parametrize("domain", ["careers.ses.com", "ses.wd3.myworkdayjobs.com",
                                     "acme.wd103.myworkdayjobs.com", "bbc.co.uk",
-                                    "acme.vercel.app", "boards.greenhouse.io",
+                                    "acme.vercel.app", "acme.bamboohr.com",
+                                    "acme.workable.com", "acme.ltd.co.uk",
                                     "https://www.careers.ses.com/join"])
 def test_account_domain_accepts_a_real_site(domain):
     assert credentials.account_domain(domain) == credentials.normalize_domain(domain)
@@ -261,7 +262,13 @@ def test_account_domain_accepts_a_real_site(domain):
     "myworkdayjobs.com", "wd3.myworkdayjobs.com", "acme.jobs.myworkdayjobs.com",
     "github.io", "greenhouse.io", "lever.co", "successfactors.com", "vercel.app",
     "netlify.app", "pages.dev", "web.app", "firebaseapp.com", "herokuapp.com",
-    "azurewebsites.net", "blogspot.com"])
+    "azurewebsites.net", "blogspot.com",
+    # M-1: path-based ATS hosts every company shares, and wildcard-DNS suffixes
+    "wd5.myworkday.com", "wd12.myworkday.com", "wd1.myworkdaysite.com",
+    "career2.successfactors.eu", "career10.successfactors.com", "jobs.smartrecruiters.com",
+    "apply.workable.com", "jobs.lever.co", "boards.greenhouse.io",
+    "job-boards.greenhouse.io", "jobs.ashbyhq.com", "bamboohr.com", "workable.com",
+    "s3.amazonaws.com", "ltd.co.uk", "nip.io", "10.0.0.1.nip.io", "app.sslip.io"])
 def test_account_domain_refuses_bare_ip_and_shared_suffixes(domain):
     with pytest.raises(ValueError):
         credentials.account_domain(domain)

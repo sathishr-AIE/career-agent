@@ -31,6 +31,8 @@ SUBMIT_WAIT_S = 10          # for the post-submit navigation or DOM change
 _PASSWORD_INPUT = "input[type=password]"
 _SUBMIT_FORM = "e => { if (!e.form) return false; e.form.requestSubmit(); return true }"
 _CONNECTED = "e => e.isConnected"
+_FORM_INDEX = "e => e.form ? Array.prototype.indexOf.call(document.forms, e.form) : -1"
+SCRUB_SETTLE_MS = 500       # an SPA re-render after a failed login lands within this
 
 
 @contextmanager
@@ -84,6 +86,13 @@ def _attached(handle) -> bool:
         return False            # a navigation destroyed its execution context
 
 
+def _try_clear(handle) -> None:
+    try:
+        handle.fill("", timeout=FIELD_TIMEOUT_MS)
+    except Exception:
+        pass                    # detached meanwhile; the re-scan decides
+
+
 def _clear(handles) -> bool:
     """Empty every filled field still on the page. True when none is left
     holding a value."""
@@ -97,16 +106,63 @@ def _clear(handles) -> bool:
     return clean
 
 
-def _submit_and_wait(page, frame, handles, wait_s: float) -> None:
+def _holds(handle, password: str) -> bool:
+    try:
+        return handle.input_value() == password
+    except Exception:
+        return False
+
+
+def _scrub(pages, page, domain: str, password: str) -> bool:
+    """I-2: a failed login's SPA re-render can put the password back into a NEW
+    input (from framework state) that _clear's old handles never see -- and
+    the agent's next snapshot would show it. The backend knows the exact
+    value: clear every input holding it on the domain's frames (type=text
+    included), wait SCRUB_SETTLE_MS, and look once more. True when clean."""
+    def holders():
+        return [h for p in pages for frame in p.frames
+                if credentials.host_matches(frame.url, domain)
+                for h in frame.query_selector_all("input") if _holds(h, password)]
+    for handle in holders():
+        _try_clear(handle)
+    page.wait_for_timeout(SCRUB_SETTLE_MS)
+    stubborn = holders()
+    for handle in stubborn:
+        _try_clear(handle)
+    return not stubborn
+
+
+def _password_groups(pages, domain: str) -> list:
+    """(page, frame, handles) per owning form -- a field with no form is its
+    own group -- for visible, empty password inputs in https frames on the
+    domain."""
+    groups: dict = {}
+    for page in pages:
+        for frame in page.frames:
+            if not _fillable(frame.url, domain):
+                continue
+            for handle in frame.query_selector_all(_PASSWORD_INPUT):
+                if not handle.is_visible() or handle.input_value():
+                    continue
+                form = handle.evaluate(_FORM_INDEX)
+                key = (id(frame), form) if form >= 0 else (id(frame), "solo", id(handle))
+                groups.setdefault(key, (page, frame, []))[2].append(handle)
+    return list(groups.values())
+
+
+def _submit_and_wait(page, frame, handles, wait_s: float) -> bool:
     """requestSubmit() on the last filled field's form, or Enter when it has
-    none; then wait (bounded) for a navigation or the fields to go away."""
+    none. True only once the frame navigates or the fields detach (checked at
+    least once, then polled until wait_s) -- M-3: nothing else proves a submit."""
     url, last = frame.url, handles[-1]
     if not last.evaluate(_SUBMIT_FORM):
         last.press("Enter", timeout=FIELD_TIMEOUT_MS)
     deadline = time.monotonic() + wait_s
-    while time.monotonic() < deadline:
+    while True:
         if frame.url != url or not all(_attached(h) for h in handles):
-            return
+            return True
+        if time.monotonic() >= deadline:
+            return False
         page.wait_for_timeout(250)
 
 
@@ -118,45 +174,52 @@ def page_urls(*, cdp_url: str = CDP_URL, connect=None) -> list[str]:
 
 
 def fill_and_submit(domain: str, password: str, *, cdp_url: str = CDP_URL,
-                    connect=None, wait_s: float | None = None,
+                    connect=None, wait_s: float | None = None, max_fields: int = 2,
                     after_submit=None) -> dict:
-    """Fill every visible, empty password input (a sign-up's confirm field
-    too) in the first https frame on `domain` that has one, submit its form,
-    run `after_submit` (the caller's store), then clear what is left -- the
-    clear runs even when the submit or after_submit raises.
+    """Fill the one form's visible, empty password inputs (1..max_fields: 1
+    for a sign-in, up to 2 for a sign-up's confirm) in an https frame on
+    `domain`, submit it, clear and scrub the value from the page, and only
+    after a proven, clean submit run `after_submit` (the caller's store).
 
-    Returns {"submitted": True, "cleared": bool, "page_url": display url} or
-    {"submitted": False, "pages": [display urls]}; never logs or returns the
-    password. A frame that navigates away mid-fill is cleared, never
-    submitted. `connect` (cdp_url -> context manager yielding a browser) is
-    the test seam."""
+    Returns {"submitted": True, "cleared": True, "page_url": display url} or
+    {"submitted": False, "reason": ..., "pages": [display urls]}, reason one of
+    no_field, ambiguous_form (I-3: a page with both a sign-in and a register
+    form), navigated, no_submit, value_persists. Never logs or returns the
+    password. `connect` (cdp_url -> context manager yielding a browser) is the
+    test seam."""
     _require_no_running_loop()
     wait_s = SUBMIT_WAIT_S if wait_s is None else wait_s
     with (connect or _live_connect)(cdp_url) as browser:
         pages = _pages(browser)
-        for page in pages:
-            for frame in page.frames:
-                if not _fillable(frame.url, domain):
-                    continue
-                handles = [h for h in frame.query_selector_all(_PASSWORD_INPUT)
-                           if h.is_visible() and not h.input_value()]
-                if not handles:
-                    continue
-                filled, submitted = [], False
-                try:
-                    for handle in handles:
-                        if not _fillable(frame.url, domain):    # navigated since the check
-                            break
-                        handle.fill(password, timeout=FIELD_TIMEOUT_MS)
-                        filled.append(handle)
-                    if filled and len(filled) == len(handles):
-                        page_url = display_url(frame.url)
-                        _submit_and_wait(page, frame, filled, wait_s)
-                        if after_submit is not None:
-                            after_submit()
-                        submitted = True
-                finally:
-                    cleared = _clear(filled)
-                if submitted:
-                    return {"submitted": True, "cleared": cleared, "page_url": page_url}
-        return {"submitted": False, "pages": [display_url(p.url) for p in pages]}
+
+        def refused(reason: str) -> dict:
+            return {"submitted": False, "reason": reason,
+                    "pages": [display_url(p.url) for p in pages]}
+
+        qualifying = [g for g in _password_groups(pages, domain)
+                      if 1 <= len(g[2]) <= max_fields]
+        if len(qualifying) != 1:
+            return refused("ambiguous_form" if qualifying else "no_field")
+        page, frame, handles = qualifying[0]
+        filled, reason = [], None
+        try:
+            for handle in handles:
+                if not _fillable(frame.url, domain):        # navigated since the check
+                    reason = "navigated"
+                    break
+                handle.fill(password, timeout=FIELD_TIMEOUT_MS)
+                filled.append(handle)
+            if reason is None:
+                page_url = display_url(frame.url)
+                if not _submit_and_wait(page, frame, filled, wait_s):
+                    reason = "no_submit"
+        finally:
+            cleared = _clear(filled)
+            clean = _scrub(pages, page, domain, password) if filled else True
+        if reason is None and not clean:
+            reason = "value_persists"
+        if reason:
+            return refused(reason)
+        if after_submit is not None:
+            after_submit()
+        return {"submitted": True, "cleared": cleared and clean, "page_url": page_url}

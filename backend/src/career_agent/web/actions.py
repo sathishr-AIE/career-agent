@@ -241,6 +241,21 @@ class _NotSubmitted(Exception):
     """No empty password field on a real https page of the domain."""
 
 
+_NOT_SUBMITTED_WHY = {
+    "no_field": "no empty password field on an https {domain} page",
+    "ambiguous_form": "the page shows more than one login form -- open just the sign-in "
+                      "or sign-up form",
+    "navigated": "the page changed during the fill",
+    "no_submit": "the form did not submit",
+    "value_persists": "the page kept the password in a field after it was cleared",
+}
+
+
+def _not_submitted(result: dict, domain: str) -> str:
+    why = _NOT_SUBMITTED_WHY.get(result["reason"], result["reason"]).format(domain=domain)
+    return f"{why}; the browser is on: {', '.join(result['pages']) or 'no pages'}"
+
+
 def _uncleared(result: dict) -> str:
     return "" if result["cleared"] else "; the password field could not be cleared"
 
@@ -260,11 +275,9 @@ def _submit_saved_login(conn, run, payload: dict) -> tuple[dict, str]:
     if cred is None:
         return none, f"No saved login for {domain}"
     run.secrets.add(cred["password"])       # defence in depth: scrubbed if it ever echoes
-    result = secret_fill.fill_and_submit(domain, cred["password"])
+    result = secret_fill.fill_and_submit(domain, cred["password"], max_fields=1)
     if not result["submitted"]:
-        return none, (f"Did not use the saved login for {domain}: no empty password field "
-                      f"on an https {domain} page. The browser is on: "
-                      f"{', '.join(result['pages']) or 'no pages'}")
+        return none, f"Did not use the saved login for {domain}: {_not_submitted(result, domain)}"
     return ({"id": payload.get("id"), "submitted": True},
             f"Submitted the saved login for {domain} on {result['page_url']}"
             + _uncleared(result))
@@ -284,8 +297,8 @@ def _create_login(conn, run, payload: dict, body: dict) -> tuple[dict, str]:
     result = secret_fill.fill_and_submit(domain, pw, after_submit=lambda: credentials.put(
         conn, domain, payload["login_url"], payload["email"], pw, "agent"))
     if not result["submitted"]:
-        raise _NotSubmitted(f"No empty password field on an https {domain} page; the browser "
-                            f"is on: {', '.join(result['pages']) or 'no pages'}")
+        raise _NotSubmitted(f"Did not create the login for {domain}: "
+                            f"{_not_submitted(result, domain)}")
     return ({**body, "submitted": True},
             f"Saved login for {domain} (submitted on {result['page_url']})" + _uncleared(result))
 
@@ -420,6 +433,7 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
             sent, notice = _create_login(conn, run, payload, body)
     except _NotSubmitted as exc:
         chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
+        chat.post_message(conn, row["conversation_id"], "system", str(exc))
         return _refuse(409, str(exc))
     except Exception as exc:
         log.warning("%s fill/submit failed for prompt %s: %s", kind, prompt_id,

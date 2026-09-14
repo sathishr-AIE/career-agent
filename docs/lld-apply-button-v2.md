@@ -139,7 +139,7 @@ its source is AGPL):
   `bypassPermissions`, and `backend/` is one relative path from `.env`,
   `candidate_profile.toml` and `career.db`. Transcripts stay in `data/logs` (written by the
   parent process, not the agent):
-  `{"mcpServers": {"playwright": {"command": "npx", "args": ["@playwright/mcp@latest", "--cdp-endpoint=http://localhost:9222", "--viewport-size=1280x800"]}}}`
+  `{"mcpServers": {"playwright": {"command": "npx", "args": ["@playwright/mcp@0.0.80", "--cdp-endpoint=http://localhost:9222", "--viewport-size=1280x800"]}}}`
   (no Gmail MCP — email-code login flows are out of scope; the agent bails with
   `login_issue` instead).
 - Spawns:

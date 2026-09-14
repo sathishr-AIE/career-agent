@@ -179,7 +179,10 @@ the form (the Create click), stores it encrypted, and clears the field; `need_pa
 and submits a saved login the same way. The agent is answered `submitted`/`none`/`exists`,
 never a password, and continues from the resulting page. The Playwright MCP server is pinned
 (`@playwright/mcp@0.0.80`, whose snapshot renders a password input's value) and its evaluate,
-network and screenshot tools are disallowed.
+network and screenshot tools are disallowed. A submit counts only when the page navigates or
+the filled fields detach; a page with more than one login form is refused; after the clear,
+every input on the domain is scanned for the exact value (again after 500 ms), and a field
+that keeps it means not submitted. The agent's Chrome profile never carries Login Data.
 
 **Residual risk.** Not preventable from outside the page: a site that re-renders a failed
 login with the password still in the field after the clear (the agent's next snapshot would

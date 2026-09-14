@@ -1416,7 +1416,7 @@ def test_a_store_failure_after_submit_clears_the_field_and_reopens_the_card(conn
     from test_secret_fill import Field, Page
     from career_agent import credentials
     from career_agent.web import actions
-    [page] = browser_on(Page("https://careers.ses.com/join", [Field()], navigates=False))
+    [page] = browser_on(Page("https://careers.ses.com/join", [Field()]))
 
     def boom(*a, **kw):
         raise RuntimeError("database is locked")
@@ -1426,7 +1426,7 @@ def test_a_store_failure_after_submit_clears_the_field_and_reopens_the_card(conn
     pid = _open(conn, "approve_account", _ACCT)
     r = actions.answer_prompt(conn, pid, {"answer": "approve"})
     assert r["code"] == 503 and run.sent == []
-    assert page.main.submits == ["requestSubmit"] and page.main.fields[0].value == ""
+    assert page.main.submits == ["requestSubmit"] and credentials.list_(conn) == []
     assert chat.open_prompt_for_job(conn, 1)["id"] == pid
 
 
@@ -2419,3 +2419,37 @@ async def test_after_a_fallback_an_ask_with_the_old_nonce_opens_no_card(conn, fa
     assert seen and seen[0] != "oldnonce"
     assert conn.execute("SELECT COUNT(*) n FROM agent_prompt").fetchone()["n"] == 0
     assert not r["ok"]
+
+
+def test_approve_account_whose_form_never_submits_stores_nothing(conn, runs, key, browser_on):
+    """M-3: without a navigation or a detached field there is no proof the
+    Create click happened -- nothing is stored and the card reopens."""
+    from test_secret_fill import Field, Page
+    from career_agent import credentials
+    from career_agent.web import actions
+    [page] = browser_on(Page("https://careers.ses.com/join", [Field()], navigates=False))
+    _in_flight(conn)
+    run = _waiting_run(runs)
+    pid = _open(conn, "approve_account", _ACCT)
+    r = actions.answer_prompt(conn, pid, {"answer": "approve"})
+    assert r["code"] == 409 and "did not submit" in r["message"]
+    assert run.sent == [] and credentials.list_(conn) == []
+    assert page.main.fields[0].value == ""
+    assert chat.open_prompt_for_job(conn, 1)["id"] == pid
+    assert any("did not submit" in t for t in _chat_texts(conn))
+
+
+def test_need_password_on_a_page_that_keeps_the_value_answers_none(conn, runs, key, browser_on):
+    """I-2: a re-render that keeps the password in a field is never 'submitted'."""
+    from test_secret_fill import Field, Page
+    from career_agent import credentials
+    from career_agent.web import actions
+    pw = "Stored!Pass_4321abcd"
+    credentials.put(conn, "careers.ses.com", "", "a@x.com", pw, "agent")
+    browser_on(Page("https://careers.ses.com/login", [Field()], rerender="stubborn"))
+    run = _waiting_run(runs)
+    pid = _open(conn, "need_password", _need())
+    assert actions.answer_prompt(conn, pid, {}, auto=True)["ok"]
+    assert [_sent_body(s) for s in run.sent] == [{"id": "np", "answer": "none"}]
+    assert pw not in "".join(run.sent) and pw not in _db_dump(conn)
+    assert any("kept the password" in t for t in _chat_texts(conn))

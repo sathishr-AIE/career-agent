@@ -374,6 +374,7 @@ def test_build_prompt_carries_account_rules_and_known_logins():
     assert "approve_account" in p and "need_password" in p
     assert "You never type, read, or ask for a password" in p and '"submitted"' in p
     assert "show-password" in p and "screenshot" in p
+    assert "only that form" in p              # I-3: one form on the page before the ASK
     assert "== KNOWN LOGINS ==" in p and "careers.ses.com (sign in as asha@example.com)" in p
     assert "should-never-appear" not in p
     assert "Never create an account" not in p
@@ -392,6 +393,10 @@ def test_parse_ask_account_kinds_are_validated_strictly():
              email="asha@example.com", login_url="https://careers.ses.com/login",
              origin="needs_answer")
     assert ok["domain"] == "careers.ses.com" and "origin" not in ok
+    # M-2: the sign-up url is stored and shown as scheme+host+path only
+    tokened = ask(kind="approve_account", domain="careers.ses.com", email="a@x.com",
+                  login_url="https://careers.ses.com/join?invite=s3cr3t#step")
+    assert tokened["login_url"] == "https://careers.ses.com/join"
     assert "careers.ses.com" in ok["question"]              # defaulted
     assert ask(kind="approve_account", domain="ses.com", email="a@x.com") is None  # login_url required
     assert ask(kind="approve_account", domain="ses.com") is None            # no email

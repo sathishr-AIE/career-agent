@@ -10,9 +10,9 @@ from career_agent.apply import secret_fill
 
 
 class Field:
-    """An ElementHandle for one password input."""
-    def __init__(self, visible=True, value="", fail_clear=False):
-        self.visible, self.value, self.fail_clear = visible, value, fail_clear
+    """An ElementHandle for one input."""
+    def __init__(self, visible=True, value="", form=0, stubborn=False):
+        self.visible, self.value, self.form, self.stubborn = visible, value, form, stubborn
         self.attached, self.frame, self.fills = True, None, []
 
     def is_visible(self):
@@ -23,16 +23,18 @@ class Field:
 
     def fill(self, value, timeout=None):
         assert timeout, "every fill carries a short timeout"
-        if value == "" and self.fail_clear:
-            raise RuntimeError("element is not attached")
-        self.value = value
         self.fills.append(value)
+        if value == "" and self.stubborn:      # framework state writes it straight back
+            return
+        self.value = value
 
     def evaluate(self, expr):
         if "isConnected" in expr:
             if not self.attached:
                 raise RuntimeError("Execution context was destroyed")
             return True
+        if "document.forms" in expr:
+            return self.form if self.frame.has_form else -1
         assert "requestSubmit" in expr
         if not self.frame.has_form:
             return False
@@ -45,24 +47,31 @@ class Field:
 
 
 class Frame:
-    def __init__(self, url, fields=(), *, navigates=True, has_form=True, moves_to=None):
+    def __init__(self, url, fields=(), *, navigates=True, has_form=True, moves_to=None,
+                 rerender=None):
         self.url, self.fields = url, list(fields)
         self.navigates, self.has_form, self.moves_to = navigates, has_form, moves_to
-        self.submits = []
+        self.rerender = rerender      # None | "clean" | "stubborn": an SPA re-render after submit
+        self.submits, self.extra = [], []
         for f in self.fields:
             f.frame = self
 
     def query_selector_all(self, selector):
-        assert selector == "input[type=password]"
-        if self.moves_to:                 # navigated between the check and the fill
-            self.url = self.moves_to
-        return list(self.fields)
+        if selector == "input[type=password]":
+            if self.moves_to:             # navigated between the check and the fill
+                self.url = self.moves_to
+            return [f for f in self.fields if f.attached]
+        assert selector == "input"
+        return [f for f in self.fields + self.extra if f.attached]
 
     def submit(self, how):
         self.submits.append(how)
-        if self.navigates:                # a real login navigates; an SPA keeps the DOM
-            for f in self.fields:
+        if self.navigates or self.rerender:
+            value = next((f.value for f in self.fields if f.value), "")
+            for f in self.fields:         # the old DOM goes away
                 f.attached = False
+            if self.rerender:             # ...and a new input comes back holding the value
+                self.extra.append(Field(value=value, stubborn=self.rerender == "stubborn"))
 
 
 class Page:
@@ -70,9 +79,10 @@ class Page:
         self.url = url
         self.main = Frame(url, fields, **frame_kw)
         self.frames = [self.main, *frames]
+        self.waits = []
 
     def wait_for_timeout(self, ms):
-        pass
+        self.waits.append(ms)
 
 
 class _Context:
@@ -102,26 +112,59 @@ def test_fills_every_empty_field_submits_the_form_and_reports_a_clean_url():
     assert page.main.submits == ["requestSubmit"]
 
 
-def test_a_value_still_on_the_page_after_submit_is_cleared():
-    """An SPA or a validation error keeps the DOM: the value would show up in
-    the agent's next browser_snapshot unless it is cleared."""
-    field = Field()
+def test_a_form_that_never_submits_is_cleared_and_not_submitted():
+    """M-3: no navigation and no detached field means nothing proves a submit."""
+    field, stored = Field(), []
     page = Page("https://ses.com/login", [field], navigates=False)
+    r = _fill("ses.com", page, after_submit=lambda: stored.append(1))
+    assert r == {"submitted": False, "reason": "no_submit", "pages": ["https://ses.com/login"]}
+    assert field.value == "" and stored == []
+
+
+def test_a_re_rendered_field_holding_the_value_is_scrubbed():
+    """I-2: an SPA re-renders the form with the password from framework state;
+    the old handles are gone, so only a value scan finds the new input."""
+    page = Page("https://ses.com/login", [Field()], rerender="clean")
     r = _fill("ses.com", page)
-    assert r["submitted"] and r["cleared"]
-    assert field.fills == [PW, ""] and field.value == ""
+    assert r["submitted"]
+    [reborn] = page.main.extra
+    assert reborn.value == "" and 500 in page.waits
 
 
-def test_a_clear_that_fails_is_reported():
-    field = Field(fail_clear=True)
-    r = _fill("ses.com", Page("https://ses.com/login", [field], navigates=False))
-    assert r["submitted"] and r["cleared"] is False
+def test_a_field_that_keeps_the_value_is_not_submitted():
+    stored = []
+    page = Page("https://ses.com/login", [Field()], rerender="stubborn")
+    r = _fill("ses.com", page, after_submit=lambda: stored.append(1))
+    assert r["submitted"] is False and r["reason"] == "value_persists"
+    assert stored == []
 
 
 def test_a_field_with_no_form_is_submitted_with_enter():
     page = Page("https://ses.com/login", [Field()], has_form=False)
     assert _fill("ses.com", page)["submitted"]
     assert page.main.submits == ["Enter"]
+
+
+def test_a_page_with_a_sign_in_and_a_register_form_fills_nothing():
+    """I-3: two qualifying forms -- filling both and submitting one is wrong."""
+    signin, register = Field(form=0), Field(form=1)
+    page = Page("https://ses.com/login", [signin, register])
+    r = _fill("ses.com", page)
+    assert r["submitted"] is False and r["reason"] == "ambiguous_form"
+    assert signin.fills == [] and register.fills == [] and page.main.submits == []
+
+
+def test_a_one_field_login_picks_the_only_single_field_form():
+    signin, new_pw, confirm = Field(form=0), Field(form=1), Field(form=1)
+    page = Page("https://ses.com/login", [signin, new_pw, confirm])
+    assert _fill("ses.com", page, max_fields=1)["submitted"]
+    assert signin.fills == [PW] and new_pw.fills == [] and confirm.fills == []
+
+
+def test_a_form_with_more_password_fields_than_allowed_is_not_filled():
+    fields = [Field(), Field(), Field()]          # change-password: old, new, confirm
+    r = _fill("ses.com", Page("https://ses.com/account", fields))
+    assert r["reason"] == "no_field" and all(f.fills == [] for f in fields)
 
 
 @pytest.mark.parametrize("url,ok", [
@@ -143,7 +186,7 @@ def test_only_an_https_page_on_the_domain_is_filled(url, ok):
 def test_hidden_prefilled_or_absent_fields_are_not_filled():
     hidden, typed = Field(visible=False), Field(value="agent-typed")
     pages = [Page("https://ses.com/a?t=1", [hidden, typed]), Page("https://ses.com/b")]
-    assert _fill("ses.com", *pages) == {"submitted": False,
+    assert _fill("ses.com", *pages) == {"submitted": False, "reason": "no_field",
                                          "pages": ["https://ses.com/a", "https://ses.com/b"]}
     assert hidden.fills == [] and typed.value == "agent-typed"
 
@@ -157,23 +200,23 @@ def test_a_foreign_iframe_on_a_matching_page_is_not_filled():
 def test_a_frame_that_navigates_away_before_the_fill_is_not_filled():
     field = Field()
     page = Page("https://ses.com/login", [field], moves_to="https://evil.com/login")
-    assert not _fill("ses.com", page)["submitted"]
+    r = _fill("ses.com", page)
+    assert r["submitted"] is False and r["reason"] == "navigated"
     assert field.fills == [] and page.main.submits == []
 
 
-def test_after_submit_runs_before_the_clear_and_a_failure_still_clears():
+def test_after_submit_runs_only_after_a_proven_clean_submit():
     field = Field()
-    page = Page("https://ses.com/login", [field], navigates=False)
+    page = Page("https://ses.com/login", [field])
     seen = []
 
     def store():
-        seen.append((field.value, list(page.main.submits)))
+        seen.append((field.attached, list(page.main.submits)))
         raise RuntimeError("could not store")
 
     with pytest.raises(RuntimeError):
         _fill("ses.com", page, after_submit=store)
-    assert seen == [(PW, ["requestSubmit"])]
-    assert field.value == ""
+    assert seen == [(False, ["requestSubmit"])]
 
 
 def test_page_urls_are_the_real_browser_urls_without_query_or_fragment():

@@ -71,27 +71,48 @@ class LoginExists(Exception):
 
 
 # Public suffixes (a registrable name sits directly left of one) and shared
-# platforms (every tenant gets a subdomain): a login saved under either would
-# be offered to every site on it. A tenant host under a platform
-# (acme.vercel.app) is fine. ponytail: a hand-kept list; the upgrade path is
-# the Public Suffix List (publicsuffix.org) once a miss shows up.
+# platforms (every tenant gets a subdomain): the suffix itself is refused, a
+# tenant host under it (acme.vercel.app) is fine. ponytail: hand-kept lists;
+# the upgrade path is the Public Suffix List (publicsuffix.org) once a miss
+# shows up.
 _SHARED_SUFFIXES = {
     "co.in", "co.uk", "com.au", "ac.uk", "gov.in", "org.in", "gov.uk", "com.sg", "com.br",
-    "github.io", "myworkdayjobs.com", "greenhouse.io", "lever.co", "icims.com",
-    "smartrecruiters.com", "taleo.net", "successfactors.com", "ashbyhq.com",
-    "vercel.app", "netlify.app", "pages.dev", "web.app", "firebaseapp.com",
-    "herokuapp.com", "azurewebsites.net", "blogspot.com"}
+    "ltd.co.uk", "github.io", "myworkdayjobs.com", "greenhouse.io", "lever.co", "icims.com",
+    "smartrecruiters.com", "taleo.net", "successfactors.com", "ashbyhq.com", "bamboohr.com",
+    "workable.com", "vercel.app", "netlify.app", "pages.dev", "web.app", "firebaseapp.com",
+    "herokuapp.com", "azurewebsites.net", "blogspot.com", "s3.amazonaws.com"}
+# Wildcard DNS: every name under these resolves wherever its label says, so no
+# host under them can own a login.
+_WILDCARD_SUFFIXES = {"nip.io", "sslip.io"}
+# Path-based ATS hosts: every company shares the one hostname (M-1).
+_SHARED_HOSTS = {"jobs.smartrecruiters.com", "apply.workable.com", "jobs.lever.co",
+                 "boards.greenhouse.io", "job-boards.greenhouse.io", "jobs.ashbyhq.com"}
+_SHARED_HOST_PATTERN = re.compile(
+    r"wd\d+\.myworkday(?:site)?\.com|career\d*\.successfactors\.(?:eu|com)")
 # Workday tenants live at <tenant>.wd<N>.myworkdayjobs.com; wd<N> alone is shared.
 _WORKDAY_TENANT = re.compile(r"[a-z0-9-]+\.wd\d+\.myworkdayjobs\.com")
 # A browser reads an all-numeric/hex host as an IPv4 address (127.1, 0x7f.1).
 _NUMERIC_LABEL = re.compile(r"\d+|0x[0-9a-f]*")
 
 
+def _shared_host(d: str) -> bool:
+    """A suffix walk over the host's labels: a wildcard-DNS suffix at any depth,
+    or a shared suffix with no tenant label left of it; plus the shared
+    path-based ATS hosts."""
+    labels = d.split(".")
+    for i in range(len(labels)):
+        suffix = ".".join(labels[i:])
+        if suffix in _WILDCARD_SUFFIXES or (i == 0 and suffix in _SHARED_SUFFIXES):
+            return True
+    return d in _SHARED_HOSTS or bool(_SHARED_HOST_PATTERN.fullmatch(d))
+
+
 def account_domain(value: str) -> str:
     """normalize_domain, refusing a key no login may be saved or used under: a
     bare label, localhost, an IP literal or any all-numeric/hex host, a shared
-    suffix itself (checked after the www. strip, so www.co.in is co.in), or a
-    Workday host that is not a tenant's. Raises ValueError."""
+    suffix itself (checked after the www. strip, so www.co.in is co.in), a
+    wildcard-DNS host, a shared path-based ATS host, or a Workday host that is
+    not a tenant's. Raises ValueError."""
     d = normalize_domain(value)
     labels = d.split(".")
     try:
@@ -101,7 +122,7 @@ def account_domain(value: str) -> str:
         numeric = all(_NUMERIC_LABEL.fullmatch(label) for label in labels)
     workday = d == "myworkdayjobs.com" or d.endswith(".myworkdayjobs.com")
     if (numeric or len(labels) < 2 or d == "localhost" or d.endswith(".localhost")
-            or d in _SHARED_SUFFIXES or (workday and not _WORKDAY_TENANT.fullmatch(d))):
+            or _shared_host(d) or (workday and not _WORKDAY_TENANT.fullmatch(d))):
         raise ValueError(f"not a site an account can be saved for: {d!r}")
     return d
 
