@@ -1005,3 +1005,11 @@ def test_status_reports_interrupted_jobs(conn):
 @pytest.mark.parametrize("path", ["/send/1", "/api/send/1"])
 def test_the_retired_send_routes_are_gone(client, path):
     assert client.post(path).status_code in (404, 405)
+
+
+async def test_skip_supersedes_an_interrupted_session(db_path, runs):
+    """M-E: Skip is a human decision, like Retry and Mark applied."""
+    c = db.connect(db_path)
+    _resumable(c, 1)
+    assert (await actions.queue_skip(c, 1, "brief", "profile"))["ok"]
+    assert checkpoint.get(c, 1)["status"] == "done"

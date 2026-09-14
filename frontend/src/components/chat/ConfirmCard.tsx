@@ -4,6 +4,11 @@ import { useAnswer } from './useAnswer'
 import '../ui.css'
 import './cards.css'
 
+// Mirrors store._SECRET_QA_RE for display only: the backend is the authority and
+// refuses a change to such a field.
+const SECRET_LABEL =
+  /password(?!\s*manager)|passcode|passphrase|verification code|security code|one[- ]time (code|password)|\b2fa\b|contraseñ|mot de passe|kennwort|पासवर्ड|\bssn\b|social security|\bpan\b|aadhaar|\botp\b|\bcvv\b|\bpin\b(?!\s*code)|bank account|card number/i
+
 /** The final review before a send: Approve, edit individual answers, or
  * cancel the application. A change posts only the rows actually edited. */
 export function ConfirmCard({ prompt, onAnswered }: { prompt: OpenPrompt; onAnswered: () => void }) {
@@ -40,7 +45,7 @@ export function ConfirmCard({ prompt, onAnswered }: { prompt: OpenPrompt; onAnsw
             <tr key={i}>
               <th scope="row">{f.label}</th>
               <td>
-                {mode === 'edit' ? (
+                {mode === 'edit' && !SECRET_LABEL.test(f.label) ? (
                   <input
                     type="text"
                     aria-label={f.label}
@@ -49,7 +54,14 @@ export function ConfirmCard({ prompt, onAnswered }: { prompt: OpenPrompt; onAnsw
                     onChange={(e) => setEdits({ ...edits, [i]: e.target.value })}
                   />
                 ) : (
-                  f.value
+                  <>
+                    {f.value}
+                    {mode === 'edit' && (
+                      <div className="qcard__note">
+                        Secrets are never typed here — saved logins are filled by the backend.
+                      </div>
+                    )}
+                  </>
                 )}
               </td>
             </tr>

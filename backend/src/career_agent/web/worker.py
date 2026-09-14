@@ -156,7 +156,7 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
     # Auto mode continues an interrupted session first, once per checkpoint until
     # a human touches it (the flag is on the row, so a restart can't loop).
     # Manual mode never does: the job chat offers a Continue button instead.
-    resume_id = checkpoint.next_auto_resume(conn) if state["mode"] == "auto" else None
+    resume_id = checkpoint.next_auto_resume(conn, skip=ats_apply.PENDING) if state["mode"] == "auto" else None
     candidate = None if resume_id is not None else next_candidate(conn)
     if resume_id is None and candidate is None:
         set_run_state(conn, "apply", status="idle", current_job_id=None)
@@ -167,11 +167,13 @@ async def apply_tick(conn: sqlite3.Connection, brief_path, profile_path,
     job_id = resume_id if resume_id is not None else candidate["job_id"]
     # Claimed for the whole tick, tailoring included: an Apply or a Continue on
     # this job is refused meanwhile, and next_candidate skips it.
+    owned = job_id not in ats_apply.PENDING      # release only a claim this tick added
     ats_apply.PENDING.add(job_id)
     try:
         await _tick_job(conn, state, job_id, resume_id, brief_path, profile_path, conn_factory)
     finally:
-        ats_apply.PENDING.discard(job_id)
+        if owned:
+            ats_apply.PENDING.discard(job_id)
 
 
 async def _tick_job(conn, state, job_id: int, resume_id, brief_path, profile_path,
@@ -276,22 +278,32 @@ def startup_sweep(conn: sqlite3.Connection) -> None:
     checkpoint.sweep_orphans(conn, live)
     resumable = {r["job_id"] for r in conn.execute(
         "SELECT job_id FROM apply_checkpoint WHERE status = 'resumable'")}
+    could_submit = {r["job_id"]: r["can_submit"] for r in conn.execute(
+        "SELECT job_id, can_submit FROM apply_checkpoint")}
     for r in conn.execute("SELECT id, job_id FROM application"
                           " WHERE status = 'in_flight'").fetchall():
-        if r["job_id"] in live or (ats_apply.SUBMISSION_IMPLEMENTED and r["job_id"] not in resumable):
+        # What the crashed run could do, not what the switch says now: a can_submit
+        # (or legacy NULL) session keeps its row unless swept resumable; a row with
+        # no checkpoint at all falls back to the switch.
+        cs = could_submit.get(r["job_id"], int(ats_apply.SUBMISSION_IMPLEMENTED))
+        if r["job_id"] in live or (cs != 0 and r["job_id"] not in resumable):
             continue
         if conn.execute("DELETE FROM application WHERE id = ? AND status = 'in_flight'",
                         (r["id"],)).rowcount:
             store.log(conn, r["job_id"], "orphan_in_flight_dropped",
-                      "parked on a card: nothing was sent" if ats_apply.SUBMISSION_IMPLEMENTED
+                      "parked on a card: nothing was sent" if cs != 0
                       else "submission disabled: nothing was sent")
     conn.commit()
-    for jid in orphans:
+    held = {r["job_id"] for r in conn.execute(
+        "SELECT job_id FROM application WHERE status = 'in_flight'")}
+    # A job swept done because its attempt had already finished is no restart news.
+    told = [j for j in orphans if j in resumable or j in held]
+    for jid in told:
         say(conn, jid, "The server restarted while this job was running — "
             + ("press Continue to pick it up" if jid in resumable else "it was held for review"))
-    if orphans:
-        say(conn, None, f"{len(orphans)} job(s) interrupted by a restart: "
-            + ", ".join(f"#{j}" for j in orphans) + " — open each chat to continue")
+    if told:
+        say(conn, None, f"{len(told)} job(s) interrupted by a restart: "
+            + ", ".join(f"#{j}" for j in told) + " — open each chat to continue")
 
 
 async def apply_worker_loop(conn_factory, brief_path, profile_path,

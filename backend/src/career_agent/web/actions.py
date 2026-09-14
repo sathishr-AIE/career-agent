@@ -147,12 +147,14 @@ async def _do_apply(conn: sqlite3.Connection, job_id: int, allow_skip: bool,
     # Claimed before any await, released when the run returns: a double click, or
     # an Apply while the worker or a Continue tailors this job, is refused by
     # _apply_denial instead of queueing a second session.
+    owned = job_id not in ats_apply.PENDING      # release only a claim this call added
     ats_apply.PENDING.add(job_id)
     try:
         return await _claimed_apply(conn, job_id, event, brief_path, candidate_profile_path,
                                     conn_factory)
     finally:
-        ats_apply.PENDING.discard(job_id)
+        if owned:
+            ats_apply.PENDING.discard(job_id)
 
 
 async def _claimed_apply(conn: sqlite3.Connection, job_id: int, event: str | None,
@@ -238,10 +240,11 @@ def _refuse(code: int, message: str) -> dict:
 
 def _checkpoint_answer(conn, job_id: int, prompt_id: int, kind: str, payload: dict,
                        body: dict) -> None:
-    """What the run was told, for a resume's PREVIOUSLY ANSWERED ("use verbatim"):
+    """What the run is told, for a resume's PREVIOUSLY ANSWERED ("use verbatim"):
     only choice/text answers -- the ones memory keeps -- and a CONFIRM's changes.
     An approve, approve_account or need_password answer is never pinned, and a
-    secret never reaches here. Never fails the answer: it already reached the agent."""
+    secret never reaches here. Returns the checkpoint as it was, for
+    _restore_checkpoint. Never fails the answer."""
     if kind == "confirm":
         answers = body.get("changes", {})
     elif kind in ("choice", "text") and not store.is_secret_card(kind, payload):
@@ -249,9 +252,22 @@ def _checkpoint_answer(conn, job_id: int, prompt_id: int, kind: str, payload: di
     else:
         answers = {}
     try:
+        before = checkpoint.get(conn, job_id)
         checkpoint.mark_running(conn, job_id, f"answered {prompt_id}", answers)
+        return before
     except Exception:
         log.warning("could not checkpoint answer %s for job %s", prompt_id, job_id, exc_info=True)
+        return None
+
+
+def _restore_checkpoint(conn, job_id: int, before: dict | None) -> None:
+    """A refused send: the run is still waiting on that card, with its old answers."""
+    if before is None:
+        return
+    try:
+        checkpoint.restore(conn, job_id, before)
+    except Exception:
+        log.warning("could not restore the checkpoint for job %s", job_id, exc_info=True)
 
 
 class _NotSubmitted(Exception):
@@ -393,6 +409,8 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
             body["changes"] = {str(k): str(v) for k, v in changes.items()}
             if any(not v.strip() for v in body["changes"].values()):
                 return _refuse(422, "a changed field can't be blank")
+            if any(store.is_secret_label(k) for k in body["changes"]):
+                return _refuse(422, _SECRET)        # never sent, never recorded
             summary = "Change: " + "; ".join(f"{k} → {v}" for k, v in body["changes"].items())
         else:
             summary = {"approve": "Approved the application",
@@ -467,10 +485,12 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
             checkpoint.mark_approve_sent(conn, row["job_id"])
         except Exception:
             log.warning("could not checkpoint the approve for job %s", row["job_id"], exc_info=True)
+    # Checkpointed before the send: a crash just after it still has the answer pinned.
+    before = _checkpoint_answer(conn, row["job_id"], prompt_id, kind, payload, body)
     if not run.send(agent_mod.answer_line(run.nonce, kind, sent)):
         chat.reopen_prompt_row(conn, prompt_id, run_ended=run.done.is_set())
+        _restore_checkpoint(conn, row["job_id"], before)
         return _refuse(409, _NO_RUN)
-    _checkpoint_answer(conn, row["job_id"], prompt_id, kind, payload, body)
     # The answer is already sent and recorded at this point -- posting the
     # summary first means a memory-store hiccup below can never turn a
     # delivered answer into a failed response (see the two try/excepts).
@@ -764,8 +784,9 @@ def resume_job(conn: sqlite3.Connection, job_id: int, brief_path: Path,
     checkpoint.set_auto_resumed(conn, job_id, True)
     after = chat.post_message(conn, chat.conversation_for_job(conn, job_id), "system",
                               "Continuing where it left off")
+    owned = job_id not in ats_apply.PENDING
     ats_apply.PENDING.add(job_id)       # released by _holding when the run returns
-    task = asyncio.create_task(_holding(job_id, _resume_run(
+    task = asyncio.create_task(_holding(job_id, owned, _resume_run(
         conn, job_id, brief_path, candidate_profile_path, conn_factory)))
     if tasks is not None:
         tasks.add(task)
@@ -774,11 +795,12 @@ def resume_job(conn: sqlite3.Connection, job_id: int, brief_path: Path,
     return {"ok": True, "message": "Continuing where it left off", "after": after}
 
 
-async def _holding(job_id: int, coro) -> None:
+async def _holding(job_id: int, owned: bool, coro) -> None:
     try:
         await coro
     finally:
-        ats_apply.PENDING.discard(job_id)
+        if owned:
+            ats_apply.PENDING.discard(job_id)
 
 
 async def _resume_run(conn, job_id: int, brief_path: Path, candidate_profile_path: Path,
@@ -877,6 +899,7 @@ async def queue_skip(conn: sqlite3.Connection, job_id: int, brief_path: Path,
         return {"ok": False, "message":
                 "This job's agent run is still live — finish or cancel it in the job's chat."}
     store.log(conn, job_id, "job_skipped", "skipped by user")
+    checkpoint.finish(conn, job_id)     # a human decision supersedes an interrupted session
     state = worker.get_run_state(conn, "apply")
     if state["current_job_id"] == job_id:
         worker.set_run_state(conn, "apply", current_job_id=None)

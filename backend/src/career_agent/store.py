@@ -177,7 +177,9 @@ _MEMORY_KEY_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)+$")
 # inside ordinary words too. `pin` additionally excludes the routine
 # "PIN code" (India's postal code) sense via a negative lookahead.
 _SECRET_QA_RE = re.compile(
-    r"(?i)password|passcode|\bssn\b|social security|\bpan\b|aadhaar|\botp\b"
+    r"(?i)password(?!\s*manager)|passcode|passphrase|verification code|security code"
+    r"|one[- ]time (code|password)|\b2fa\b|contraseñ|mot de passe|kennwort|पासवर्ड"
+    r"|\bssn\b|social security|\bpan\b|aadhaar|\botp\b"
     r"|\bcvv\b|\bpin\b(?!\s*code)|bank account|card number")
 
 
@@ -188,7 +190,12 @@ def is_secret_card(kind: str, payload: dict) -> bool:
     (ats._chat_events) and never answered (actions.answer_prompt)."""
     return kind in ("choice", "text") and (bool(payload.get("sensitive")) or any(
         isinstance(v, str) and _SECRET_QA_RE.search(v)
-        for v in (payload.get("question"), payload.get("memory_key"))))
+        for v in (payload.get("question"), payload.get("memory_key"), payload.get("why"))))
+
+
+def is_secret_label(label) -> bool:
+    """A CONFIRM field label shaped like a secret: its value never takes an edit."""
+    return isinstance(label, str) and bool(_SECRET_QA_RE.search(label))
 
 
 def qa_remember(conn, question: str, answer: str, *, kind: str = "text",

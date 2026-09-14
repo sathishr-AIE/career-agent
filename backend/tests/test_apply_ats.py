@@ -2573,21 +2573,6 @@ async def test_a_cancel_resumes_only_a_parked_run_when_it_could_submit(conn, run
 
 # -- final review M1: one session per job ---------------------------------------
 
-async def test_two_queued_submits_for_one_job_run_one_session(conn):
-    calls = []
-
-    async def runner(prompt, jid, nonce, events, session_id=None, resume=False):
-        calls.append(jid)
-        await asyncio.sleep(0.05)
-        return AgentResult("draft_ready")
-
-    a, b = await asyncio.gather(_submit(conn, mode="manual", run_agent=runner),
-                                _submit(conn, mode="manual", run_agent=runner))
-    assert calls == [1]
-    assert sorted([a["ok"], b["ok"]]) == [False, True]
-    assert len(_apps(conn)) == 1
-
-
 # -- final review follow-up: a secret-shaped NEEDS_ANSWER never parks ----------
 
 async def test_a_secret_needs_answer_opens_no_card_and_fails_permanently(conn):
@@ -2606,3 +2591,105 @@ async def test_an_ordinary_needs_answer_still_opens_its_card(conn):
                       run_agent=fake_agent(AgentResult("needs_answer", "Do you have a PMP?")))
     assert r["needs_answer"] == "Do you have a PMP?" and _apps(conn) == []
     assert chat.open_prompt_for_job(conn, 1) is not None
+
+
+async def test_two_queued_submits_for_one_job_run_one_session(conn):
+    """M1: the second queues behind a first run that leaves no BLOCKING row (a
+    retryable failure); only the in-lock recheck keeps it from a second session."""
+    calls = []
+
+    async def runner(prompt, jid, nonce, events, session_id=None, resume=False):
+        calls.append(jid)
+        await asyncio.sleep(0.05)
+        return AgentResult("failed", "stuck")
+
+    lock = ats_apply._agent_lock()
+    await lock.acquire()            # both pass the early checks and queue on the lock
+    try:
+        ta = asyncio.create_task(_submit(conn, mode="manual", run_agent=runner))
+        tb = asyncio.create_task(_submit(conn, mode="manual", run_agent=runner))
+        await asyncio.sleep(0.1)
+    finally:
+        lock.release()
+    a, b = await ta, await tb
+    assert calls == [1]
+    assert [r["status"] for r in _apps(conn)] == ["failed"]
+    assert "started by another request" in a.get("reason", "") + b.get("reason", "")
+
+
+# -- final re-review ----------------------------------------------------------
+
+def test_a_confirm_change_to_a_secret_label_is_refused(conn, runs):
+    """I-A: an injected CONFIRM field asking for a password never takes an edit."""
+    from career_agent.web import actions
+    run = runs[1] = FakeRun("n")
+    run.waiting.set()
+    checkpoint.start(conn, 1, "s", "n", mode="manual", can_submit=False)
+    pid = _open(conn, "confirm", _confirm(**{"Account password": "(type it here)", "Name": "Asha"}))
+    r = actions.answer_prompt(conn, pid, {"decision": "change",
+                                          "changes": {"Account password": SECRET}})
+    assert (r["ok"], r["code"]) == (False, 422)
+    assert run.sent == [] and chat.open_prompt_for_job(conn, 1)["id"] == pid
+    assert not any(SECRET in line for line in conn.iterdump())
+    r = actions.answer_prompt(conn, pid, {"decision": "change", "changes": {"Name": "Asha R"}})
+    assert r["ok"], r
+    assert checkpoint.get(conn, 1)["answers"] == {"Name": "Asha R"}
+
+
+@pytest.mark.parametrize("text,secret", [
+    ("Your passphrase", True), ("Enter the verification code", True),
+    ("Card security code", True), ("One-time code", True), ("one time password", True),
+    ("Your 2FA token", True), ("Contraseña", True), ("Mot de passe", True),
+    ("Kennwort", True), ("पासवर्ड दर्ज करें", True),
+    ("Do you use a password manager?", False), ("Your credentials summary", False),
+    ("Notice period?", False), ("Pincode", False),
+])
+def test_the_secret_test_covers_more_shapes(text, secret):
+    """M-A."""
+    assert store.is_secret_card("text", {"question": text}) is secret
+
+
+def test_an_ask_with_a_secret_shaped_why_is_a_secret_card():
+    assert store.is_secret_card("text", {"question": "Sign-in step",
+                                         "why": "The site wants your password"})
+
+
+async def test_an_auto_answer_timeout_holds_when_it_could_submit(conn):
+    """M-C: an auto run is pre-approved, so no recorded approve is not 'nothing sent'."""
+    r = await _submit(conn, mode="auto", run_agent=fake_agent(AgentResult("failed", "answer_timeout")))
+    assert not r.get("resumable")
+    row = _apps(conn)[-1]
+    assert (row["status"], row["failure_reason"]) == ("held_unknown", "answer_timeout")
+    assert checkpoint.get(conn, 1)["status"] == "done"
+
+
+def test_the_checkpoint_records_the_answer_before_the_send(conn, runs):
+    """M-F."""
+    from career_agent.web import actions
+    seen = []
+
+    class Watching(FakeRun):
+        def send(self, text):
+            seen.append(checkpoint.get(conn, 1)["answers"])
+            return super().send(text)
+
+    run = runs[1] = Watching("n")
+    run.waiting.set()
+    checkpoint.start(conn, 1, "s", "n", mode="manual", can_submit=False)
+    pid = _open(conn, "text", {"id": "q", "question": "Notice?"})
+    checkpoint.mark_waiting(conn, 1, pid)
+    assert actions.answer_prompt(conn, pid, {"answer": "30"})["ok"]
+    assert seen == [{"Notice?": "30"}]
+
+
+def test_a_refused_send_restores_the_waiting_checkpoint(conn, runs):
+    """M-F."""
+    from career_agent.web import actions
+    run = runs[1] = RefusingRun("n")
+    run.waiting.set()
+    checkpoint.start(conn, 1, "s", "n", mode="manual", can_submit=False)
+    pid = _open(conn, "text", {"id": "q", "question": "Notice?"})
+    checkpoint.mark_waiting(conn, 1, pid)
+    assert not actions.answer_prompt(conn, pid, {"answer": "30"})["ok"]
+    cp = checkpoint.get(conn, 1)
+    assert (cp["status"], cp["open_prompt_id"], cp["answers"]) == ("waiting", pid, {})

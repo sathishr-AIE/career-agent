@@ -947,7 +947,7 @@ def test_startup_sweep_tells_each_interrupted_job_and_home(conn, monkeypatch, im
     assert checkpoint.get(conn, parked)["status"] == "resumable"
     assert checkpoint.get(conn, busy)["status"] == "done"
     left = {r["job_id"] for r in conn.execute("SELECT job_id FROM application WHERE status = 'in_flight'")}
-    assert left == ({busy} if implemented else set()), "a held row stays for adjudication"
+    assert left == {busy}, "a can_submit row stays for adjudication, whatever the switch says now"
     assert any("press Continue" in t for t in _texts(conn, parked))
     assert any("held for review" in t for t in _texts(conn, busy))
     home = _texts(conn, None)
@@ -990,3 +990,61 @@ async def test_a_secret_needs_answer_does_not_park_the_worker(conn, brief_path, 
     assert chat.open_prompt_for_job(conn, first) is None
     await worker.apply_tick(conn, brief_path, profile_path)
     assert seen == [first, second]
+
+
+# -- final re-review -----------------------------------------------------------
+
+async def test_a_request_claim_survives_a_tick_that_skips_or_picks_its_job(
+        conn, brief_path, profile_path, monkeypatch):
+    """M-B: the auto-resume pick skips a claimed job, and a tick releases only a
+    claim it added."""
+    from career_agent.apply import checkpoint
+    job_id = _resumable_job(conn)
+    calls = []
+    monkeypatch.setattr(worker.ats_apply, "submit",
+                        _recording_submit(calls, {"ok": True, "status": "draft"}))
+    worker.set_run_state(conn, "apply", status="running", mode="auto")
+    worker.ats_apply.PENDING.add(job_id)
+    try:
+        await worker.apply_tick(conn, brief_path, profile_path)
+        assert calls == [] and job_id in worker.ats_apply.PENDING        # skipped
+        worker.set_run_state(conn, "apply", status="running")
+        monkeypatch.setattr(checkpoint, "next_auto_resume", lambda c, **k: None)
+        monkeypatch.setattr(worker, "next_candidate", lambda c: {"job_id": job_id})
+        await worker.apply_tick(conn, brief_path, profile_path)
+        assert job_id in worker.ats_apply.PENDING, "a tick released a claim it did not add"
+    finally:
+        worker.ats_apply.PENDING.discard(job_id)
+
+
+def test_startup_sweep_keeps_the_row_of_a_can_submit_crash_after_the_switch_is_off(conn, monkeypatch):
+    """M-D: the checkpoint's recorded can_submit decides, not today's switch."""
+    from career_agent.apply import agent as agent_mod
+    from career_agent.apply import checkpoint
+    monkeypatch.setattr(agent_mod, "RUNS", {})
+    monkeypatch.setattr(worker.ats_apply, "SUBMISSION_IMPLEMENTED", False)
+    job_id = _job(conn, "was-on")
+    checkpoint.start(conn, job_id, "s", "n", mode="manual", can_submit=True)
+    conn.execute("INSERT INTO application (job_id, resume_version, status, started_at)"
+                 " VALUES (?, 'v', 'in_flight', datetime('now'))", (job_id,))
+    conn.commit()
+    worker.startup_sweep(conn)
+    assert conn.execute("SELECT status FROM application WHERE job_id = ?",
+                        (job_id,)).fetchone()["status"] == "in_flight"
+    assert checkpoint.get(conn, job_id)["status"] == "done"
+
+
+def test_startup_sweep_does_not_call_a_finished_job_held(conn, monkeypatch):
+    """M-E: a lost finish() on a job that already drafted is no restart news."""
+    from career_agent.apply import agent as agent_mod
+    from career_agent.apply import checkpoint
+    monkeypatch.setattr(agent_mod, "RUNS", {})
+    job_id = _job(conn, "finished")
+    checkpoint.start(conn, job_id, "s", "n", mode="manual", can_submit=False)
+    conn.execute("INSERT INTO application (job_id, resume_version, status) VALUES (?, 'v', 'draft')",
+                 (job_id,))
+    conn.commit()
+    worker.startup_sweep(conn)
+    assert checkpoint.get(conn, job_id)["status"] == "done"
+    said = _texts(conn, job_id) + _texts(conn, None)
+    assert not any("held for review" in t or "interrupted" in t for t in said), said

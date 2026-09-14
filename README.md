@@ -214,6 +214,8 @@ closed from outside the page, and have been accepted:
   Logins panel.
 - A sign-in page that advances without changing its URL or removing the form is refused
   as not submitted (it fails closed).
+- Refusing secret-shaped questions and review-card edits relies on a word list, which is
+  only a backstop. The real defence is you reading each card before you answer it.
 - Operator hooks still load in the agent's session, Playwright can navigate `file://`,
   and drafts can upload the résumé and click Save on the employer's site (see
   [LLD §6](docs/lld-apply-button-v2.md)).

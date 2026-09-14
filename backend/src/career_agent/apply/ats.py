@@ -128,7 +128,8 @@ def _might_have_sent(can_submit: bool, approved_any: bool, parked: bool) -> bool
     an approve" is only the prompt's rule, and a page can prompt-inject the
     agent past it, so a run that could submit is safe to resume only when it
     stopped parked -- waiting on a card, no turn in progress -- with no DECISION
-    approve sent. A timeout, a crash or a cancel mid-turn may have sent."""
+    approve sent. A timeout, a crash or a cancel mid-turn may have sent. Callers
+    count an auto run as approved from the start, as sweep_orphans does."""
     return can_submit and (approved_any or not parked)
 
 
@@ -489,7 +490,8 @@ def _confirm_outcome(conn, job_id: int, baseline: int) -> tuple[dict, str | None
 
 
 def _record_outcome(conn, job_id: int, app_id: int, url: str, result,
-                    detail: str, can_submit: bool, confirm: tuple) -> dict:
+                    detail: str, can_submit: bool, confirm: tuple,
+                    mode: str = "manual") -> dict:
     """The one outcome recorder: turns this run's in_flight row into what
     happened. Every non-submitted UPDATE/DELETE is guarded on
     `status = 'in_flight'`: a run can outlive sweep_stale_in_flight and come
@@ -562,7 +564,8 @@ def _record_outcome(conn, job_id: int, app_id: int, url: str, result,
     else:
         reason = _reason_of(result)
         if (reason in RESUMABLE_REASONS
-                and not _might_have_sent(can_submit, approved_any, parked=reason == "answer_timeout")
+                and not _might_have_sent(can_submit, approved_any or mode == "auto",
+                                         parked=reason == "answer_timeout")
                 and _drop_in_flight(conn, job_id, app_id, f"{reason} {detail or result.transcript_path}")):
             return {"ok": False, "resumable": True,
                     "reason": f"stopped ({detail or reason}); resumable"}
@@ -571,7 +574,7 @@ def _record_outcome(conn, job_id: int, app_id: int, url: str, result,
         # run that could submit: a post-submit questionnaire can ASK after the
         # Submit click, and requeueing that would apply twice.
         if can_submit and (is_unknown_state(reason)
-                           or (reason == "answer_timeout" and approved_any)):
+                           or (reason == "answer_timeout" and (approved_any or mode == "auto"))):
             status = "held_unknown"
         else:
             status = classify_failure(reason, _prior_failures(conn, job_id))
@@ -856,7 +859,7 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
             # A kill: resumable only if nothing could have been sent -- else the
             # in_flight row stays for held_unknown adjudication.
             approved_any = _confirm_outcome(conn, job_id, baseline)[2]
-            if (not _might_have_sent(can_submit, approved_any, _parked(events))
+            if (not _might_have_sent(can_submit, approved_any or mode == "auto", _parked(events))
                     and _drop_in_flight(conn, job_id, app_id, "cancelled mid-run")):
                 _checkpoint(checkpoint.mark_resumable, conn, job_id)
             else:
@@ -865,7 +868,7 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
     # Outcome first, cards second: once the in_flight row is gone a refused
     # answer can no longer reopen a card (chat.reopen_prompt_row).
     outcome = _record_outcome(conn, job_id, app_id, row["url"], result, detail,
-                              can_submit, _confirm_outcome(conn, job_id, baseline))
+                              can_submit, _confirm_outcome(conn, job_id, baseline), mode)
     _checkpoint(checkpoint.mark_resumable if outcome.get("resumable") else checkpoint.finish,
                 conn, job_id)
     chat.expire_open_prompts(conn, job_id)

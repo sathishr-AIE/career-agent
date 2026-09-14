@@ -61,6 +61,14 @@ def resume(conn, job_id: int) -> None:
     _set(conn, job_id, "status = 'running', step = 'resumed', resume_count = resume_count + 1")
 
 
+def restore(conn, job_id: int, cp: dict) -> None:
+    """Undo mark_running for an answer the run never received."""
+    conn.execute("UPDATE apply_checkpoint SET status = ?, step = ?, open_prompt_id = ?, answers = ?,"
+                 " updated_at = datetime('now') WHERE job_id = ? AND status = 'running'",
+                 (cp["status"], cp["step"], cp["open_prompt_id"], json.dumps(cp["answers"]), job_id))
+    conn.commit()
+
+
 def mark_approve_sent(conn, job_id: int) -> None:
     """A DECISION approve is going out: this session may click Submit, so a
     crash must never make it resumable (sweep_orphans)."""
@@ -80,13 +88,15 @@ def release_claim(conn, job_id: int) -> None:
     conn.commit()
 
 
-def next_auto_resume(conn) -> int | None:
+def next_auto_resume(conn, skip=frozenset()) -> int | None:
     """Only an auto session: a manual one (an "Apply anyway" on a gate skip
     included) restarted by the auto worker would submit what nobody reviewed."""
-    row = conn.execute("SELECT job_id FROM apply_checkpoint WHERE status = 'resumable'"
-                       " AND mode = 'auto' AND auto_resumed = 0"
-                       " ORDER BY updated_at, job_id LIMIT 1").fetchone()
-    return row["job_id"] if row else None
+    for row in conn.execute("SELECT job_id FROM apply_checkpoint WHERE status = 'resumable'"
+                            " AND mode = 'auto' AND auto_resumed = 0"
+                            " ORDER BY updated_at, job_id"):
+        if row["job_id"] not in skip:
+            return row["job_id"]
+    return None
 
 
 def mark_resumable(conn, job_id: int) -> None:
