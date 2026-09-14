@@ -321,7 +321,7 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
                   conn_factory=None, *, auto: bool = False,
                   brief_path: Path | None = None,
                   profile_path: Path | None = None, db_path: Path | None = None,
-                  tasks: set | None = None) -> dict:
+                  tasks: set | None = None, run_conn_factory=None) -> dict:
     """Answer one open ASK/CONFIRM card: validate it against the prompt's
     kind, record it, and write ANSWER:/DECISION: into the SAME live session.
 
@@ -333,10 +333,11 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
                        (prompt_id,)).fetchone()
     if row is None:
         return _refuse(404, "No such question")
-    if _is_home_request(conn, row):
+    if is_home_prompt(conn, row):
         return _answer_home_prompt(conn, row, answer, brief_path=brief_path,
                                    profile_path=profile_path, db_path=db_path,
-                                   conn_factory=conn_factory, tasks=tasks)
+                                   conn_factory=conn_factory, tasks=tasks,
+                                   run_conn_factory=run_conn_factory)
     if row["status"] != "open":
         return _refuse(409, _CLOSED)
     kind, payload = row["kind"], json.loads(row["payload"])
@@ -473,7 +474,6 @@ HELP_TEXT = ("I can find new jobs (\"find jobs\"), show your queue (\"what's my 
              " pause, resume or stop the apply run, and tell you the status.")
 _ROUTER_DOWN = ("I couldn't work out what you meant — the command router may be unavailable"
                 " (is the claude CLI installed and signed in?). Say \"help\" to see the commands. ")
-_HOME_STALE = "-10 minutes"
 
 
 def _background(coro, tasks: set | None) -> asyncio.Task:
@@ -485,7 +485,7 @@ def _background(coro, tasks: set | None) -> asyncio.Task:
 
 
 def pipeline_run_now(conn: sqlite3.Connection, conn_factory, db_path: Path, brief_path: Path,
-                     tasks: set | None = None) -> dict:
+                     tasks: set | None = None, run_conn_factory=None) -> dict:
     """Run Now (both frontends, and an approved Home "find jobs"). Must run on the loop."""
     if worker.get_run_state(conn, "pipeline")["status"] not in ("idle", "error"):
         return {"ok": False, "message": "A pipeline run is already in progress."}
@@ -542,8 +542,10 @@ def _apply_to_reply(conn, job_ref: str | None) -> str | None:
         return ("That matches more than one job — which one? "
                 + "; ".join(f"#{m['id']} {m['company']} — {m['title']}" for m in matches))
     job = conn.execute("SELECT company, title FROM job WHERE id = ?", (job_id,)).fetchone()
+    # The id first, scraped text clipped: a title like "(#12)" must not pass for another job.
+    clip = lambda s: s if len(s) <= 80 else s[:79] + "…"
     _ask_home(conn, "apply_to", {"job_id": job_id},
-              f"Start applying to {job['title']} at {job['company']} (#{job_id})?")
+              f"Start applying to #{job_id}: {clip(job['title'])} at {clip(job['company'])}?")
     return None
 
 
@@ -568,25 +570,39 @@ async def home_message(conn: sqlite3.Connection, text: str, brief_path: Path, pr
             _ask_home(conn, "find_jobs", {}, "Run discovery now? (uses Apify + scoring credits)")
         elif name == "apply_to":
             reply = _apply_to_reply(conn, routed.get("job_ref"))
-        elif name == "pause_apply":
-            run_pause(conn)
+        elif name in ("pause_apply", "resume_apply"):
+            # Free text never starts spending: resume only a paused run, pause only a running one.
+            status = worker.get_run_state(conn, "apply")["status"]
+            if name == "pause_apply" and status == "running":
+                run_pause(conn)
+            elif name == "resume_apply" and status == "paused":
+                _background(_home_resume(conn, brief_path, profile_path, conn_factory), tasks)
+            else:
+                verb = "pause" if name == "pause_apply" else "resume"
+                reply = f"Nothing to {verb} — the apply run is {status}."
         elif name == "stop_apply":
             run_stop(conn)
-        elif name == "resume_apply":
-            _background(run_resume(conn, brief_path, profile_path, conn_factory), tasks)
-        elif routed == intent._UNKNOWN:     # the router itself failed
+        elif routed.get("failed"):
             reply = _ROUTER_DOWN + HELP_TEXT
         else:
             reply = f"{routed['reply']} {HELP_TEXT}"
-    except Exception as exc:
+    except Exception:
         log.exception("home message failed")
-        reply = f"Something went wrong handling that ({exc}). {HELP_TEXT}"
+        reply = f"Something went wrong handling that — the details are in the server log. {HELP_TEXT}"
     if reply:
         chat.post_message(conn, home, "agent", reply)
     return {"ok": True, "message_id": mid}
 
 
-def _is_home_request(conn, row) -> bool:
+async def _home_resume(conn, brief_path, profile_path, conn_factory) -> None:
+    try:
+        await run_resume(conn, brief_path, profile_path, conn_factory)
+    except Exception:
+        log.exception("home resume failed")
+        _home_says(conn, "Resuming the apply run failed — the details are in the server log.")
+
+
+def is_home_prompt(conn, row) -> bool:
     """Only we open these (chat.open_home_prompt): an agent ASK loses its
     origin in parse_ask and lives in its job's conversation anyway."""
     return (json.loads(row["payload"]).get("origin") == "home"
@@ -597,8 +613,9 @@ def _home_says(conn, text: str, payload: dict | None = None) -> None:
     chat.post_message(conn, chat.home_conversation(conn), "agent", text, payload)
 
 
-def _home_find_jobs(conn, args: dict, *, conn_factory, db_path, brief_path, tasks, **_) -> dict:
-    result = pipeline_run_now(conn, conn_factory, db_path, brief_path, tasks)
+def _home_find_jobs(conn, args: dict, *, conn_factory, db_path, brief_path, tasks,
+                    run_conn_factory=None, **_) -> dict:
+    result = pipeline_run_now(conn, run_conn_factory or conn_factory, db_path, brief_path, tasks)
     if not result["ok"]:
         _home_says(conn, result["message"])
         return _refuse(409, result["message"])
@@ -611,6 +628,12 @@ def _home_apply_to(conn, args: dict, *, brief_path, profile_path, conn_factory, 
     if type(job_id) is not int or not conn.execute("SELECT 1 FROM job WHERE id = ?",
                                                    (job_id,)).fetchone():
         text = f"Job #{job_id} no longer exists."
+        _home_says(conn, text)
+        return _refuse(409, text)
+    verdict = conn.execute("SELECT verdict FROM assessment WHERE job_id = ?"
+                           " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+    if verdict and verdict["verdict"] == "skip":    # guard's own text points at a button Home lacks
+        text = "The gate skipped this one — open the job's chat or the Jobs panel to override."
         _home_says(conn, text)
         return _refuse(409, text)
     # A readable refusal now; do_apply re-runs every guard when it starts.
@@ -631,9 +654,9 @@ async def _home_apply_run(conn, job_id: int, brief_path, profile_path, conn_fact
                                 brief_path=brief_path, candidate_profile_path=profile_path,
                                 conn_factory=conn_factory)
         text = result["message"]
-    except Exception as exc:
+    except Exception:
         log.exception("home apply failed for job %s", job_id)
-        text = f"Apply failed: {exc}"
+        text = "Apply failed — the details are in the server log."
     _home_says(conn, f"#{job_id}: {text}")
 
 
@@ -657,7 +680,7 @@ def _answer_home_prompt(conn, row, answer, **ctx) -> dict:
     stale = conn.execute(
         "SELECT created_at < datetime('now', ?) OR EXISTS (SELECT 1 FROM agent_prompt n"
         "  WHERE n.conversation_id = p.conversation_id AND n.status = 'open' AND n.id > p.id)"
-        " FROM agent_prompt p WHERE p.id = ?", (_HOME_STALE, row["id"])).fetchone()[0]
+        " FROM agent_prompt p WHERE p.id = ?", (chat.HOME_PROMPT_TTL, row["id"])).fetchone()[0]
     if stale:
         conn.execute("UPDATE agent_prompt SET status = 'expired' WHERE id = ? AND status = 'open'",
                      (row["id"],))

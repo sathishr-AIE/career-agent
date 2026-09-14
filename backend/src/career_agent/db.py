@@ -192,6 +192,20 @@ def connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
+_AGENT_PROMPT_REBUILD = (
+    "CREATE TABLE agent_prompt_new (id INTEGER PRIMARY KEY,"
+    " job_id INTEGER REFERENCES job(id),"
+    " conversation_id INTEGER NOT NULL REFERENCES conversation(id),"
+    " kind TEXT NOT NULL, payload TEXT NOT NULL,"
+    " status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','answered','expired')),"
+    " answer TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT)",
+    "INSERT INTO agent_prompt_new SELECT id, job_id, conversation_id, kind, payload,"
+    " status, answer, created_at, answered_at FROM agent_prompt",
+    "DROP TABLE agent_prompt",
+    "ALTER TABLE agent_prompt_new RENAME TO agent_prompt",
+)
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     conn.execute("INSERT OR IGNORE INTO run_state (kind, mode)"
@@ -234,19 +248,20 @@ def init_schema(conn: sqlite3.Connection) -> None:
     if any(r["name"] == "job_id" and r["notnull"]
            for r in conn.execute("PRAGMA table_info(agent_prompt)")):
         conn.commit()
-        conn.executescript(
-            "BEGIN IMMEDIATE;"
-            "CREATE TABLE agent_prompt_new (id INTEGER PRIMARY KEY,"
-            " job_id INTEGER REFERENCES job(id),"
-            " conversation_id INTEGER NOT NULL REFERENCES conversation(id),"
-            " kind TEXT NOT NULL, payload TEXT NOT NULL,"
-            " status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','answered','expired')),"
-            " answer TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT);"
-            "INSERT INTO agent_prompt_new SELECT id, job_id, conversation_id, kind, payload,"
-            " status, answer, created_at, answered_at FROM agent_prompt;"
-            "DROP TABLE agent_prompt;"
-            "ALTER TABLE agent_prompt_new RENAME TO agent_prompt;"
-            "COMMIT;")
+        # Off for the copy: an orphan row (a deleted job) must not fail the
+        # migration and leave every request's init_schema on a locked DB.
+        # PRAGMA foreign_keys is a no-op inside a transaction, hence before BEGIN.
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for stmt in _AGENT_PROMPT_REBUILD:
+                conn.execute(stmt)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
     conn.commit()
 
 

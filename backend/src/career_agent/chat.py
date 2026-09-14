@@ -116,6 +116,16 @@ def open_prompt(conn, job_id: int, kind: str, payload: dict) -> int:
     return pid
 
 
+HOME_PROMPT_TTL = "-10 minutes"    # a Home approve card older than this can't be approved
+
+
+def expire_stale_home_prompts(conn, conversation_id: int) -> None:
+    conn.execute("UPDATE agent_prompt SET status = 'expired' WHERE conversation_id = ?"
+                 " AND status = 'open' AND created_at < datetime('now', ?)",
+                 (conversation_id, HOME_PROMPT_TTL))
+    conn.commit()
+
+
 def open_home_prompt(conn, kind: str, payload: dict) -> int:
     """A Home confirmation card (no job). One at a time: a newer request
     supersedes every older open one, so only the latest ask can be approved."""
