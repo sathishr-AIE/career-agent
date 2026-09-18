@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import type { ConfirmPayload, OpenPrompt } from '../../api'
 import { useAnswer } from './useAnswer'
-import '../ui.css'
 import './cards.css'
 
 // Mirrors store._SECRET_QA_RE for display only: the backend is the authority and

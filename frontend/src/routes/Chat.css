@@ -1,10 +1,10 @@
-/* The chat wants the whole plane, not the 960px reading column the other
+/* The chat wants the whole page area, not the 1200px column the other
    routes sit in -- so it opts its own container out instead of App.css
    carving an exception for it. */
-.plane__content:has(.chat) {
+.app__scroll:has(.chat) {
   overflow: hidden;
 }
-.plane__inner:has(> .chat) {
+.app__page:has(.chat) {
   max-width: none;
   height: 100%;
   padding: var(--space-4);
@@ -20,6 +20,8 @@
 
 /* -- conversation list -- */
 .chat__list {
+  background: var(--surface);
+  border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   padding: var(--space-2);
   overflow-y: auto;
@@ -41,7 +43,7 @@
 }
 
 .conv:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--hover);
 }
 
 .conv.active {

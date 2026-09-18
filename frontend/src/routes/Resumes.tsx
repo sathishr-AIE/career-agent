@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import { ApiError, get, uploadFile, type ActionResult } from '../api'
-import '../components/ui.css'
 
 interface Bullet {
   text: string

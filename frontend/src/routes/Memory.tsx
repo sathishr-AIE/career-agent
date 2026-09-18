@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import { ApiError, get, put } from '../api'
-import '../components/ui.css'
 
 // Types declared locally.
 

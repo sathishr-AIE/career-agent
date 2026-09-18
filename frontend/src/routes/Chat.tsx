@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { errorText, get, post, type ChatMessage, type Conversation, type OpenPrompt } from '../api'
-import { Glass } from '../components/Glass'
 import { Composer } from '../components/chat/Composer'
 import { Drawer, PANEL_KEYS, panelTitle } from '../components/chat/Drawer'
 import { MessageList } from '../components/chat/MessageList'
-import '../components/ui.css'
 import './Chat.css'
 
 const POLL_MS = 3000
@@ -135,7 +133,7 @@ export function Chat() {
 
   return (
     <div className="chat">
-      <Glass as="aside" className="chat__list">
+      <aside className="chat__list">
         {convs.map((c) => (
           <button
             key={c.id}
@@ -147,7 +145,7 @@ export function Chat() {
             <div className="conv__last">{c.last_message ?? ''}</div>
           </button>
         ))}
-      </Glass>
+      </aside>
       <main className="chat__main">
         {offline && (
           <div className="qcard__error" role="status">

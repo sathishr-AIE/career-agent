@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import { ApiError, errorText, get, post, put } from '../api'
-import '../components/ui.css'
 
 // The facts store the gate scores against and tailoring cites. Below
 // min_hard facts, scoring and tailoring refuse to run at all.

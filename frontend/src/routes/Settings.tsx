@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ApiError, get, put } from '../api'
-import '../components/ui.css'
 
 interface CareerBrief {
   target_titles: string[]

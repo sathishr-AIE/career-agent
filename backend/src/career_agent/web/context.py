@@ -260,6 +260,10 @@ def run_status_context(conn: sqlite3.Connection) -> dict:
     return {"run_state": state, "current_job": current_job, "stats": stats,
             "recent_events": recent_events,
             "open_prompt": open_prompt, "conversation_id": conversation_id,
+            # OC1: every open job card, for the Shell's "N cards waiting".
+            "open_prompt_count": conn.execute(
+                "SELECT COUNT(*) n FROM agent_prompt"
+                " WHERE job_id IS NOT NULL AND status = 'open'").fetchone()["n"],
             # Read once, cheaply, so the always-visible status bar can show
             # the kill switch's state without a second endpoint just for it.
             "submission_implemented": ats_apply.SUBMISSION_IMPLEMENTED}

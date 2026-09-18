@@ -1,8 +1,9 @@
 # Frontend redesign: design first, build later
 
 Date: 2026-09-14
-Status: Phase 1 (design). Screen 1 is approved. Screens 2 to 11 have their UX defined and
-are waiting for Stitch designs (screen generation was unavailable on 2026-09-14).
+Status: Phase 2 (implementation). Every screen is approved: 1 in Stitch, 2 on the design
+canvas, and 3 to 11 on 2026-09-18, when the user said the full redesign is finalized.
+Screens are built one at a time, in the Phase 2 order below.
 
 ## Goal
 
@@ -126,17 +127,17 @@ The picker sits in the composer toolbar, and what it controls depends on the cha
 
 | # | Screen | Design | Impl | Backend deps |
 |---|---|---|---|---|
-| 1 | Application Shell | **Approved** | Not started | OC1, `/api/pipeline/status` |
-| 2 | Dashboard | UX defined; Stitch pending (outage 2026-09-14) | Not started | EV1, OC1 |
-| 3 | Applications | UX defined; Stitch pending (outage 2026-09-14) | Not started | none |
-| 4 | Job Details | UX defined; Stitch pending (outage 2026-09-14) | Not started | JD1 |
-| 5 | Chat (Home + Job) | UX defined; Stitch pending (outage 2026-09-14) | Not started | MS1 |
-| 6 | Facts | UX defined; Stitch pending (outage 2026-09-14) | Not started | FC1 |
-| 7 | Resumes | UX defined; Stitch pending (outage 2026-09-14) | Not started | RS1, FC1 (links only) |
-| 8 | Profile | UX defined; Stitch pending (outage 2026-09-14) | Not started | none |
-| 9 | Settings | UX defined; Stitch pending (outage 2026-09-14) | Not started | MS1 |
-| 10 | Memory | UX defined; Stitch pending (outage 2026-09-14) | Not started | MM1 |
-| 11 | Logins | UX defined; Stitch pending (outage 2026-09-14) | Not started | LG1 |
+| 1 | Application Shell | **Approved** | **Implemented** | OC1, `/api/pipeline/status` |
+| 2 | Dashboard | **Approved** (Claude design canvas) | In progress | EV1, OC1 |
+| 3 | Applications | **Approved** (Claude design canvas) | Not started | none |
+| 4 | Job Details | **Approved** (Claude design canvas) | Not started | JD1 |
+| 5 | Chat (Home + Job) | **Approved** (Claude design canvas) | Not started | MS1 |
+| 6 | Facts | **Approved** (Claude design canvas) | Not started | FC1 |
+| 7 | Resumes | **Approved** (Claude design canvas) | Not started | RS1, FC1 (links only) |
+| 8 | Profile | **Approved** (Claude design canvas) | Not started | none |
+| 9 | Settings | **Approved** (Claude design canvas) | Not started | MS1 |
+| 10 | Memory | **Approved** (Claude design canvas) | Not started | MM1 |
+| 11 | Logins | **Approved** (Claude design canvas) | Not started | LG1 |
 
 Design statuses: Pending → UX defined → In review → **Approved**. Implementation statuses:
 Not started → In progress → **Implemented**.
@@ -145,6 +146,30 @@ Not started → In progress → **Implemented**.
 one-line prompt in an empty project. Screen edits still worked. While it lasts, screens
 advance only to "UX defined". No screen is approved without its Stitch design, and
 reviews resume in tracker order.
+
+**Design tool change (2026-09-14, the user's decision).** Because of the outage, screens 2
+to 11 are designed on a Claude design canvas instead of in Stitch:
+<https://claude.ai/code/artifact/4c167421-0943-4c3f-9df0-4600c5979f32>, one page per
+screen.
+- Screen 1 stays approved in Stitch and remains the visual source of truth. The canvas's
+  shared Sidebar and every screen copy its exact values: `#faf8ff` page, `#3525cd`
+  primary, `#eaedff` active nav, slate-200 borders, 36px nav items, 56px bars, 32px
+  buttons, 40px rows, 4px-radius 11px status badges, Inter with JetBrains Mono.
+- The canvas's working `.dc.html` files are the design source for Phase 2, in place of
+  Stitch screen IDs. A local copy is saved in `docs/design/frontend-redesign/`:
+  - `career-agent-redesign.html`: the whole canvas; open it in a browser to view it or
+    export PNG/PDF
+  - `source/`: every artboard's `.dc.html` plus `canvas.json`, which the canvas can be
+    rebuilt from
+  After a design change is saved on the canvas, refresh this copy.
+- Approval is still per screen, in tracker order.
+- **Batch review (2026-09-14, the user's request).** After Screen 2's approval, the user
+  asked for screens 3 to 11 to be designed together on the canvas and approved later.
+  Every screen still needs explicit approval before Phase 2 starts.
+- **Card styling.** Agent and approval cards use a tinted header strip with an icon and a
+  label ("Agent asks", "Needs your go-ahead", "Review before applying") instead of a
+  coloured left border. The meaning is unchanged; the left-border accent is a cliché the
+  design avoids.
 
 ## Backend dependencies
 
@@ -256,7 +281,7 @@ These are written before each Stitch design. They are the brief the design must 
      - recent failures (EV1) → Open
      - an empty state when none of these apply
   4. **Activity (1/3 width, under Needs you):** a global EV1 feed with type icons and
-     relative times, plus "View all activity".
+     relative times. There is no "View all activity" link, because no screen exists for it.
   5. **Recent discoveries table:** verdict badge, title, company, source, score, location.
      Rows open the job hub.
   6. **Three cards:**
@@ -987,6 +1012,24 @@ For each screen, in tracker order:
 
 This starts only when all 11 screens are Approved.
 
+**Phase 2 order (2026-09-18, the user's decision).** Implementation runs as 12 steps, with
+Chat split in two: 1 Shell, 2 Dashboard, 3 Applications, 4 Job Details, 5 Home chat, 6 Job
+chat, 7 Facts, 8 Resumes, 9 Profile, 10 Settings, 11 Memory, 12 Logins. Each step is
+planned, built alone, and then waits for the user's approval before the next one starts.
+The plan is `~/.claude/plans/use-career-agent-redesign-html-as-the-kind-wilkinson.md`.
+
+**Implementation decisions (2026-09-18):**
+- **Primary is `#3525cd`.** The component sheet draws primary buttons in `#4f46e5`, but
+  this spec pins `#3525cd` and every later artboard uses it. `#4f46e5` is kept for the
+  brand mark and link hover; primary hover `#3730a3` and disabled `#c7d2fe` come from the
+  sheet.
+- **Light only.** No dark mode is drawn, so none is built. The tokens are custom
+  properties, so a dark pair can be added later.
+- **Migration wrapper.** Pages not yet rebuilt are wrapped in `legacy()` in `main.tsx`,
+  and their old styles live in `src/legacy.css`, scoped under `.legacy`. The new
+  primitives in `components/ui.css` reuse the artboards' class names (`.card`, `.btn`,
+  ...). The final pass deletes the wrapper, `legacy.css` and the legacy token aliases.
+
 - **For each screen:**
   1. Build its backend-dep slices first.
   2. Retrieve the approved Stitch design.
@@ -1020,7 +1063,8 @@ Stitch project: `14960912770210209518`. Design system: `assets/48877066377942297
   `8c3f224648274563afec62e50123bd4c`. Ignore the superseded draft `3854ea8c…`.
 - **Sidebar:**
   - Workspace, Candidate and Agent groups.
-  - The active item is indigo with a 2px left bar and a mono count.
+  - The active item is indigo with a 4px left bar (the approved Stitch Shell) and a mono
+    count. The count badge is slate on an inactive item.
   - Facts shows an amber dot while the fact count is below `min_warn`.
 - **Agent status card in the sidebar footer.** It replaces `AgentStatusBar` and shows:
   - apply run state and mode, and the current job
@@ -1033,3 +1077,24 @@ Stitch project: `14960912770210209518`. Design system: `assets/48877066377942297
   scrolling, with no client-side pager.
 - **Component sheet sample content is neutral.** It must never show controls for features
   that don't exist. Real submission is a code constant, not a UI toggle.
+
+### 2. Dashboard (approved 2026-09-14)
+
+- **Where:** canvas page "2 · Dashboard". Artboards `Main.dc.html` (pipeline running) and
+  `DashboardFirstRun.dc.html` (first run with a pipeline error), both importing the
+  shared `Sidebar.dc.html`.
+- **Decisions:**
+  - Six KPI tiles, including Today `today_submitted / daily_cap` with a neutral slate bar.
+  - The Pipeline card has the five-step stepper, a progress bar (Score band by
+    `scored / max_score`), counters and the run-scoped live activity. In the error state
+    it shows the `last_error` alert.
+  - "Needs you" lists a waiting card, resumable sessions and a recent failure.
+  - The Activity feed (EV1) uses slate icons for draft and resumable events. There's no
+    "View all activity" link.
+  - Score distribution bars are neutral slate, because the buckets don't map onto
+    Submit/Hold/Skip verdicts.
+  - First run: the "Get your first shortlist" checklist replaces the empty tables. Its
+    Run pipeline button is secondary, so the top bar keeps the one primary.
+  - Text links are indigo, as in the approved Shell.
+- **Not drawn:** the loading skeleton and the Run Now refusal (409). Both follow the
+  shared component-sheet states.

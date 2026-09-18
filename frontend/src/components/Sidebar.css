@@ -1,0 +1,343 @@
+/* Values from the approved Sidebar artboard (Sidebar.dc.html) and the
+   component sheet's nav item states (§08). */
+
+.sidebar {
+  min-height: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  overflow-y: auto;
+}
+
+.brand {
+  height: 56px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.brand__mark {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  background: var(--link-hover);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-sm);
+}
+
+.brand__text {
+  display: flex;
+  flex-direction: column;
+}
+
+.brand__name {
+  font-size: 14px;
+  line-height: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.brand__tag {
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--text-4);
+  margin-top: 2px;
+}
+
+.nav {
+  padding: 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.nav__label {
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-4);
+  padding: 4px 10px;
+}
+
+.nav__items {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-item {
+  position: relative;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text-2);
+}
+
+.nav-item__main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.nav-item svg {
+  flex-shrink: 0;
+  color: var(--text-4);
+}
+
+.nav-item:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.nav-item:hover svg {
+  color: var(--sl-fg);
+}
+
+.nav-item.active {
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.nav-item.active svg {
+  color: var(--primary);
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 4px;
+  background: var(--primary);
+  border-radius: 0 4px 4px 0;
+}
+
+.nav-count {
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 500;
+  background: var(--sl-bg);
+  color: var(--sl-fg);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.nav-item.active .nav-count {
+  background: var(--primary-soft-2);
+  color: var(--primary);
+}
+
+.nav-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: var(--am-dot);
+}
+
+/* -- agent status card -- */
+
+.sidebar__foot {
+  padding: 12px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.status-card {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.status-card__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.status-card__with-dot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-card__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+  color: #1e293b;
+}
+
+.dot--live {
+  box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.2);
+}
+
+.status-card__mode {
+  font-size: 10px;
+  line-height: 14px;
+  background: var(--sl-bg);
+  color: var(--sl-fg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+}
+
+.status-card__job {
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-card__meta {
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-3);
+}
+
+.status-card__note {
+  font-size: 10px;
+  color: var(--text-5);
+  white-space: nowrap;
+}
+
+.status-card__cards {
+  border-radius: 4px;
+  background: var(--am-bg);
+  border: 1px solid rgba(253, 230, 138, 0.7);
+  padding: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 500;
+  color: #78350f;
+}
+
+.status-card__kill {
+  background: var(--sl-bg);
+  color: var(--sl-fg);
+  font-size: 10px;
+  line-height: 14px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(226, 232, 240, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.status-card__kill svg {
+  color: var(--text-5);
+}
+
+.status-card__kill-tag {
+  font-size: 9px;
+  color: var(--text-5);
+  text-transform: uppercase;
+}
+
+.status-compact {
+  display: none;
+}
+
+.status-compact__cards {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 9999px;
+  background: var(--am-bg);
+  border: 1px solid var(--am-line);
+  color: #78350f;
+  font: 500 11px/1 var(--font-mono);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* -- narrow widths: an icon rail, then a sheet (App.tsx opens it) -- */
+
+@media (min-width: 721px) and (max-width: 1024px) {
+  .brand {
+    justify-content: center;
+    padding: 0;
+  }
+  .brand__text,
+  .nav__label,
+  .nav-item__label,
+  .nav-count,
+  .status-card {
+    display: none;
+  }
+  .nav {
+    padding: 12px 10px;
+  }
+  .nav-item {
+    justify-content: center;
+    padding: 0;
+  }
+  .nav-dot {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+  }
+  .sidebar__foot {
+    padding: 12px 0;
+  }
+  .status-compact {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+}
+
+@media (max-width: 720px) {
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 240px;
+    z-index: 40;
+    box-shadow: var(--shadow-lg);
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform 200ms ease-out, visibility 0s linear 200ms;
+  }
+  .app[data-nav-open] .sidebar {
+    transform: none;
+    visibility: visible;
+    transition: transform 200ms ease-out;
+  }
+}

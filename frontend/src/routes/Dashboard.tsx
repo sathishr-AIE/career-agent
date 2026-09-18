@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { get, type Verdict } from '../api'
+import { get, type PipelineState, type PipelineStatus, type Verdict } from '../api'
 import { useAction } from '../components/useAction'
 import { VerdictRail } from '../components/VerdictRail'
-import '../components/ui.css'
 import './Dashboard.css'
 
 interface Kpis {
@@ -56,25 +55,6 @@ interface OutcomeSummary {
   offers: number
   callback_rate: number
   interview_rate: number
-}
-
-interface PipelineState {
-  status: 'idle' | 'running' | 'paused' | 'stopped' | 'error'
-  last_error: string | null
-  started_at: string | null
-  stage: string | null
-  found: number
-  duplicates: number
-  passed: number
-  scored: number
-  shortlisted: number
-}
-
-interface PipelineStatus {
-  pipeline_state: PipelineState
-  feed: { payload: string; occurred_at: string }[]
-  stages: [string, string][]
-  max_score: number
 }
 
 interface OverviewContext {

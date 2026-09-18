@@ -63,14 +63,20 @@ returning dicts, not `HTMLResponse`s. `web/app.py`'s Jinja routes and the JSON r
 Changing behavior almost always means editing `context.py`/`actions.py`, not a route
 file, or the frontends drift.
 
-**Not yet integrated in the React app.** A 2026-09-14 audit found three JSON routes the
-React app never calls, kept rather than deleted because something else still needs them:
+**Not yet integrated in the React app.** A 2026-09-14 audit found JSON routes the React
+app never calls, kept rather than deleted because something else still needs them:
 `POST /api/answer/{job_id}` is the pre-chat answer-needed path, superseded by chat's
-answer cards but still reachable directly; `GET /api/pipeline/status` duplicates data
-`GET /api/overview` already returns, so nothing calls it standalone; `GET
-/api/applications` with the default `show=queue` (the React app always passes
-`show=skipped`, which returns every verdict) is still what the Jinja `/applications`
-page requests. Before deleting any of the three, grep for other callers first.
+answer cards but still reachable directly; `GET /api/applications` with the default
+`show=queue` (the React app always passes `show=skipped`, which returns every verdict) is
+still what the Jinja `/applications` page requests. Before deleting either, grep for other
+callers first. (`GET /api/pipeline/status` was on this list until the redesigned sidebar
+started polling it.)
+
+**Frontend redesign in progress** (`docs/superpowers/specs/2026-09-14-frontend-redesign-design.md`).
+The React shell is `App.tsx` plus `components/Sidebar.tsx` (nav and the agent status card,
+polling `/api/run/status` and `/api/pipeline/status`). Routes wrapped in `legacy()` in
+`main.tsx` are pre-redesign pages, styled by `src/legacy.css`; the redesign's primitives
+live in `components/ui.css` and reuse the design artboards' class names.
 
 The API routers reach shared state (`DB_PATH`, `BRIEF_PATH`, `_conn()`,
 `_background_tasks`) through a deferred, call-time import of `app.py` (their `_app()`

@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import type { AskPayload, OpenPrompt } from '../../api'
 import { useAnswer } from './useAnswer'
-import '../ui.css'
 import './cards.css'
 
 /** An open ASK: choice buttons, a text field, or Approve/Reject (also for

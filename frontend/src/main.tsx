@@ -1,6 +1,11 @@
-import { StrictMode } from 'react'
+import { StrictMode, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
+// Global styles first, so every component's own stylesheet loads after them
+// and can override a shared primitive.
+import './tokens.css'
+import './components/ui.css'
+import './legacy.css'
 import { App } from './App'
 import { Applications } from './routes/Applications'
 import { Chat } from './routes/Chat'
@@ -11,23 +16,26 @@ import { Memory } from './routes/Memory'
 import { Profile } from './routes/Profile'
 import { Resumes } from './routes/Resumes'
 import { Settings } from './routes/Settings'
-import './tokens.css'
+
+// Pages not yet rebuilt to the redesign keep their old styles, scoped under
+// .legacy (display: contents). Each screen drops its wrapper when it ships.
+const legacy = (page: ReactNode) => <div className="legacy">{page}</div>
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>
       <Routes>
         <Route element={<App />}>
-          <Route index element={<Chat />} />
-          <Route path="chat/:id" element={<Chat />} />
-          <Route path="dashboard" element={<Dashboard />} />
-          <Route path="applications" element={<Applications />} />
-          <Route path="resumes" element={<Resumes />} />
-          <Route path="facts" element={<Facts />} />
-          <Route path="memory" element={<Memory />} />
-          <Route path="logins" element={<Logins />} />
-          <Route path="profile" element={<Profile />} />
-          <Route path="settings" element={<Settings />} />
+          <Route index element={legacy(<Chat />)} />
+          <Route path="chat/:id" element={legacy(<Chat />)} />
+          <Route path="dashboard" element={legacy(<Dashboard />)} />
+          <Route path="applications" element={legacy(<Applications />)} />
+          <Route path="resumes" element={legacy(<Resumes />)} />
+          <Route path="facts" element={legacy(<Facts />)} />
+          <Route path="memory" element={legacy(<Memory />)} />
+          <Route path="logins" element={legacy(<Logins />)} />
+          <Route path="profile" element={legacy(<Profile />)} />
+          <Route path="settings" element={legacy(<Settings />)} />
         </Route>
       </Routes>
     </BrowserRouter>

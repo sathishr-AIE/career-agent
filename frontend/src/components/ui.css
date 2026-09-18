@@ -1,133 +1,58 @@
-/* Shared content-plane primitives: cards, tables, buttons, banners.
-   Everything here lives on the paper plane, so it uses --ink/--paper*, not
-   the graphite chrome tokens. */
+/* Shared primitives from the approved component sheet
+   (docs/design/frontend-redesign/source/ComponentSheet.dc.html). Class names
+   follow the artboards' own vocabulary so a screen's markup ports as-is. A
+   primitive is added here by the first screen that uses it. */
 
-.page-title {
-  font-size: 1.75rem;
-  margin-bottom: var(--space-6);
+/* Icon button: row actions, the top bar's menu button. */
+.ib {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
 }
 
-.card {
-  background: var(--paper-raised);
-  border: 1px solid var(--paper-line);
-  border-radius: var(--radius-lg);
-  padding: var(--space-6);
-  margin-bottom: var(--space-6);
+.ib:hover {
+  background: var(--hover);
+  color: var(--text);
 }
 
-.card h2 {
-  font-size: 1.05rem;
-  margin-bottom: var(--space-4);
+/* Status dot. Colour carries status only. */
+.dot {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
 }
 
-.field-row {
-  display: grid;
-  gap: var(--space-1);
-  margin-bottom: var(--space-4);
+.dot--lg {
+  width: 8px;
+  height: 8px;
 }
 
-.field-row label {
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--ink-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
+.dot--em { background: var(--em-dot); }
+.dot--am { background: var(--am-dot); }
+.dot--ro { background: var(--ro-dot); }
+.dot--sk { background: var(--sk-dot); }
+.dot--sl { background: var(--sl-dot); }
 
-.field-row input,
-.field-row select,
-.field-row textarea {
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--paper-line);
-  border-radius: var(--radius);
-  background: var(--paper);
-  font-size: 0.9375rem;
-}
-
-.field-row .hint {
-  font-size: 0.8125rem;
-  color: var(--ink-dim);
-}
-
-.field-error {
-  color: var(--skip);
-  font-size: 0.8125rem;
-}
-
-.btn {
-  border: 1px solid var(--paper-line);
-  background: var(--paper-raised);
-  color: var(--ink);
-  border-radius: var(--radius);
-  padding: 9px 14px;
-  font-size: 0.875rem;
-  font-weight: 700;
-}
-
-.btn.primary {
-  background: var(--signal);
-  border-color: var(--signal);
-  color: #fff;
-}
-
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.rationale {
-  color: var(--ink-dim);
-  font-size: 0.875rem;
-}
-
-.banner {
-  border-radius: var(--radius);
-  padding: var(--space-3) var(--space-4);
-  margin-bottom: var(--space-4);
-  font-size: 0.875rem;
-}
-
-.banner--done {
-  background: var(--submit-dim);
-  color: var(--submit);
-}
-
-.banner--denied {
-  background: var(--skip-dim);
-  color: var(--skip);
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-th,
-td {
-  text-align: left;
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--paper-line);
-  font-size: 0.875rem;
-  vertical-align: top;
-}
-
-th {
-  color: var(--ink-dim);
-  font-weight: 600;
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-.kv {
-  display: grid;
-  gap: var(--space-2);
-  font-size: 0.875rem;
-  margin-bottom: var(--space-4);
-}
-
-.kv span {
+/* Loading skeleton (shimmer). */
+.skel {
   display: block;
-  color: var(--ink-dim);
-  font-size: 0.75rem;
+  height: 10px;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, var(--line) 25%, var(--line-soft) 50%, var(--line) 75%);
+  background-size: 200% 100%;
+  animation: skel 1.4s ease-in-out infinite;
+}
+
+@keyframes skel {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
 }

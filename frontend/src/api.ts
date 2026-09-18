@@ -95,8 +95,31 @@ export interface RunStatusContext {
   }
   recent_events: { type: string; payload: string | null; occurred_at: string }[]
   open_prompt: { id: number; kind: string; question: string; needs_answer: boolean } | null
+  /** Every open job card (OC1), for "N cards waiting". */
+  open_prompt_count: number
   conversation_id: number | null
   submission_implemented: boolean
+}
+
+export interface PipelineState {
+  status: 'idle' | 'running' | 'paused' | 'stopped' | 'error'
+  last_error: string | null
+  /** SQLite's naive-UTC datetime('now'). */
+  started_at: string | null
+  stage: string | null
+  found: number
+  duplicates: number
+  passed: number
+  scored: number
+  shortlisted: number
+}
+
+/** GET /api/pipeline/status (context.pipeline_status_context). */
+export interface PipelineStatus {
+  pipeline_state: PipelineState
+  feed: { payload: string; occurred_at: string }[]
+  stages: [string, string][]
+  max_score: number
 }
 
 export interface ActionResult {

@@ -2176,6 +2176,20 @@ def test_run_status_falls_back_to_a_manual_applys_open_card(client):
     assert web._run_status_context(conn)["current_job"] is None
 
 
+def test_run_status_counts_open_job_cards_only(client):
+    """OC1: the Shell says "N cards waiting". Home cards (job_id NULL) never count."""
+    from career_agent import chat
+    conn = db.connect(web.DB_PATH)
+    assert web._run_status_context(conn)["open_prompt_count"] == 0
+    chat.open_prompt(conn, 1, "text", {"id": "q", "question": "Notice?"})
+    chat.open_prompt(conn, 1, "confirm", {"fields": []})
+    chat.open_home_prompt(conn, "approve", {"origin": "home", "action": "find_jobs",
+                                            "args": {}, "question": "Run discovery now?"})
+    assert web._run_status_context(conn)["open_prompt_count"] == 2
+    chat.expire_open_prompts(conn, 1)
+    assert web._run_status_context(conn)["open_prompt_count"] == 0
+
+
 # -- Task 9 fix round 1 ---------------------------------------------------------
 
 def _live_ask(conn, job_id=1):

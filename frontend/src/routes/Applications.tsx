@@ -3,7 +3,6 @@ import { Link, useNavigate } from 'react-router-dom'
 import { ApiError, get, post, type ActionResult, type Job, type RunState } from '../api'
 import { useAction } from '../components/useAction'
 import { VerdictRail } from '../components/VerdictRail'
-import '../components/ui.css'
 import './Applications.css'
 
 interface AppliedInfo {
