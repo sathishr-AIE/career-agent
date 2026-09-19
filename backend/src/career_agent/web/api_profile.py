@@ -82,6 +82,10 @@ def api_get_profile():
     return {"exists": True, "profile": load_candidate_profile(path).model_dump()}
 
 
+_REQUIRED = {"candidate_name": "Full name", "candidate_email": "Email",
+             "candidate_phone": "Phone"}
+
+
 @router.put("/profile")
 def api_put_profile(body: dict = Body(...)):
     body = _strip(body)
@@ -99,7 +103,13 @@ def api_put_profile(body: dict = Body(...)):
         profile = CandidateProfile(**body)
     except ValidationError as exc:
         for err in exc.errors():
-            errors.setdefault(".".join(str(p) for p in err["loc"]), err["msg"])
+            path = ".".join(str(p) for p in err["loc"])
+            # The Profile page shows this message as is: "Phone is required",
+            # not pydantic's "String should have at least 1 character".
+            if path in _REQUIRED and err["type"] in ("string_too_short", "missing"):
+                errors.setdefault(path, f"{_REQUIRED[path]} is required")
+            else:
+                errors.setdefault(path, err["msg"])
 
     if errors:
         return JSONResponse(status_code=422, content={"ok": False, "errors": errors})

@@ -1,6 +1,6 @@
-import { StrictMode, type ReactNode } from 'react'
+import { StrictMode, useState, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { Route, RouterProvider, Routes, createBrowserRouter } from 'react-router-dom'
 // Global styles first, so every component's own stylesheet loads after them
 // and can override a shared primitive.
 import './tokens.css'
@@ -21,9 +21,16 @@ import { Settings } from './routes/Settings'
 // .legacy (display: contents). Each screen drops its wrapper when it ships.
 const legacy = (page: ReactNode) => <div className="legacy">{page}</div>
 
+/** A data router around the <Routes> tree below (one splat route renders it):
+ * FormPage's leave guard needs useBlocker, which only works under one. */
+function DataRouter({ children }: { children: ReactNode }) {
+  const [router] = useState(() => createBrowserRouter([{ path: '*', element: children }]))
+  return <RouterProvider router={router} />
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <BrowserRouter>
+    <DataRouter>
       <Routes>
         <Route element={<App />}>
           <Route index element={legacy(<Chat />)} />
@@ -34,10 +41,10 @@ createRoot(document.getElementById('root')!).render(
           <Route path="facts" element={legacy(<Facts />)} />
           <Route path="memory" element={legacy(<Memory />)} />
           <Route path="logins" element={legacy(<Logins />)} />
-          <Route path="profile" element={legacy(<Profile />)} />
+          <Route path="profile" element={<Profile />} />
           <Route path="settings" element={legacy(<Settings />)} />
         </Route>
       </Routes>
-    </BrowserRouter>
+    </DataRouter>
   </StrictMode>,
 )

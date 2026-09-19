@@ -1,0 +1,275 @@
+/* The form-page kit Profile and Settings share (components/FormPage.tsx):
+   section nav, fields, the sticky save bar. Values from the approved Profile
+   and Settings artboards; base primitives (.card, .btn, .alert) stay in ui.css. */
+
+/* -- layout: section nav beside the form -- */
+
+.form-layout {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 32px;
+  align-items: start;
+}
+
+.form-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+/* Anchor targets land below the page top, not flush against it. */
+.form-sections > section {
+  scroll-margin-top: 24px;
+}
+
+.section-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  position: sticky;
+  top: 24px;
+}
+
+.section-nav button {
+  height: 34px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--sl-fg);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.section-nav button:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.section-nav button[aria-current='true'] {
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.section-nav__bad {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: var(--ro-dot);
+}
+
+.section-nav__done {
+  flex-shrink: 0;
+  color: var(--em-dot);
+}
+
+/* -- fields -- */
+
+.grid2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 16px;
+  padding: 16px;
+}
+
+.span2 {
+  grid-column: span 2;
+}
+
+.f {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fl {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 500;
+  color: #334155;
+}
+
+.req {
+  color: var(--ro-fg);
+}
+
+.in {
+  width: 100%;
+  height: 36px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 0 10px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text);
+}
+
+.in::placeholder {
+  color: var(--text-5);
+}
+
+.in:focus {
+  outline: none;
+  border-color: var(--link-hover);
+  box-shadow: var(--ring);
+}
+
+.in:disabled {
+  background: var(--surface-2);
+  color: var(--text-5);
+}
+
+.in.mono {
+  font-size: 12px;
+}
+
+textarea.in {
+  height: auto;
+  min-height: 64px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+select.in {
+  appearance: none;
+  padding-right: 32px;
+  background: var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center;
+}
+
+.in.bad,
+.in.bad:focus {
+  border-color: var(--ro-dot);
+  box-shadow: 0 0 0 3px rgba(225, 29, 72, 0.12);
+}
+
+.err {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--ro-fg);
+}
+
+.help {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text-3);
+}
+
+.f-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 18px;
+  color: #334155;
+}
+
+.f-check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+/* -- banners above a form: the error summary (rose .alert) and an amber variant -- */
+
+.alert.am {
+  background: var(--am-bg);
+  border-color: var(--am-line);
+  color: var(--am-fg);
+}
+
+.alert a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+/* -- the sticky "Unsaved changes" bar -- */
+
+.save-bar {
+  position: fixed;
+  /* ponytail: mirrors App.css's sidebar column (240 / 64 / 0); a slot in the
+     shell would track it automatically if a third form page ever appears. */
+  left: 240px;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  height: 64px;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  box-shadow: 0 -4px 16px rgba(15, 23, 42, 0.06);
+  padding: 0 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.save-bar__note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 18px;
+  color: #334155;
+}
+
+.save-bar__actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* The page scrolls clear of the bar. */
+.form-page {
+  padding-bottom: 64px;
+}
+
+@media (max-width: 1024px) {
+  .save-bar {
+    left: 64px;
+  }
+}
+
+@media (max-width: 720px) {
+  .form-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  .section-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    top: 0;
+    z-index: 5;
+    margin: 0 -16px;
+    padding: 8px 16px;
+    background: var(--bg);
+  }
+  .section-nav button {
+    flex-shrink: 0;
+    border: 1px solid var(--line);
+    background: var(--surface);
+  }
+  .form-sections > section {
+    scroll-margin-top: 64px;
+  }
+  .grid2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .span2 {
+    grid-column: auto;
+  }
+  .save-bar {
+    left: 0;
+    padding: 0 16px;
+  }
+}

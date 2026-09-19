@@ -1,0 +1,171 @@
+/* The Profile page: values from the approved Profile artboard (Profile.dc.html).
+   The form-page kit (section nav, fields, save bar) is components/forms.css. */
+
+.profile.page {
+  gap: 20px;
+}
+
+.profile .page-head p {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.profile .page-head p svg {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+.profile .page-head .mono {
+  font-size: 12px;
+}
+
+.profile .ch h2 {
+  margin: 0;
+}
+
+.profile .alert {
+  align-items: center;
+  padding: 10px 14px;
+}
+
+.profile__retry {
+  margin-left: auto;
+}
+
+.btn.sm {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.btn.sm svg {
+  color: var(--sl-fg);
+}
+
+/* -- work history and education rows -- */
+
+.entries {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.entries__none {
+  margin: 0;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text-3);
+}
+
+.entry {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.entry--open {
+  border-color: #c7c4d8;
+}
+
+.entry__head {
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.entry--open .entry__head {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.entry__toggle {
+  border: none;
+  background: none;
+  padding: 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text);
+  text-align: left;
+}
+
+.entry__toggle > svg {
+  flex-shrink: 0;
+  color: var(--text-5);
+  transition: transform 150ms ease-out;
+}
+
+.entry--open .entry__toggle > svg {
+  transform: rotate(90deg);
+}
+
+.entry__name {
+  font-weight: 600;
+}
+
+.entry__summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 10px;
+  min-width: 0;
+}
+
+.entry__title {
+  font-weight: 500;
+}
+
+.entry__meta,
+.entry__dates {
+  color: var(--text-3);
+}
+
+.entry__dates {
+  font-size: 12px;
+}
+
+.entry__actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.entry .ib:disabled,
+.entry .ib:disabled:hover {
+  color: var(--line-strong);
+  background: transparent;
+  cursor: default;
+}
+
+.entry .ib--danger {
+  color: var(--ro-fg);
+}
+
+/* -- loading -- */
+
+.profile-skel__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 10px;
+}
+
+.profile-skel__card {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+@media (max-width: 720px) {
+  .profile-skel__nav {
+    display: none;
+  }
+}

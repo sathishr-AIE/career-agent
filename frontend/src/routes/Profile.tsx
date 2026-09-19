@@ -1,7 +1,13 @@
-import { useEffect, useState } from 'react'
-import { ApiError, get, put } from '../api'
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { ApiError, errorText, get, put } from '../api'
+import {
+  ErrorSummary, Field, SaveBar, SectionNav, TextInput, inCls, useLeaveGuard,
+  type NavSection, type SummaryItem,
+} from '../components/FormPage'
+import { useShell } from '../components/shell'
+import './Profile.css'
 
-// Types declared locally.
+// -- shapes /api/profile returns (web/api_profile.py, config.CandidateProfile) --
 
 interface Address {
   line1: string
@@ -28,12 +34,6 @@ interface EduEntry {
   end: string
 }
 
-// The API never sees `id` -- it exists only so React has a stable key
-// across reorders/removals (the array index isn't stable: removing row 0
-// shifts every row after it, which desyncs React's per-item input state).
-interface WorkRow extends WorkEntry { id: string }
-interface EduRow extends EduEntry { id: string }
-
 interface CandidateProfile {
   candidate_name: string
   candidate_email: string
@@ -46,52 +46,55 @@ interface CandidateProfile {
   education: EduEntry[]
 }
 
-interface ProfileResponse {
-  exists: boolean
-  profile: CandidateProfile
-}
+// The API never sees `id` -- it exists only so React has a stable key across
+// reorders/removals, and so a server error can find its row (remapRowErrors).
+interface WorkRow extends WorkEntry { id: string }
+interface EduRow extends EduEntry { id: string }
 
-interface ProfileFormState {
-  candidate_name: string
-  candidate_email: string
-  candidate_phone: string
-  linkedin_url: string | null
-  portfolio_url: string | null
-  gender: string
-  address: Address
+interface ProfileForm extends Omit<CandidateProfile, 'work_history' | 'education'> {
   work_history: WorkRow[]
   education: EduRow[]
 }
 
-const GENDER_OPTIONS = ['decline', 'female', 'male', 'non-binary'] as const
+const GENDERS: [string, string][] = [
+  ['decline', 'Decline to state'], ['female', 'Female'], ['male', 'Male'], ['non-binary', 'Non-binary'],
+]
+
+const CONTACT: [keyof CandidateProfile, string][] = [
+  ['candidate_name', 'Full name'], ['candidate_email', 'Email'], ['candidate_phone', 'Phone'],
+  ['linkedin_url', 'LinkedIn URL'], ['portfolio_url', 'Portfolio URL'],
+]
+const ADDRESS: [keyof Address, string][] = [
+  ['line1', 'Address line 1'], ['city', 'City'], ['state', 'State'], ['postal_code', 'Postal code'],
+  ['country', 'Country'],
+]
+const WORK_LABELS: Record<string, string> = {
+  company: 'Company', title: 'Title', start: 'Start', end: 'End', current: 'I currently work here',
+  description: 'Description',
+}
+const EDU_LABELS: Record<string, string> = {
+  institution: 'Institution', degree: 'Degree', field: 'Field', start: 'Start', end: 'End',
+}
 
 const newId = () =>
-  (typeof crypto !== 'undefined' && crypto.randomUUID
-    ? crypto.randomUUID()
-    : `row-${Math.random().toString(36).slice(2)}`)
+  typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `row-${Math.random().toString(36).slice(2)}`
 
 const emptyWork = (): WorkRow => ({
   id: newId(), company: '', title: '', start: '', end: '', current: false, description: '',
 })
+const emptyEdu = (): EduRow => ({ id: newId(), institution: '', degree: '', field: '', start: '', end: '' })
 
-const emptyEdu = (): EduRow => ({
-  id: newId(), institution: '', degree: '', field: '', start: '', end: '',
-})
-
-const formFromProfile = (p: CandidateProfile): ProfileFormState => ({
+const toForm = (p: CandidateProfile): ProfileForm => ({
   ...p,
   work_history: p.work_history.map((w) => ({ ...w, id: newId() })),
   education: p.education.map((e) => ({ ...e, id: newId() })),
 })
 
-// A row where every field is still blank shouldn't need an explicit Remove
-// click after an accidental Add -- it's dropped before the request goes
-// out. A row with even one field filled in is sent as-is and, if it's
-// missing something the backend requires, shows that field's own error.
-const isBlankWork = (w: WorkRow) =>
-  !w.company && !w.title && !w.start && !w.end && !w.description && !w.current
-const isBlankEdu = (e: EduRow) =>
-  !e.institution && !e.degree && !e.field && !e.start && !e.end
+// A row with every field still blank is dropped before sending, so an
+// accidental Add needs no Remove. A row with anything in it is sent as is and,
+// missing something required, shows that field's own error.
+const isBlankWork = (w: WorkRow) => !w.company && !w.title && !w.start && !w.end && !w.description && !w.current
+const isBlankEdu = (e: EduRow) => !e.institution && !e.degree && !e.field && !e.start && !e.end
 
 function move<T>(list: T[], index: number, delta: number): T[] {
   const target = index + delta
@@ -101,293 +104,455 @@ function move<T>(list: T[], index: number, delta: number): T[] {
   return next
 }
 
-function TextField({
-  label, id, value, onChange, error, type = 'text', disabled = false,
-}: {
-  label: string
-  id: string
-  value: string
-  onChange: (v: string) => void
-  error?: string
-  type?: string
-  disabled?: boolean
-}) {
-  return (
-    <div className="field-row">
-      <label htmlFor={id}>{label}</label>
-      <input id={id} type={type} value={value} disabled={disabled}
-            onChange={(e) => onChange(e.target.value)} />
-      {error && <span className="field-error">{error}</span>}
-    </div>
-  )
-}
-
-/** The backend reports errors against the *submitted* (blank-row-filtered)
- * array's index -- e.g. "work_history.0.company" -- which no longer lines
- * up with `profile.work_history`'s index once a blank row upstream of it
- * was dropped. Remap each dotted index to the row's stable id (using the
- * exact arrays that were sent) so error lookup by id stays correct
- * regardless of what got filtered out. */
-function remapRowErrors(
-  raw: Record<string, string>, sentWork: WorkRow[], sentEdu: EduRow[],
-): Record<string, string> {
+/** The server reports errors against the *sent* (blank-row-filtered) array's
+ * index, e.g. "work_history.0.company", which no longer matches the form's
+ * index once a blank row upstream was dropped. Remap each to the row's stable
+ * id, using the exact arrays that were sent. */
+function remapRowErrors(raw: Record<string, string>, sentWork: WorkRow[], sentEdu: EduRow[]) {
   const out: Record<string, string> = {}
   for (const [key, message] of Object.entries(raw)) {
-    const workMatch = key.match(/^work_history\.(\d+)\.(.+)$/)
-    const eduMatch = key.match(/^education\.(\d+)\.(.+)$/)
-    if (workMatch && sentWork[Number(workMatch[1])]) {
-      out[`work:${sentWork[Number(workMatch[1])].id}:${workMatch[2]}`] = message
-    } else if (eduMatch && sentEdu[Number(eduMatch[1])]) {
-      out[`edu:${sentEdu[Number(eduMatch[1])].id}:${eduMatch[2]}`] = message
-    } else {
-      out[key] = message
-    }
+    const w = key.match(/^work_history\.(\d+)\.(.+)$/)
+    const e = key.match(/^education\.(\d+)\.(.+)$/)
+    if (w && sentWork[Number(w[1])]) out[`work:${sentWork[Number(w[1])].id}:${w[2]}`] = message
+    else if (e && sentEdu[Number(e[1])]) out[`edu:${sentEdu[Number(e[1])].id}:${e[2]}`] = message
+    else out[key] = message
   }
   return out
 }
 
+/** The error summary's names in page order, each pointing at its control's id. */
+function summarize(errors: Record<string, string>, f: ProfileForm): SummaryItem[] {
+  const rank = (key: string) => {
+    const contact = CONTACT.findIndex(([k]) => k === key)
+    if (contact >= 0) return contact
+    if (key === 'gender') return 10
+    const addr = key.match(/^address\.(.+)$/)
+    if (addr) return 20 + ADDRESS.findIndex(([k]) => k === addr[1])
+    const row = key.match(/^(work|edu):([^:]+):(.+)$/)
+    if (!row) return 1e6
+    const [rows, labels, base] = row[1] === 'work'
+      ? [f.work_history, WORK_LABELS, 100] as const : [f.education, EDU_LABELS, 1e4] as const
+    return base + rows.findIndex((r) => r.id === row[2]) * 10 + Object.keys(labels).indexOf(row[3])
+  }
+  const keys = Object.keys(errors).filter((k) => k !== 'form').sort((a, b) => rank(a) - rank(b))
+  return keys.map((key) => {
+    const contact = CONTACT.find(([k]) => k === key)
+    if (contact) return { label: contact[1], target: key }
+    if (key === 'gender') return { label: 'Gender', target: 'gender' }
+    const addr = key.match(/^address\.(.+)$/)
+    if (addr) {
+      const label = ADDRESS.find(([k]) => k === addr[1])?.[1] ?? addr[1]
+      return { label: `Address · ${label}`, target: `address_${addr[1]}` }
+    }
+    const row = key.match(/^(work|edu):([^:]+):(.+)$/)
+    if (row) {
+      const [, kind, id, field] = row
+      const labels = kind === 'work' ? WORK_LABELS : EDU_LABELS
+      return { label: `${kind === 'work' ? 'Work history' : 'Education'} · ${labels[field] ?? field}`,
+               target: `${kind}_${id}_${field}` }
+    }
+    return { label: key }
+  })
+}
+
+const dates = (start: string, end: string, current = false) =>
+  !start && !end && !current ? '' : `${start || '…'} – ${current ? 'Present' : end || '…'}`
+
+const I = {
+  chevron: 'M9 6l6 6-6 6',
+  up: 'M12 19V5M6 11l6-6 6 6',
+  down: 'M12 5v14M6 13l6 6 6-6',
+  remove: 'M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12',
+  plus: 'M12 5v14M5 12h14',
+  lock: 'M6 11h12v9H6zM8.5 11V8a3.5 3.5 0 0 1 7 0v3',
+  info: 'M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18zM12 7.5v5M12 16v.5',
+}
+
+function Icon({ d, size = 14, width = 2 }: { d: string; size?: number; width?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={width}
+         strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={d} />
+    </svg>
+  )
+}
+
+/** A native month picker (it already produces YYYY-MM). An older free-text
+ * date a picker can't show stays a text input, so it is never silently hidden. */
+function MonthInput({ id, label, value, onChange, error }: {
+  id: string
+  label: string
+  value: string
+  onChange: (v: string) => void
+  error?: string
+}) {
+  const picker = !value || /^\d{4}-\d{2}$/.test(value)
+  return (
+    <Field id={id} label={label} error={error}>
+      <input id={id} type={picker ? 'month' : 'text'} className={inCls(error, 'mono')} value={value}
+             aria-invalid={error ? true : undefined} onChange={(e) => onChange(e.target.value)} />
+    </Field>
+  )
+}
+
+/** One work or education row: collapsed to a summary line, or open with its
+ * fields. Move up, Move down and Remove sit on the right either way. */
+function Entry({ open, onToggle, heading, summary, first, last, onMove, onRemove, children }: {
+  open: boolean
+  onToggle: () => void
+  heading: string
+  summary: ReactNode
+  first: boolean
+  last: boolean
+  onMove: (delta: number) => void
+  onRemove: () => void
+  children: ReactNode
+}) {
+  return (
+    <div className={open ? 'entry entry--open' : 'entry'}>
+      <div className="entry__head">
+        <button type="button" className="entry__toggle" aria-expanded={open} onClick={onToggle}>
+          <Icon d={I.chevron} />
+          {open ? <span className="entry__name">{heading}</span> : summary}
+        </button>
+        <span className="entry__actions">
+          <button type="button" className="ib" title="Move up" aria-label="Move up" disabled={first}
+                  onClick={() => onMove(-1)}><Icon d={I.up} /></button>
+          <button type="button" className="ib" title="Move down" aria-label="Move down" disabled={last}
+                  onClick={() => onMove(1)}><Icon d={I.down} /></button>
+          <button type="button" className="ib ib--danger" title="Remove" aria-label="Remove"
+                  onClick={onRemove}><Icon d={I.remove} /></button>
+        </span>
+      </div>
+      {open && <div className="grid2">{children}</div>}
+    </div>
+  )
+}
+
+function Summary({ title, meta, when }: { title: string; meta: string; when: string }) {
+  return (
+    <span className="entry__summary">
+      <span className="entry__title">{title}</span>
+      {(meta || when) && <span className="entry__meta">{meta ? `· ${meta}${when ? ' ·' : ''}` : '·'}</span>}
+      {when && <span className="entry__dates mono">{when}</span>}
+    </span>
+  )
+}
+
+function Skeleton() {
+  return (
+    <div className="page profile" aria-busy="true">
+      <div className="page-head"><h1>Profile</h1></div>
+      <div className="form-layout">
+        <div className="profile-skel__nav">
+          {[70, 55, 60, 75, 65].map((w) => <span className="skel" key={w} style={{ width: `${w}%` }} />)}
+        </div>
+        <div className="form-sections">
+          {[0, 1, 2].map((i) => (
+            <div className="card profile-skel__card" key={i}>
+              {[35, 90, 90, 60].map((w, j) => <span className="skel" key={j} style={{ width: `${w}%` }} />)}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** The candidate profile (approved Screen 9): the single source of the details
+ * the apply agent types into forms. PUT sends the whole profile; the server
+ * validates everything before writing anything. */
 export function Profile() {
-  const [exists, setExists] = useState(false)
-  const [profile, setProfile] = useState<ProfileFormState | null>(null)
+  const { toast } = useShell()
+  const [form, setForm] = useState<ProfileForm | null>(null)
+  // The last loaded or saved form, as JSON: the form is dirty while it differs.
+  const [snapshot, setSnapshot] = useState('')
+  const [exists, setExists] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
-  const [saved, setSaved] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [open, setOpen] = useState<Set<string>>(new Set())
+
+  const dirty = form !== null && JSON.stringify(form) !== snapshot
+  useLeaveGuard(dirty)
+
+  const load = useCallback(
+    () =>
+      get<{ exists: boolean; profile: CandidateProfile }>('/api/profile')
+        .then((r) => {
+          const f = toForm(r.profile)
+          setForm(f)
+          setSnapshot(JSON.stringify(f))
+          setExists(r.exists)
+          setErrors({})
+          setOpen(new Set())
+          setLoadError(null)
+        })
+        .catch((e: unknown) => setLoadError(errorText(e))),
+    [],
+  )
 
   useEffect(() => {
-    get<ProfileResponse>('/api/profile').then((r) => {
-      setExists(r.exists)
-      setProfile(formFromProfile(r.profile))
+    load()
+  }, [load])
+
+  // After a refused save, bring the first bad field into view.
+  useEffect(() => {
+    if (Object.keys(errors).length) {
+      document.querySelector('.profile .in.bad')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }, [errors])
+
+  if (!form) {
+    if (!loadError) return <Skeleton />
+    return (
+      <div className="page profile">
+        <div className="page-head"><h1>Profile</h1></div>
+        <div className="alert" role="alert">
+          <Icon d={I.info} size={16} />
+          <span><b>Can't load your profile:</b> {loadError}</span>
+          <button type="button" className="btn profile__retry" onClick={load}>Retry</button>
+        </div>
+      </div>
+    )
+  }
+
+  const f = form
+  const set = (patch: Partial<ProfileForm>) => setForm({ ...f, ...patch })
+  const setAddress = (patch: Partial<Address>) => set({ address: { ...f.address, ...patch } })
+  const setWork = (i: number, patch: Partial<WorkEntry>) =>
+    set({ work_history: f.work_history.map((w, j) => (j === i ? { ...w, ...patch } : w)) })
+  const setEdu = (i: number, patch: Partial<EduEntry>) =>
+    set({ education: f.education.map((e, j) => (j === i ? { ...e, ...patch } : e)) })
+  const toggle = (id: string) =>
+    setOpen((o) => {
+      const next = new Set(o)
+      if (!next.delete(id)) next.add(id)
+      return next
     })
-  }, [])
+  const addOpen = (id: string) => setOpen((o) => new Set(o).add(id))
 
-  if (!profile) return null
-
-  const isOtherGender = !GENDER_OPTIONS.includes(profile.gender as (typeof GENDER_OPTIONS)[number])
-
-  async function onSubmit(e: React.FormEvent) {
+  async function save(e: FormEvent) {
     e.preventDefault()
-    if (!profile) return
+    if (!dirty || saving) return
     setSaving(true)
-    setSaved(false)
-    setErrors({})
-
-    const sentWork = profile.work_history.filter((w) => !isBlankWork(w))
-    const sentEdu = profile.education.filter((e) => !isBlankEdu(e))
+    const sentWork = f.work_history.filter((w) => !isBlankWork(w))
+    const sentEdu = f.education.filter((ed) => !isBlankEdu(ed))
     const payload = {
-      ...profile,
+      ...f,
       work_history: sentWork.map(({ id: _id, ...rest }) => rest),
       education: sentEdu.map(({ id: _id, ...rest }) => rest),
     }
     try {
       await put<{ ok: boolean; message: string }>('/api/profile', payload)
-      setExists(true)
-      setSaved(true)
+      await load() // the server trims; reload so the snapshot is what's on disk
+      toast({ text: 'Profile saved' })
     } catch (err) {
-      if (err instanceof ApiError) {
-        const body = err.body as { errors?: Record<string, string> } | undefined
-        setErrors(body?.errors ? remapRowErrors(body.errors, sentWork, sentEdu)
-                                : { form: err.message })
+      const body = err instanceof ApiError ? (err.body as { errors?: Record<string, string> } | undefined) : undefined
+      if (body?.errors) {
+        const mapped = remapRowErrors(body.errors, sentWork, sentEdu)
+        // Open every row that has an error, so the summary's links land on a field.
+        setOpen((o) => new Set([...o, ...Object.keys(mapped).flatMap((k) => k.match(/^(?:work|edu):([^:]+):/)?.[1] ?? [])]))
+        setErrors(mapped)
+      } else {
+        setErrors({ form: errorText(err) })
       }
     } finally {
       setSaving(false)
     }
   }
 
+  const has = (prefix: string) => Object.keys(errors).some((k) => k.startsWith(prefix))
+  const mark = (bad: boolean, done: boolean): NavSection['mark'] => (bad ? 'bad' : done ? 'done' : undefined)
+  const sections: NavSection[] = [
+    { id: 'profile-contact', label: 'Contact',
+      mark: mark(CONTACT.some(([k]) => errors[k]),
+                 !!(f.candidate_name.trim() && f.candidate_email.trim() && f.candidate_phone.trim())) },
+    { id: 'profile-personal', label: 'Personal', mark: mark(!!errors.gender, !!f.gender.trim()) },
+    { id: 'profile-address', label: 'Address',
+      mark: mark(has('address.'), ADDRESS.every(([k]) => f.address[k].trim())) },
+    { id: 'profile-work', label: 'Work history',
+      mark: mark(has('work:') || has('work_history'),
+                 f.work_history.length > 0 && f.work_history.every((w) => w.company.trim() && w.title.trim())) },
+    { id: 'profile-education', label: 'Education',
+      mark: mark(has('edu:') || has('education'),
+                 f.education.length > 0 && f.education.every((ed) => ed.institution.trim())) },
+  ]
+  const otherGender = !GENDERS.some(([v]) => v === f.gender)
+
   return (
-    <>
-      <h1 className="page-title">Profile</h1>
+    <form className="page profile form-page" noValidate onSubmit={save}>
+      <div className="page-head">
+        <h1>Profile</h1>
+        <p>
+          <Icon d={I.lock} />
+          <span>
+            Stored only on this machine in <span className="mono">candidate_profile.toml</span>, never committed.
+            The apply agent fills application forms from it.
+          </span>
+        </p>
+      </div>
+
       {!exists && (
-        <div className="banner">
-          No profile saved yet. Fill it in and Save -- the apply agent fills real
-          applications from this.
+        <div className="alert am" role="status">
+          <Icon d={I.info} size={16} />
+          <span>No profile saved yet — the apply agent can't fill contact details until you save one.</span>
         </div>
       )}
-      {saved && <div className="banner banner--done">Profile saved.</div>}
-      {errors.form && <div className="banner banner--denied">{errors.form}</div>}
-
-      <form onSubmit={onSubmit}>
-        <div className="card">
-          <h2>Contact</h2>
-          <TextField label="Full name" id="candidate_name" value={profile.candidate_name}
-                    error={errors.candidate_name}
-                    onChange={(v) => setProfile({ ...profile, candidate_name: v })} />
-          <TextField label="Email" id="candidate_email" value={profile.candidate_email}
-                    error={errors.candidate_email}
-                    onChange={(v) => setProfile({ ...profile, candidate_email: v })} />
-          <TextField label="Phone" id="candidate_phone" value={profile.candidate_phone}
-                    error={errors.candidate_phone}
-                    onChange={(v) => setProfile({ ...profile, candidate_phone: v })} />
-          <TextField label="LinkedIn URL" id="linkedin_url" value={profile.linkedin_url ?? ''}
-                    error={errors.linkedin_url}
-                    onChange={(v) => setProfile({ ...profile, linkedin_url: v || null })} />
-          <TextField label="Portfolio URL" id="portfolio_url" value={profile.portfolio_url ?? ''}
-                    error={errors.portfolio_url}
-                    onChange={(v) => setProfile({ ...profile, portfolio_url: v || null })} />
+      {errors.form && (
+        <div className="alert" role="alert">
+          <Icon d={I.info} size={16} />
+          <span><b>Nothing was saved:</b> {errors.form}</span>
         </div>
+      )}
+      <ErrorSummary items={summarize(errors, f)} />
 
-        <div className="card">
-          <h2>Gender</h2>
-          <div className="field-row">
-            <label htmlFor="gender">Gender</label>
-            <select
-              id="gender"
-              value={isOtherGender ? 'other' : profile.gender}
-              onChange={(e) => setProfile({
-                ...profile,
-                gender: e.target.value === 'other' ? '' : e.target.value,
+      <div className="form-layout">
+        <SectionNav sections={sections} label="Profile sections" />
+        <div className="form-sections">
+          <section className="card" id="profile-contact">
+            <div className="ch"><h2 className="ct">Contact</h2></div>
+            <div className="grid2">
+              <TextInput id="candidate_name" label="Full name" required value={f.candidate_name}
+                         error={errors.candidate_name} onChange={(v) => set({ candidate_name: v })} />
+              <TextInput id="candidate_email" label="Email" type="email" required value={f.candidate_email}
+                         error={errors.candidate_email} onChange={(v) => set({ candidate_email: v })} />
+              <TextInput id="candidate_phone" label="Phone" type="tel" required value={f.candidate_phone}
+                         error={errors.candidate_phone} onChange={(v) => set({ candidate_phone: v })} />
+              <TextInput id="linkedin_url" label="LinkedIn URL" type="url" mono value={f.linkedin_url ?? ''}
+                         error={errors.linkedin_url} onChange={(v) => set({ linkedin_url: v || null })} />
+              <TextInput id="portfolio_url" label="Portfolio URL" type="url" mono placeholder="Optional"
+                         value={f.portfolio_url ?? ''} error={errors.portfolio_url}
+                         onChange={(v) => set({ portfolio_url: v || null })} />
+            </div>
+          </section>
+
+          <section className="card" id="profile-personal">
+            <div className="ch"><h2 className="ct">Personal</h2></div>
+            <div className="grid2">
+              <Field id="gender" label="Gender" error={otherGender ? undefined : errors.gender}
+                     help="Used only when a form asks. Decline to state is always allowed.">
+                <select id="gender" className={inCls(otherGender ? undefined : errors.gender)}
+                        value={otherGender ? 'other' : f.gender}
+                        onChange={(e) => set({ gender: e.target.value === 'other' ? '' : e.target.value })}>
+                  {GENDERS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+                  <option value="other">Other</option>
+                </select>
+              </Field>
+              {otherGender && (
+                <TextInput id="gender_other" label="Please specify" value={f.gender} error={errors.gender}
+                           onChange={(v) => set({ gender: v })} />
+              )}
+            </div>
+          </section>
+
+          <section className="card" id="profile-address">
+            <div className="ch"><h2 className="ct">Address</h2></div>
+            <div className="grid2">
+              {ADDRESS.map(([k, label]) => (
+                <TextInput key={k} id={`address_${k}`} label={label} span2={k === 'line1'} mono={k === 'postal_code'}
+                           value={f.address[k]} error={errors[`address.${k}`]}
+                           onChange={(v) => setAddress({ [k]: v })} />
+              ))}
+            </div>
+          </section>
+
+          <section className="card" id="profile-work">
+            <div className="ch">
+              <h2 className="ct">Work history</h2>
+              <button type="button" className="btn sm" onClick={() => {
+                const row = emptyWork()
+                set({ work_history: [...f.work_history, row] })
+                addOpen(row.id)
+              }}><Icon d={I.plus} size={12} width={2.5} />Add work entry</button>
+            </div>
+            <div className="entries">
+              {f.work_history.length === 0 && <p className="entries__none">No work history yet.</p>}
+              {f.work_history.map((w, i) => {
+                const err = (k: string) => errors[`work:${w.id}:${k}`]
+                return (
+                  <Entry key={w.id} open={open.has(w.id)} onToggle={() => toggle(w.id)}
+                         heading={w.company || 'New work entry'}
+                         summary={<Summary title={w.title || 'Untitled role'} meta={w.company}
+                                           when={dates(w.start, w.end, w.current)} />}
+                         first={i === 0} last={i === f.work_history.length - 1}
+                         onMove={(d) => set({ work_history: move(f.work_history, i, d) })}
+                         onRemove={() => set({ work_history: f.work_history.filter((_, j) => j !== i) })}>
+                    <TextInput id={`work_${w.id}_company`} label="Company" required value={w.company}
+                               error={err('company')} onChange={(v) => setWork(i, { company: v })} />
+                    <TextInput id={`work_${w.id}_title`} label="Title" required value={w.title}
+                               error={err('title')} onChange={(v) => setWork(i, { title: v })} />
+                    <MonthInput id={`work_${w.id}_start`} label="Start" value={w.start} error={err('start')}
+                                onChange={(v) => setWork(i, { start: v })} />
+                    {w.current ? (
+                      <TextInput id={`work_${w.id}_end`} label="End" value="Present" disabled onChange={() => {}} />
+                    ) : (
+                      <MonthInput id={`work_${w.id}_end`} label="End" value={w.end} error={err('end')}
+                                  onChange={(v) => setWork(i, { end: v })} />
+                    )}
+                    <label className="f-check">
+                      {/* Checking it clears End, so a stale date never reaches the apply agent. */}
+                      <input type="checkbox" checked={w.current}
+                             onChange={(e) => setWork(i, { current: e.target.checked,
+                                                           end: e.target.checked ? '' : w.end })} />
+                      I currently work here
+                    </label>
+                    <span />
+                    <Field id={`work_${w.id}_description`} label="Description" span2 error={err('description')}>
+                      <textarea id={`work_${w.id}_description`} className={inCls(err('description'))}
+                                value={w.description} onChange={(e) => setWork(i, { description: e.target.value })} />
+                    </Field>
+                  </Entry>
+                )
               })}
-            >
-              <option value="decline">Decline to state</option>
-              <option value="female">Female</option>
-              <option value="male">Male</option>
-              <option value="non-binary">Non-binary</option>
-              <option value="other">Other</option>
-            </select>
-          </div>
-          {isOtherGender && (
-            <TextField label="Please specify" id="gender_other" value={profile.gender}
-                      error={errors.gender}
-                      onChange={(v) => setProfile({ ...profile, gender: v })} />
-          )}
-        </div>
+            </div>
+          </section>
 
-        <div className="card">
-          <h2>Address</h2>
-          <TextField label="Address line 1" id="address_line1" value={profile.address.line1}
-                    error={errors['address.line1']}
-                    onChange={(v) => setProfile({ ...profile, address: { ...profile.address, line1: v } })} />
-          <TextField label="City" id="address_city" value={profile.address.city}
-                    error={errors['address.city']}
-                    onChange={(v) => setProfile({ ...profile, address: { ...profile.address, city: v } })} />
-          <TextField label="State" id="address_state" value={profile.address.state}
-                    error={errors['address.state']}
-                    onChange={(v) => setProfile({ ...profile, address: { ...profile.address, state: v } })} />
-          <TextField label="Postal code" id="address_postal_code" value={profile.address.postal_code}
-                    error={errors['address.postal_code']}
-                    onChange={(v) => setProfile({ ...profile, address: { ...profile.address, postal_code: v } })} />
-          <TextField label="Country" id="address_country" value={profile.address.country}
-                    error={errors['address.country']}
-                    onChange={(v) => setProfile({ ...profile, address: { ...profile.address, country: v } })} />
+          <section className="card" id="profile-education">
+            <div className="ch">
+              <h2 className="ct">Education</h2>
+              <button type="button" className="btn sm" onClick={() => {
+                const row = emptyEdu()
+                set({ education: [...f.education, row] })
+                addOpen(row.id)
+              }}><Icon d={I.plus} size={12} width={2.5} />Add education entry</button>
+            </div>
+            <div className="entries">
+              {f.education.length === 0 && <p className="entries__none">No education yet.</p>}
+              {f.education.map((ed, i) => {
+                const err = (k: string) => errors[`edu:${ed.id}:${k}`]
+                return (
+                  <Entry key={ed.id} open={open.has(ed.id)} onToggle={() => toggle(ed.id)}
+                         heading={ed.institution || 'New education entry'}
+                         summary={<Summary title={[ed.degree, ed.field].filter(Boolean).join(', ') || 'Untitled'}
+                                           meta={ed.institution} when={dates(ed.start, ed.end)} />}
+                         first={i === 0} last={i === f.education.length - 1}
+                         onMove={(d) => set({ education: move(f.education, i, d) })}
+                         onRemove={() => set({ education: f.education.filter((_, j) => j !== i) })}>
+                    <TextInput id={`edu_${ed.id}_institution`} label="Institution" required span2
+                               value={ed.institution} error={err('institution')}
+                               onChange={(v) => setEdu(i, { institution: v })} />
+                    <TextInput id={`edu_${ed.id}_degree`} label="Degree" value={ed.degree} error={err('degree')}
+                               onChange={(v) => setEdu(i, { degree: v })} />
+                    <TextInput id={`edu_${ed.id}_field`} label="Field" value={ed.field} error={err('field')}
+                               onChange={(v) => setEdu(i, { field: v })} />
+                    <MonthInput id={`edu_${ed.id}_start`} label="Start" value={ed.start} error={err('start')}
+                                onChange={(v) => setEdu(i, { start: v })} />
+                    <MonthInput id={`edu_${ed.id}_end`} label="End" value={ed.end} error={err('end')}
+                                onChange={(v) => setEdu(i, { end: v })} />
+                  </Entry>
+                )
+              })}
+            </div>
+          </section>
         </div>
+      </div>
 
-        <div className="card">
-          <h2>Work history</h2>
-          {profile.work_history.map((w, i) => {
-            const set = (patch: Partial<WorkEntry>) => {
-              const next = [...profile.work_history]
-              next[i] = { ...next[i], ...patch }
-              setProfile({ ...profile, work_history: next })
-            }
-            return (
-              <div key={w.id} style={{ borderTop: i > 0 ? '1px solid var(--paper-line)' : undefined,
-                                       paddingTop: i > 0 ? 'var(--space-4)' : undefined,
-                                       marginTop: i > 0 ? 'var(--space-4)' : undefined }}>
-                <TextField label="Company" id={`work_${w.id}_company`} value={w.company}
-                          error={errors[`work:${w.id}:company`]}
-                          onChange={(v) => set({ company: v })} />
-                <TextField label="Title" id={`work_${w.id}_title`} value={w.title}
-                          error={errors[`work:${w.id}:title`]}
-                          onChange={(v) => set({ title: v })} />
-                <TextField label="Start (YYYY-MM)" id={`work_${w.id}_start`} value={w.start}
-                          error={errors[`work:${w.id}:start`]}
-                          onChange={(v) => set({ start: v })} />
-                <div className="field-row">
-                  <label htmlFor={`work_${w.id}_current`}>
-                    <input id={`work_${w.id}_current`} type="checkbox" checked={w.current}
-                          onChange={(e) => set({
-                            current: e.target.checked,
-                            // A checked "currently work here" and a leftover
-                            // end date can't both be true -- clear End so a
-                            // stale date never reaches the apply agent.
-                            end: e.target.checked ? '' : w.end,
-                          })} />{' '}
-                    I currently work here
-                  </label>
-                </div>
-                <TextField label="End (YYYY-MM)" id={`work_${w.id}_end`} value={w.end}
-                          error={errors[`work:${w.id}:end`]} disabled={w.current}
-                          onChange={(v) => set({ end: v })} />
-                <div className="field-row">
-                  <label htmlFor={`work_${w.id}_description`}>Description</label>
-                  <textarea id={`work_${w.id}_description`} value={w.description}
-                           onChange={(e) => set({ description: e.target.value })} />
-                  {errors[`work:${w.id}:description`] &&
-                    <span className="field-error">{errors[`work:${w.id}:description`]}</span>}
-                </div>
-                <div style={{ display: 'flex', gap: 'var(--space-2)', marginBottom: 'var(--space-4)' }}>
-                  <button type="button" className="btn" disabled={i === 0}
-                         onClick={() => setProfile({ ...profile, work_history: move(profile.work_history, i, -1) })}>
-                    Move up
-                  </button>
-                  <button type="button" className="btn" disabled={i === profile.work_history.length - 1}
-                         onClick={() => setProfile({ ...profile, work_history: move(profile.work_history, i, 1) })}>
-                    Move down
-                  </button>
-                  <button type="button" className="btn"
-                         onClick={() => setProfile({
-                           ...profile,
-                           work_history: profile.work_history.filter((_, j) => j !== i),
-                         })}>
-                    Remove
-                  </button>
-                </div>
-              </div>
-            )
-          })}
-          <button type="button" className="btn"
-                 onClick={() => setProfile({ ...profile, work_history: [...profile.work_history, emptyWork()] })}>
-            Add work entry
-          </button>
-        </div>
-
-        <div className="card">
-          <h2>Education</h2>
-          {profile.education.map((ed, i) => {
-            const set = (patch: Partial<EduEntry>) => {
-              const next = [...profile.education]
-              next[i] = { ...next[i], ...patch }
-              setProfile({ ...profile, education: next })
-            }
-            return (
-              <div key={ed.id} style={{ borderTop: i > 0 ? '1px solid var(--paper-line)' : undefined,
-                                        paddingTop: i > 0 ? 'var(--space-4)' : undefined,
-                                        marginTop: i > 0 ? 'var(--space-4)' : undefined }}>
-                <TextField label="Institution" id={`edu_${ed.id}_institution`} value={ed.institution}
-                          error={errors[`edu:${ed.id}:institution`]}
-                          onChange={(v) => set({ institution: v })} />
-                <TextField label="Degree" id={`edu_${ed.id}_degree`} value={ed.degree}
-                          error={errors[`edu:${ed.id}:degree`]}
-                          onChange={(v) => set({ degree: v })} />
-                <TextField label="Field" id={`edu_${ed.id}_field`} value={ed.field}
-                          error={errors[`edu:${ed.id}:field`]}
-                          onChange={(v) => set({ field: v })} />
-                <TextField label="Start" id={`edu_${ed.id}_start`} value={ed.start}
-                          error={errors[`edu:${ed.id}:start`]}
-                          onChange={(v) => set({ start: v })} />
-                <TextField label="End" id={`edu_${ed.id}_end`} value={ed.end}
-                          error={errors[`edu:${ed.id}:end`]}
-                          onChange={(v) => set({ end: v })} />
-                <button type="button" className="btn"
-                       onClick={() => setProfile({
-                         ...profile,
-                         education: profile.education.filter((_, j) => j !== i),
-                       })}>
-                  Remove
-                </button>
-              </div>
-            )
-          })}
-          <button type="button" className="btn"
-                 onClick={() => setProfile({ ...profile, education: [...profile.education, emptyEdu()] })}
-                 style={{ marginTop: profile.education.length > 0 ? 'var(--space-4)' : undefined }}>
-            Add education entry
-          </button>
-        </div>
-
-        <button className="btn primary" type="submit" disabled={saving}>
-          {saving ? 'Saving...' : 'Save profile'}
-        </button>
-      </form>
-    </>
+      <SaveBar dirty={dirty} busy={saving} saveLabel="Save profile" onDiscard={() => {
+        setForm(JSON.parse(snapshot) as ProfileForm)
+        setErrors({})
+        setOpen(new Set())
+      }} />
+    </form>
   )
 }

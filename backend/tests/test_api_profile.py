@@ -189,3 +189,14 @@ def test_put_blank_education_institution_returns_422(client, profile_path):
     r = client.put("/api/profile", json=payload)
     assert r.status_code == 422
     assert "education.0.institution" in r.json()["errors"]
+
+
+def test_put_blank_contact_fields_say_they_are_required(client, profile_path):
+    """The Profile page shows the server's message under the field and in the
+    error summary, so it reads "Phone is required", not pydantic's wording."""
+    r = client.put("/api/profile", json={
+        "candidate_name": "Jane Doe", "candidate_email": "  ", "candidate_phone": ""})
+    assert r.status_code == 422
+    assert r.json()["errors"] == {"candidate_email": "Email is required",
+                                  "candidate_phone": "Phone is required"}
+    assert not profile_path.exists()
