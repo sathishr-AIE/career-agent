@@ -78,6 +78,7 @@ def overview_context(conn: sqlite3.Connection, brief_path: Path) -> dict:
             "recent_discoveries": overview.recent_discoveries(conn),
             "recent_outcomes": overview.recent_outcomes(conn),
             "shortlisted_count": kpi_data["shortlisted"],
+            "events": overview.recent_events(conn),
             **pipeline_status_context(conn)}
 
 

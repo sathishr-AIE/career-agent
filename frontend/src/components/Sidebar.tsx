@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { get, type PipelineStatus, type RunState, type RunStatusContext } from '../api'
+import { shortTime } from '../time'
+import { useShell } from './shell'
+import { usePoll } from './usePoll'
 import './Sidebar.css'
-
-const POLL_MS = 3000
 
 // Icon paths copied verbatim from the approved Sidebar artboard
 // (docs/design/frontend-redesign/source/Sidebar.dc.html).
@@ -87,29 +88,6 @@ function Icon({ d }: { d: string }) {
   )
 }
 
-function usePoll<T>(path: string): T | null {
-  const [data, setData] = useState<T | null>(null)
-  useEffect(() => {
-    let live = true
-    const tick = () => {
-      get<T>(path)
-        .then((d) => {
-          if (live) setData(d)
-        })
-        .catch(() => {
-          /* transient poll failure -- keep showing the last known state */
-        })
-    }
-    tick()
-    const id = setInterval(tick, POLL_MS)
-    return () => {
-      live = false
-      clearInterval(id)
-    }
-  }, [path])
-  return data
-}
-
 /** True while the fact count is below min_warn (the Facts amber dot). Facts
  * only change on the Facts page, so this re-checks on navigation, not on a timer. */
 function useFactsLow(pathname: string) {
@@ -122,15 +100,6 @@ function useFactsLow(pathname: string) {
       })
   }, [pathname])
   return low
-}
-
-/** started_at is SQLite's naive-UTC datetime('now'); show it in local time,
- * as HH:MM today and as a short date otherwise. */
-function shortTime(utc: string): string {
-  const d = new Date(`${utc.replace(' ', 'T')}Z`)
-  return d.toDateString() === new Date().toDateString()
-    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
-    : d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
 function pipelineNote({ pipeline_state: p, stages, max_score }: PipelineStatus): string {
@@ -211,8 +180,8 @@ function StatusCard({ run, pipe, answerTo }: {
  * card, which replaces the old bottom AgentStatusBar. */
 export function Sidebar() {
   const { pathname } = useLocation()
-  const run = usePoll<RunStatusContext>('/api/run/status')
-  const pipe = usePoll<PipelineStatus>('/api/pipeline/status')
+  const { run } = useShell()
+  const pipe = usePoll<PipelineStatus>('/api/pipeline/status').data
   const factsLow = useFactsLow(pathname)
   const here = navItemFor(pathname)?.key
   const queued = run?.stats.queued ?? 0

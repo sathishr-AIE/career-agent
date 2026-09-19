@@ -76,7 +76,10 @@ started polling it.)
 The React shell is `App.tsx` plus `components/Sidebar.tsx` (nav and the agent status card,
 polling `/api/run/status` and `/api/pipeline/status`). Routes wrapped in `legacy()` in
 `main.tsx` are pre-redesign pages, styled by `src/legacy.css`; the redesign's primitives
-live in `components/ui.css` and reuse the design artboards' class names.
+live in `components/ui.css` and reuse the design artboards' class names. New pages get
+the shared shell services from `components/shell.ts` (`useShell()` for the app-wide
+`/api/run/status` poll and `toast()`, and `<TopBarActions>` to put page buttons in the top
+bar) and poll with `components/usePoll.ts`.
 
 The API routers reach shared state (`DB_PATH`, `BRIEF_PATH`, `_conn()`,
 `_background_tasks`) through a deferred, call-time import of `app.py` (their `_app()`

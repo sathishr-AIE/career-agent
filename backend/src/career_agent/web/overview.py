@@ -225,3 +225,16 @@ def recent_outcomes(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
         result.append({"title": r["title"], "company": r["company"],
                         "label": label, "activity_at": r["activity_at"]})
     return result
+
+
+def recent_events(conn: sqlite3.Connection, limit: int = 20) -> list[dict]:
+    """EV1: the global activity feed, newest first, each event with its job.
+    Pipeline progress is left out -- the Pipeline card shows its own run feed.
+    `recent` (the last 24 h) is decided here, in naive UTC against
+    datetime('now'), so the UI never compares clocks itself."""
+    return [dict(r) for r in conn.execute(
+        "SELECT e.id, e.job_id, e.type, e.payload, e.occurred_at, j.company, j.title,"
+        "       e.occurred_at >= datetime('now', '-1 day') AS recent"
+        "  FROM event e LEFT JOIN job j ON j.id = e.job_id"
+        " WHERE e.type NOT LIKE 'pipeline_%'"
+        " ORDER BY e.id DESC LIMIT ?", (limit,))]

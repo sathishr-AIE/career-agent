@@ -148,3 +148,16 @@
   color: var(--ink-dim);
   font-size: 0.75rem;
 }
+
+/* The redesign's .card and .btn (components/ui.css) set properties these old
+   rules never did; undo them so they can't leak into old pages. */
+.legacy .card {
+  box-shadow: none;
+}
+
+.legacy .btn {
+  height: auto;
+  display: inline-block;
+  line-height: normal;
+  white-space: normal;
+}

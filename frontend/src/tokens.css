@@ -32,7 +32,7 @@
   /* -- accent -- */
   --primary: #3525cd;
   --primary-hover: #3730a3;
-  --primary-disabled: #c7d2fe;
+  --primary-disabled: #c3c0ff; /* the Dashboard and Job chat artboards, paired with #3525cd */
   --primary-soft: #eaedff; /* active nav item */
   --primary-soft-2: #e2e7ff; /* count chip on the active item */
   --link-hover: #4f46e5;

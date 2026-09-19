@@ -37,6 +37,12 @@
   display: none;
 }
 
+.topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .crumbs {
   display: flex;
   align-items: center;

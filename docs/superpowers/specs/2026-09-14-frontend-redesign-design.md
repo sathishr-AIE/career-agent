@@ -128,7 +128,7 @@ The picker sits in the composer toolbar, and what it controls depends on the cha
 | # | Screen | Design | Impl | Backend deps |
 |---|---|---|---|---|
 | 1 | Application Shell | **Approved** | **Implemented** | OC1, `/api/pipeline/status` |
-| 2 | Dashboard | **Approved** (Claude design canvas) | In progress | EV1, OC1 |
+| 2 | Dashboard | **Approved** (Claude design canvas) | **Implemented** | EV1, OC1 |
 | 3 | Applications | **Approved** (Claude design canvas) | Not started | none |
 | 4 | Job Details | **Approved** (Claude design canvas) | Not started | JD1 |
 | 5 | Chat (Home + Job) | **Approved** (Claude design canvas) | Not started | MS1 |
@@ -186,7 +186,10 @@ in the working tree**:
 These are no longer design dependencies. The remaining new slices are:
 
 - **MS1, model settings.** See "Model selection in chat" above.
-- **EV1, global event feed.** `GET /api/events?limit=` returns recent `event` rows, joined
+- **EV1, global event feed.** *Shipped 2026-09-18 as `events` inside `GET /api/overview`
+  (`overview.recent_events`, 20 rows, `pipeline_*` excluded, plus a `recent` flag for the
+  last 24 h), not as a separate route: the Dashboard already polls overview.* Originally:
+  `GET /api/events?limit=` returns recent `event` rows, joined
   to job company and title, newest first, for the Dashboard. Read-only. Per-job events
   come from JD1.
 - **JD1, job detail.** `GET /api/jobs/{job_id}` is read-only and returns, in one payload:

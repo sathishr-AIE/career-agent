@@ -2,7 +2,7 @@ import datetime as dt
 
 import pytest
 
-from career_agent import db
+from career_agent import db, store
 from career_agent.web import overview
 
 
@@ -352,3 +352,20 @@ def test_recent_outcomes_labels_interview(conn):
     conn.commit()
     outcomes_list = overview.recent_outcomes(conn)
     assert outcomes_list[0]["label"] == "Interview"
+
+
+def test_recent_events_newest_first_with_job_and_no_pipeline_noise(conn):
+    """EV1: the Dashboard's global activity feed."""
+    jid = _job(conn, "fp1")
+    store.log(conn, jid, "human_applied")
+    store.log(conn, None, "pipeline_progress", "Scoring 3 of 10")
+    store.log(conn, None, "run_started", "manual")
+    rows = overview.recent_events(conn)
+    assert [r["type"] for r in rows] == ["run_started", "human_applied"]
+    assert rows[0]["company"] is None and rows[0]["payload"] == "manual"
+    assert rows[1]["company"] == "Acme" and rows[1]["title"] == "AI Engineer"
+    assert len(overview.recent_events(conn, limit=1)) == 1
+    assert rows[0]["recent"] == 1
+    conn.execute("UPDATE event SET occurred_at = datetime('now', '-2 days')"
+                 " WHERE type = 'human_applied'")
+    assert overview.recent_events(conn)[1]["recent"] == 0
