@@ -57,12 +57,16 @@ def fake_agent(result: AgentResult):
     """The one test seam. Nothing in this file may launch Chrome, spawn a
     subprocess, or need the `claude`/`npx` binaries -- every case injects
     this instead of letting submit() reach _live_run_agent."""
-    async def _fake(prompt, job_id, nonce, events, session_id=None, resume=False):
+    async def _fake(prompt, job_id, nonce, events, session_id=None, resume=False, **kw):
+        # **kw: submit hands the live runner (which _use_live_fake stands in
+        # for) its model; an injected run_agent never gets one.
+        _fake.models.append(kw.get("model"))
         _fake.prompts.append(prompt)
         _fake.job_ids.append(job_id)
         _fake.nonces.append(nonce)
         return result
     _fake.prompts = []
+    _fake.models = []
     _fake.job_ids = []
     _fake.nonces = []
     return _fake
@@ -473,7 +477,7 @@ def no_live_runner(monkeypatch):
     """Belt and braces for the tests below, which are the only ones that
     reach submit() with run_agent=None on a path that could otherwise
     launch Chrome."""
-    async def _never(prompt, job_id, nonce, events, session_id=None, resume=False):
+    async def _never(prompt, job_id, nonce, events, session_id=None, resume=False, **_):
         raise AssertionError("the live runner must never run in a test")
     monkeypatch.setattr(ats_apply, "_live_run_agent", _never)
 
@@ -1851,7 +1855,7 @@ async def test_answer_timeout_after_an_approve_holds_when_it_could_have_submitte
     That run may have submitted; requeueing it would apply twice."""
     from career_agent.web import actions
 
-    async def fake(prompt, jid, nonce, events, session_id=None, resume=False):
+    async def fake(prompt, jid, nonce, events, session_id=None, resume=False, **_):
         run = runs[jid] = FakeRun(nonce, events)
         _waiting_on(run, events, "confirm", _confirm(Name="Asha"))
         pid = chat.open_prompt_for_job(factory(), jid)["id"]
@@ -1923,6 +1927,24 @@ def _use_live_fake(monkeypatch, result):
     monkeypatch.setattr(ats_apply, "_live_run_agent", fake)
     monkeypatch.setattr(ats_apply, "preflight", lambda: None)
     return fake
+
+
+@pytest.mark.parametrize("stored, spawned", [("claude-opus-5", "claude-opus-5"),
+                                              ("claude-retired-1", "claude-sonnet-5")])
+async def test_the_live_runner_gets_the_apply_model_setting(conn, monkeypatch, stored, spawned):
+    """MS1: the next Apply or Continue runs on the chosen model; a value no
+    longer in APPLY_MODELS falls back to the default instead of failing the run."""
+    conn.execute("UPDATE setting SET apply_model = ?", (stored,))
+    conn.commit()
+    fake = _use_live_fake(monkeypatch, AgentResult("draft_ready"))
+    await _submit(conn, mode="manual")
+    assert fake.models == [spawned]
+
+
+async def test_an_injected_runner_is_called_without_a_model(conn):
+    fake = fake_agent(AgentResult("draft_ready"))
+    await _submit(conn, mode="manual", run_agent=fake)
+    assert fake.models == [None]
 
 
 async def test_cancelling_the_awaiting_task_kills_the_live_run(conn, runs):
@@ -2015,7 +2037,7 @@ async def test_a_resumable_stop_consumes_no_attempt(conn, monkeypatch, reason):
     """With submission off: with it, a mid-turn timeout/agent_error holds."""
     _queue_ready(conn)
     if reason == "agent_error":
-        async def runner(prompt, jid, nonce, events, session_id=None, resume=False):
+        async def runner(prompt, jid, nonce, events, session_id=None, resume=False, **_):
             raise RuntimeError("claude died")
     else:
         runner = fake_agent(AgentResult("failed", reason))
@@ -2530,7 +2552,7 @@ async def test_a_mid_turn_stop_holds_when_it_could_submit(conn, reason):
 @pytest.mark.parametrize("reason", ["timeout", "agent_error"])
 async def test_a_mid_turn_stop_stays_resumable_when_submission_is_off(conn, monkeypatch, reason):
     if reason == "agent_error":
-        async def runner(prompt, jid, nonce, events, session_id=None, resume=False):
+        async def runner(prompt, jid, nonce, events, session_id=None, resume=False, **_):
             raise RuntimeError("claude died")
         monkeypatch.setattr(ats_apply, "_live_run_agent", runner)
         monkeypatch.setattr(ats_apply, "preflight", lambda: None)
@@ -2546,7 +2568,7 @@ async def test_a_cancel_resumes_only_a_parked_run_when_it_could_submit(conn, run
                                                                      waiting, live):
     started = asyncio.Event()
 
-    async def hangs(prompt, jid, nonce, events, session_id=None, resume=False):
+    async def hangs(prompt, jid, nonce, events, session_id=None, resume=False, **_):
         run = runs[jid] = FakeRun(nonce, events)
         events.heard.set()
         if waiting:

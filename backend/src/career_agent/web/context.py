@@ -9,9 +9,10 @@ import sqlite3
 from pathlib import Path
 
 from career_agent import chat, outcomes, store, tailor
+from career_agent.apply import agent as agent_mod
 from career_agent.apply import ats as ats_apply
-from career_agent.config import (MODEL_LABELS, SCORING_MODELS,
-                                 CandidateProfile, load_brief,
+from career_agent.config import (APPLY_MODEL_LABELS, APPLY_MODELS, MODEL_LABELS,
+                                 SCORING_MODELS, CandidateProfile, load_brief,
                                  load_candidate_profile)
 from career_agent.web import overview, worker
 
@@ -105,7 +106,7 @@ def resumes_context(conn: sqlite3.Connection, brief_path: Path) -> dict:
     versions = []
     for r in conn.execute(
             "SELECT r.version, datetime(r.created_at, 'localtime') AS created_at,"
-            "       r.content, j.company, j.title"
+            "       r.content, r.job_id, j.company, j.title"
             "  FROM resume r JOIN job j ON j.id = r.job_id"
             " ORDER BY r.id DESC"):
         content = json.loads(r["content"]) if r["content"] else {}
@@ -113,8 +114,10 @@ def resumes_context(conn: sqlite3.Connection, brief_path: Path) -> dict:
         for b in bullets:
             b["fact_claims"] = [claims.get(fid, "unknown fact")
                                for fid in b.get("fact_ids", [])]
+        # RS1: job_id opens the version's job hub; prompt_version is the
+        # tailor's TAILOR_PROMPT_VERSION (None on rows written before it was recorded).
         versions.append({**dict(r), "summary": content.get("summary", ""),
-                         "bullets": bullets})
+                         "bullets": bullets, "prompt_version": content.get("prompt_version")})
 
     return {"brief": brief, "daily_cap": brief.daily_cap,
             "today_submitted": today_submitted(conn),
@@ -193,6 +196,7 @@ def settings_context(conn: sqlite3.Connection, brief_path: Path,
             "today_submitted": today_submitted(conn),
             "settings": settings, "scoring_models": SCORING_MODELS,
             "model_labels": MODEL_LABELS, "form": form or {},
+            "apply_models": APPLY_MODELS, "apply_model_labels": APPLY_MODEL_LABELS,
             "errors": errors or {}, "saved": saved}
 
 
@@ -271,6 +275,9 @@ def run_status_context(conn: sqlite3.Connection) -> dict:
             "open_prompt_count": conn.execute(
                 "SELECT COUNT(*) n FROM agent_prompt"
                 " WHERE job_id IS NOT NULL AND status = 'open'").fetchone()["n"],
+            # MS1: the model each live session was spawned with. A running
+            # claude -p can't switch, so the Job chat's picker shows it locked.
+            "live_runs": agent_mod.live_runs(),
             # Read once, cheaply, so the always-visible status bar can show
             # the kill switch's state without a second endpoint just for it.
             "submission_implemented": ats_apply.SUBMISSION_IMPLEMENTED}

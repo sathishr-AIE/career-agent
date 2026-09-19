@@ -92,6 +92,7 @@ _SETTINGS_DEFAULTS = {
     "scoring_model": "", "max_score_per_run": "", "brief_present": False,
     "candidate_present": False, "candidate_name": "", "candidate_email": "",
     "candidate_phone": "", "linkedin_url": "", "portfolio_url": "",
+    "apply_model": "",
 }
 _SETTINGS_NUMERIC_FIELDS = ("salary_floor_inr", "daily_cap", "gate_threshold",
                            "staleness_days", "max_score_per_run")
@@ -113,6 +114,13 @@ def api_settings_save(body: dict = Body(...)):
     if not result["ok"]:
         return JSONResponse(status_code=422, content=result)
     return context.settings_context(conn, m.BRIEF_PATH, m.CANDIDATE_PROFILE_PATH)
+
+
+@router.put("/settings/models")
+def api_settings_models(body: dict = Body(...)):
+    """MS1: {scoring_model?, apply_model?} -- the chat composer's model picker."""
+    return _result(actions.save_models(_app()._conn(), body.get("scoring_model"),
+                                       body.get("apply_model")))
 
 
 def _result(result: dict) -> JSONResponse:

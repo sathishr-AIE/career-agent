@@ -83,3 +83,17 @@ def test_delete_refuses_a_fact_a_tailored_resume_cites(client, conn):
     r = client.delete(f"/api/facts/{fid}")
     assert r.status_code == 409 and "tailored-1" in r.json()["message"]
     assert len(store.fact_list(conn)) == 1
+
+
+def test_list_marks_which_resume_versions_cite_each_fact(client, conn):
+    """FC1: the Facts page shows citations up front instead of only on a refused delete."""
+    cited = _add(client).json()["id"]
+    free = _add(client, claim="Led a team of 4").json()["id"]
+    for version, fids in (("tailored-1", [cited]), ("tailored-2", [cited, 999])):
+        conn.execute("INSERT INTO resume (version, path, content) VALUES (?, ?, ?)",
+                     (version, "x.docx", json.dumps({"bullets": [{"text": "b", "fact_ids": fids}]})))
+    conn.execute("INSERT INTO resume (version, path, content) VALUES ('broken', 'x.docx', 'not json')")
+    conn.commit()
+    items = {i["id"]: i for i in client.get("/api/facts").json()["items"]}
+    assert items[cited]["cited_by"] == ["tailored-1", "tailored-2"]
+    assert items[free]["cited_by"] == []

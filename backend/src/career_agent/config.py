@@ -17,6 +17,16 @@ MODEL_LABELS = {
     "claude-haiku-4-5": "Haiku — faster, lighter on rate limits",
 }
 
+# The apply agent (MS1). Same rules as SCORING_MODELS; Haiku is left out on
+# purpose -- driving a real browser through a multi-page form needs a stronger model.
+APPLY_MODELS = ("claude-sonnet-5", "claude-opus-5")
+DEFAULT_APPLY_MODEL = APPLY_MODELS[0]
+
+APPLY_MODEL_LABELS = {
+    "claude-sonnet-5": "Sonnet 5 (default)",
+    "claude-opus-5": "Opus 5",
+}
+
 
 class CareerBrief(BaseModel):
     target_titles: list[str] = Field(min_length=1)

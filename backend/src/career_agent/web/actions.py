@@ -23,7 +23,7 @@ from career_agent import chat, credentials, outcomes, store, tailor
 from career_agent.apply import agent as agent_mod
 from career_agent.apply import ats as ats_apply
 from career_agent.apply import checkpoint, secret_fill
-from career_agent.config import (SCORING_MODELS, CandidateProfile,
+from career_agent.config import (APPLY_MODELS, SCORING_MODELS, CandidateProfile,
                                  CareerBrief, load_brief, save_brief,
                                  save_candidate_profile)
 from career_agent.security import load_key
@@ -1065,7 +1065,8 @@ def save_settings(conn: sqlite3.Connection, form: dict, brief_path: Path,
     (truthy/blank), salary_floor_inr, daily_cap, gate_threshold,
     staleness_days, scoring_model, max_score_per_run, brief_present
     (truthy/blank), candidate_present (truthy/blank), candidate_name,
-    candidate_email, candidate_phone, linkedin_url, portfolio_url."""
+    candidate_email, candidate_phone, linkedin_url, portfolio_url, and the
+    optional apply_model (blank keeps the stored one)."""
     errors: dict[str, str] = {}
 
     # max_score_per_run's control is on the page unconditionally, so it's
@@ -1128,6 +1129,9 @@ def save_settings(conn: sqlite3.Connection, form: dict, brief_path: Path,
     scoring_model = form.get("scoring_model", "")
     if scoring_model not in SCORING_MODELS:
         errors["scoring_model"] = f"unknown scoring model: {scoring_model}"
+    apply_model = form.get("apply_model") or None   # blank keeps the stored one
+    if apply_model is not None and apply_model not in APPLY_MODELS:
+        errors["apply_model"] = f"unknown apply model: {apply_model}"
     if max_score_per_run_n is not None and max_score_per_run_n < 0:
         errors["max_score_per_run"] = "cannot be negative"
 
@@ -1138,8 +1142,27 @@ def save_settings(conn: sqlite3.Connection, form: dict, brief_path: Path,
         save_brief(brief_path, brief)
     if candidate is not None:
         save_candidate_profile(candidate_path, candidate)
-    store.save_settings(conn, scoring_model, max_score_per_run_n)
+    store.save_settings(conn, scoring_model, max_score_per_run_n, apply_model)
     return {"ok": True, "errors": {}}
+
+
+def save_models(conn: sqlite3.Connection, scoring_model, apply_model) -> dict:
+    """MS1: the chat composer's model picker. A partial update of the setting
+    row only -- save_settings can't serve it, since it needs max_score_per_run
+    and, with a brief, every brief field. Either model may be omitted (None)."""
+    errors: dict[str, str] = {}
+    if scoring_model is None and apply_model is None:
+        errors["form"] = "Give scoring_model, apply_model or both"
+    if scoring_model is not None and scoring_model not in SCORING_MODELS:
+        errors["scoring_model"] = f"unknown scoring model: {scoring_model}"
+    if apply_model is not None and apply_model not in APPLY_MODELS:
+        errors["apply_model"] = f"unknown apply model: {apply_model}"
+    if errors:
+        return {"ok": False, "message": "; ".join(errors.values()), "errors": errors}
+    store.save_models(conn, scoring_model, apply_model)
+    saved = store.get_settings(conn)
+    return {"ok": True, "scoring_model": saved["scoring_model"],
+            "apply_model": saved["apply_model"]}
 
 
 async def run_start(conn: sqlite3.Connection, mode: str, brief_path: Path,

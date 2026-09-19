@@ -19,14 +19,12 @@ from typing import TYPE_CHECKING
 
 from career_agent import credentials
 from career_agent.apply import secret_fill
+from career_agent.config import DEFAULT_APPLY_MODEL
 
 if TYPE_CHECKING:
     from career_agent.apply.runner import AgentRun   # runner imports this module
 
 log = logging.getLogger(__name__)
-
-APPLY_MODEL = "sonnet"  # ponytail: constant; promote to the setting table
-                        # when someone actually wants to change it
 
 # The agent's cwd (and its .mcp-apply.json) deliberately lives OUTSIDE the
 # repo: the session runs bypassPermissions over job-posting text, which is
@@ -891,9 +889,18 @@ def build_cmd(model: str, mcp_path, session_id: str,
 RUNS: "dict[int, AgentRun]" = {}   # job_id -> its live run; the answer API sends into it
 
 
+def live_runs() -> list[dict]:
+    """{job_id, model} per live session, the model read from the argv it was
+    spawned with (build_cmd's --model) -- what it really runs on. A snapshot:
+    RUNS changes on run threads."""
+    return [{"job_id": jid, "model": run.cmd[run.cmd.index("--model") + 1]}
+            for jid, run in list(RUNS.items())]
+
+
 def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events,
                 cdp_port: int = 9222, timeout_s: float = 1200,
-                answer_wait_s: float = 1800, model: str = APPLY_MODEL, resume: bool = False,
+                answer_wait_s: float = 1800, model: str = DEFAULT_APPLY_MODEL,
+                resume: bool = False,
                 resume_output_s: float = 30, popen=None) -> AgentResult:
     """One apply session on apply/runner.py's AgentRun, stdin kept open so
     the human's answers reach the same session. `events` (a RunEvents) fire

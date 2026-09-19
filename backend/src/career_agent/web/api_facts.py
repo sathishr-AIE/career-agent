@@ -22,8 +22,11 @@ def _invalid(errors: dict) -> JSONResponse:
 
 @router.get("/facts")
 def api_get_facts():
-    return {"items": store.fact_list(_app()._conn()),
-            "min_hard": MIN_FACTS_HARD, "min_warn": MIN_FACTS_WARN}
+    conn = _app()._conn()
+    # FC1: citations up front. Read-only; the 409 delete guard stays the authority.
+    cited = store.fact_citations(conn)
+    items = [{**f, "cited_by": cited.get(f["id"], [])} for f in store.fact_list(conn)]
+    return {"items": items, "min_hard": MIN_FACTS_HARD, "min_warn": MIN_FACTS_WARN}
 
 
 @router.post("/facts")

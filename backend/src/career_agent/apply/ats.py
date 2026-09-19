@@ -3,6 +3,7 @@ machine and every write; `apply/agent.py` owns the browser session that
 decides an outcome. See docs/lld-apply-button-v2.md section 5."""
 import asyncio
 import datetime as dt
+import functools
 import json
 import logging
 import re
@@ -16,7 +17,8 @@ from career_agent import chat
 from career_agent.apply import agent as agent_mod
 from career_agent.apply import checkpoint
 from career_agent.apply.runner import RunEvents
-from career_agent.config import CandidateProfile, CareerBrief
+from career_agent.config import (APPLY_MODELS, DEFAULT_APPLY_MODEL, CandidateProfile,
+                                 CareerBrief)
 from career_agent.models import Job
 
 log = logging.getLogger(__name__)
@@ -179,9 +181,21 @@ def preflight() -> None:
         raise agent_mod.PreconditionError(str(exc)) from exc
 
 
+def apply_model(conn: sqlite3.Connection) -> str:
+    """The setting's apply-agent model (MS1). A value no longer in APPLY_MODELS
+    (a retired model left in the row) falls back to the default rather than
+    failing the run -- run.py's rule for the scoring model."""
+    model = conn.execute("SELECT apply_model FROM setting WHERE id = 1").fetchone()["apply_model"]
+    if model not in APPLY_MODELS:
+        log.warning("apply_model %r is not one of %s; using %s", model, APPLY_MODELS,
+                    DEFAULT_APPLY_MODEL)
+        return DEFAULT_APPLY_MODEL
+    return model
+
+
 async def _live_run_agent(prompt: str, job_id: int, nonce: str,
                           events: RunEvents, session_id: str | None = None,
-                          resume: bool = False):
+                          resume: bool = False, model: str = DEFAULT_APPLY_MODEL):
     """Default agent runner: a real Chrome around a real `claude` session.
     Tests inject their own run_agent instead -- nothing in the test suite
     ever reaches this, by house convention (no test spawns a browser or a
@@ -192,7 +206,7 @@ async def _live_run_agent(prompt: str, job_id: int, nonce: str,
     try:
         return await agent_mod.run_agent(prompt, job_id=job_id, nonce=nonce,
                                          events=events, session_id=session_id,
-                                         resume=resume)
+                                         resume=resume, model=model)
     except asyncio.CancelledError:
         _kill_live(job_id, events)   # before cleanup: never leave claude driving a dead Chrome
         raise
@@ -769,7 +783,9 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
                    _resume_text(resume_row),
                    str(_stage_resume(resume_path, profile, job_id)))
     score = score_row["weighted_score"] if score_row else None
-    runner = run_agent or _live_run_agent
+    # The live runner spawns on the Settings/picker model (MS1), read now so a
+    # change applies to the next Apply or Continue; an injected runner never gets one.
+    runner = run_agent or functools.partial(_live_run_agent, model=apply_model(conn))
     can_submit = SUBMISSION_IMPLEMENTED or run_agent is not None
     carried = 0
     if resume and (cp["mode"], cp["can_submit"]) != (mode, int(can_submit)):
