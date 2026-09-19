@@ -849,7 +849,25 @@ async def _resume_run(conn, job_id: int, brief_path: Path, candidate_profile_pat
 
 def dismiss(conn: sqlite3.Connection, job_id: int) -> dict:
     store.log(conn, job_id, "human_dismissed")
+    _set_dismissed(conn, job_id)
     return {"ok": True, "message": "Dismissed"}
+
+
+def _set_dismissed(conn: sqlite3.Connection, job_id: int) -> None:
+    """Take the job out of the queue (worker.QUEUE_WHERE) until
+    queue_restore or queue_retry puts it back."""
+    conn.execute("UPDATE job SET dismissed_at = datetime('now') WHERE id = ?", (job_id,))
+    conn.commit()
+
+
+def queue_restore(conn: sqlite3.Connection, job_id: int) -> dict:
+    """Undo a Skip or Dismiss: the job is queued again."""
+    cur = conn.execute("UPDATE job SET dismissed_at = NULL WHERE id = ?", (job_id,))
+    conn.commit()
+    if cur.rowcount != 1:
+        return {"ok": False, "message": "No such job."}
+    store.log(conn, job_id, "human_restored")
+    return {"ok": True, "message": "Back in the queue"}
 
 
 def _parse_date(raw: str, field: str, errors: dict) -> str | None:
@@ -922,6 +940,7 @@ async def queue_skip(conn: sqlite3.Connection, job_id: int, brief_path: Path,
         return {"ok": False, "message":
                 "This job's agent run is still live — finish or cancel it in the job's chat."}
     store.log(conn, job_id, "job_skipped", "skipped by user")
+    _set_dismissed(conn, job_id)
     checkpoint.finish(conn, job_id)     # a human decision supersedes an interrupted session
     state = worker.get_run_state(conn, "apply")
     if state["current_job_id"] == job_id:
@@ -970,7 +989,8 @@ def queue_retry(conn: sqlite3.Connection, job_id: int,
     lowest = conn.execute(
         "SELECT MIN(priority) p FROM job").fetchone()["p"]
     new_priority = (lowest - 1) if lowest is not None else 0
-    conn.execute("UPDATE job SET priority = ? WHERE id = ?",
+    # A requeue lands in the queue, even for a job dismissed earlier.
+    conn.execute("UPDATE job SET priority = ?, dismissed_at = NULL WHERE id = ?",
                  (new_priority, job_id))
     conn.commit()
     store.log(conn, job_id, "job_skipped", "retry requested; requeued")

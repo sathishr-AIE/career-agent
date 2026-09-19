@@ -6,8 +6,9 @@ import { errorText, post } from '../api'
  * card), an action button here is clickable again right after it settles --
  * Start/Pause/Stop and the queue's ▲/▼/Skip are all meant to be pressed
  * again. `error` is left in place after a success (cleared at the next
- * run) so a stale message never lingers past its cause. */
-export function useAction(onChanged: () => void) {
+ * run) so a stale message never lingers past its cause. `onError` also gets
+ * the refusal, e.g. to toast it. */
+export function useAction(onChanged: () => void, onError?: (message: string) => void) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -20,7 +21,9 @@ export function useAction(onChanged: () => void) {
         return r
       })
       .catch((e: unknown) => {
-        setError(errorText(e))
+        const message = errorText(e)
+        setError(message)
+        onError?.(message)
         return undefined
       })
       .finally(() => setBusy(false))

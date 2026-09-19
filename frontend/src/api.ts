@@ -71,6 +71,12 @@ export interface Job {
   resume_version: string | null
   application_id: number | null
   failure_reason: string | null
+  /** Queue order (lower first, NULL last), as the worker picks. */
+  priority: number | null
+  /** Set by Skip / Dismiss; the job is out of the queue until restored. */
+  dismissed_at: string | null
+  /** 1 while an interrupted session waits on Continue. */
+  resumable: number
 }
 
 export interface RunState {

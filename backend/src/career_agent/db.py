@@ -213,6 +213,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.execute("INSERT OR IGNORE INTO run_state (kind) VALUES ('pipeline')")
     conn.execute("INSERT OR IGNORE INTO setting (id) VALUES (1)")
     _add_column_if_missing(conn, "job", "priority", "INTEGER")
+    # Set by Skip / Dismiss (actions.queue_skip, actions.dismiss): the job leaves
+    # the queue (worker.QUEUE_WHERE) until queue_restore or queue_retry clears it.
+    _add_column_if_missing(conn, "job", "dismissed_at", "TEXT")
     # Pipeline run progress. run_state already carries columns meaningful
     # to one kind only (mode and current_job_id are apply-only), so these
     # follow that precedent and keep the status endpoint a single-row read.

@@ -81,6 +81,10 @@ the shared shell services from `components/shell.ts` (`useShell()` for the app-w
 `/api/run/status` poll and `toast()`, and `<TopBarActions>` to put page buttons in the top
 bar) and poll with `components/usePoll.ts`.
 
+`web.scheduled_task_installed()` shells out to PowerShell (about 4 s), so it caches its
+answer for 5 minutes (`SCHEDULED_TTL_S`). Skip and Dismiss set `job.dismissed_at`, which
+`worker.QUEUE_WHERE` excludes; `POST /api/queue/{id}/restore` and a retry clear it.
+
 The API routers reach shared state (`DB_PATH`, `BRIEF_PATH`, `_conn()`,
 `_background_tasks`) through a deferred, call-time import of `app.py` (their `_app()`
 helper) rather than a top-level one — `app.py` imports the routers to mount them, so a

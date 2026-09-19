@@ -2,6 +2,7 @@ import asyncio
 import datetime as dt  # re-exported as web.dt -- tests monkeypatch datetime through it
 import sqlite3
 import subprocess
+import time
 from contextlib import asynccontextmanager
 from html import escape
 from pathlib import Path
@@ -40,15 +41,29 @@ def scheduled_task_installed(name: str = "CareerAgentDaily") -> bool:
     applications_context takes the result as a `scheduled` argument instead
     of calling this itself; whichever route builds that context (Jinja or
     JSON) calls this function -- through whichever name is currently bound
-    to it -- and passes the answer in."""
+    to it -- and passes the answer in.
+
+    The query launches PowerShell, about 4 s on this machine, and the
+    Applications page polls every 3 s -- so the answer is cached.
+    ponytail: a 5-minute TTL, so a scheduler installed mid-session shows up
+    within 5 minutes; key it off an explicit refresh if that ever matters."""
+    hit = _SCHEDULED.get(name)
+    if hit and time.monotonic() - hit[0] < SCHEDULED_TTL_S:
+        return hit[1]
     try:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              f"Get-ScheduledTask -TaskName {name} -ErrorAction SilentlyContinue"],
             capture_output=True, text=True, timeout=10)
-        return name in result.stdout
+        found = name in result.stdout
     except Exception:
-        return False
+        found = False
+    _SCHEDULED[name] = (time.monotonic(), found)
+    return found
+
+
+SCHEDULED_TTL_S = 300
+_SCHEDULED: dict[str, tuple[float, bool]] = {}   # task name -> (checked at, installed)
 
 DB_PATH = Path("data/career.db")
 BRIEF_PATH = Path("career_brief.toml")

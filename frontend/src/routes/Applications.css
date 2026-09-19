@@ -1,120 +1,587 @@
-.mode-toggle {
-  display: inline-flex;
-  gap: var(--space-4);
-  font-size: 0.875rem;
-  font-weight: 600;
-  margin-bottom: var(--space-4);
+/* Applications (approved Screen 3). Values from ApplicationsQueue.dc.html,
+   ApplicationsAll.dc.html and ApplicationsSkipped.dc.html; shared primitives
+   are in components/ui.css. */
+
+.apps {
+  gap: 20px;
 }
 
-.mode-toggle label {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  cursor: pointer;
+.muted-text {
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text-3);
 }
 
-.tabs {
-  display: flex;
-  gap: var(--space-2);
-  margin-bottom: var(--space-4);
-}
-
-.tabs button {
-  border: 1px solid var(--paper-line);
-  background: var(--paper-raised);
-  border-radius: var(--radius);
-  padding: 7px 14px;
-  font-size: 0.8125rem;
-  font-weight: 700;
-  color: var(--ink-dim);
-}
-
-.tabs button.active {
-  background: var(--signal);
-  border-color: var(--signal);
-  color: #fff;
-}
-
-.stats-row {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: var(--space-3);
-  margin: var(--space-4) 0;
-}
-
-.stats-row .card {
-  padding: var(--space-3);
+.tailored-line {
   margin: 0;
+  font-size: 13px;
+  color: var(--text-3);
 }
 
-.stats-row h3 {
-  font-size: 0.6875rem;
-  color: var(--ink-dim);
-  margin: 0 0 4px;
-  text-transform: uppercase;
-}
+/* -- top bar: the Manual / Auto segmented control -- */
 
-.stats-row .num {
-  font-family: var(--font-data);
-  font-size: 1.25rem;
-  font-weight: 600;
-}
-
-.now-processing form {
+.seg {
   display: flex;
-  gap: var(--space-2);
   align-items: center;
-  margin-top: var(--space-2);
-  flex-wrap: wrap;
-}
-
-.draft-answers {
-  background: var(--paper);
-  border: 1px solid var(--paper-line);
+  gap: 2px;
+  padding: 2px;
   border-radius: var(--radius);
-  padding: var(--space-2);
-  font-size: 0.75rem;
-  overflow-x: auto;
+  background: var(--hover);
+  border: 1px solid var(--line);
 }
 
-.activity-log {
-  max-height: 220px;
-  overflow-y: auto;
-  margin-top: var(--space-4);
-  font-size: 0.75rem;
-  color: var(--ink-dim);
-  font-family: var(--font-data);
+.seg__opt {
+  height: 26px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 12px;
+  color: var(--text-5);
 }
 
-.log-line {
-  padding: 3px 0;
-  border-bottom: 1px solid var(--paper-line);
+.seg__opt.is-on {
+  background: var(--surface);
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+  font-weight: 500;
+  color: var(--text-strong);
 }
 
-.done {
-  color: var(--submit);
-  font-weight: 600;
+.seg__opt:disabled {
+  cursor: not-allowed;
 }
 
-.denied {
-  color: var(--skip);
-  font-weight: 600;
+.seg__lock {
+  display: inline-flex;
+  margin: 0 6px 0 2px;
+  color: var(--text-5);
 }
 
-.outcome-form {
+.icon-muted {
+  display: inline-flex;
+  color: var(--sl-fg);
+}
+
+/* -- run strip -- */
+
+.run-strip__head {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line-soft);
   display: flex;
-  gap: var(--space-2);
   align-items: center;
-  margin-top: var(--space-2);
-  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.verdict-submit {
-  color: var(--submit);
+.run-strip__left {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-width: 0;
 }
-.verdict-hold {
-  color: var(--hold);
+
+.mode-chip {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--sl-bg);
+  border: 1px solid var(--line);
+  color: var(--sl-fg);
 }
-.verdict-skip {
-  color: var(--skip);
+
+.run-strip__now {
+  font-size: 13px;
+  color: #334155;
+}
+
+.run-strip__now b {
+  font-weight: 500;
+  color: var(--text-strong);
+}
+
+.run-strip .b a {
+  font-weight: 600;
+}
+
+.run-stats {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.run-stat {
+  padding: 10px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.run-stat + .run-stat {
+  border-left: 1px solid var(--line-soft);
+}
+
+.run-stat__num {
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 600;
+}
+
+.run-strip__alerts {
+  padding: 0 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.run-events {
+  padding: 4px 16px 10px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.run-event {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 12px;
+  color: #334155;
+}
+
+.run-event:last-child {
+  border-bottom: none;
+}
+
+.run-event__payload {
+  min-width: 0;
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.run-event__time {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-5);
+}
+
+/* -- tabs card and the status chips -- */
+
+.chips {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.link-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 500;
+  color: var(--primary);
+}
+
+.link-btn:hover {
+  color: var(--link-hover);
+}
+
+/* -- the Queue / All / Skipped tables -- */
+
+.apps-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.apps-table thead tr {
+  border-bottom: 1px solid var(--line);
+}
+
+.apps-table .c-chev {
+  width: 24px;
+  padding-right: 0;
+}
+
+.apps-table .c-actions {
+  text-align: right;
+}
+
+.apps-table tbody > tr:last-child > .td {
+  border-bottom: none;
+}
+
+.chev {
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: none;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-5);
+  border-radius: var(--radius-sm);
+}
+
+.chev:hover,
+.app-row.is-open .chev {
+  color: var(--sl-fg);
+}
+
+.app-row.is-open,
+.app-row.is-open + .expansion {
+  background: #fbfbfe;
+}
+
+.app-row.is-open > .td {
+  border-bottom: none;
+}
+
+.company {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  color: var(--text-strong);
+}
+
+.clip {
+  display: inline-block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+.clip.role {
+  color: #334155;
+}
+
+/* The Role column (Why, on the Skipped tables) takes whatever width is left
+   and truncates, so the row never pushes Actions out of the card. */
+.apps-table .c-role,
+.skip-table .c-why {
+  width: 100%;
+  max-width: 0;
+}
+
+.apps-table .c-role .clip,
+.skip-table .c-why .why {
+  display: block;
+  max-width: none;
+}
+
+.skip-table .c-role {
+  width: auto;
+  max-width: none;
+}
+
+.skip-table .c-role .clip {
+  display: inline-block;
+  max-width: 240px;
+}
+
+.status-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reason {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ib-spacer {
+  width: 28px;
+}
+
+/* -- expanded row -- */
+
+.expansion > td {
+  padding: 4px 24px 20px 56px;
+  border-bottom: 1px solid var(--line);
+}
+
+.expansion__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 0.7fr) minmax(0, 1fr);
+  gap: 32px;
+}
+
+.expansion__col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.why-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: #334155;
+}
+
+.dims {
+  display: grid;
+  grid-template-columns: 136px minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 6px 10px;
+  font-size: 12px;
+  color: var(--sl-fg);
+}
+
+.dim {
+  display: contents;
+}
+
+.dim__bar {
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--hover);
+}
+
+.dim__bar > div {
+  height: 6px;
+  border-radius: 9999px;
+  background: #64748b;
+}
+
+.dim .mono {
+  text-align: right;
+}
+
+.resume-version {
+  font-size: 13px;
+  color: var(--text-strong);
+}
+
+.icon-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.row-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.row-form .lbl {
+  margin-bottom: 2px;
+}
+
+.row-form__current {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.row-form__current b {
+  font-weight: 500;
+}
+
+.tone-em { color: var(--em-fg); }
+.tone-ro { color: var(--ro-fg); }
+.tone-sl { color: var(--sl-fg); }
+
+.row-form__pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  gap: 8px;
+}
+
+.row-form__pair .btn {
+  justify-content: center;
+}
+
+/* -- a refused action, under its row -- */
+
+.refusal-row > td {
+  padding: 0 16px 12px 56px;
+}
+
+.alert--row {
+  padding: 8px 12px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+/* -- Skipped tab -- */
+
+.skipped-intro {
+  margin: 0;
+  padding: 12px 16px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--sl-fg);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.section-head {
+  padding: 14px 16px 8px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.section-head .mono {
+  font-size: 12px;
+}
+
+.section-head--rule {
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.section-head__sub {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.skip-table thead tr {
+  border-top: 1px solid var(--line);
+}
+
+.why {
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  color: var(--sl-fg);
+}
+
+/* -- loading -- */
+
+.skel-row {
+  height: 40px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+/* -- narrow widths -- */
+
+@media (max-width: 1100px) {
+  .apps-table .c-source {
+    display: none;
+  }
+  .clip,
+  .skip-table .c-role .clip {
+    max-width: 160px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .expansion__grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
+  }
+  .expansion > td {
+    padding: 4px 16px 16px 44px;
+  }
+}
+
+@media (max-width: 720px) {
+  .run-stats {
+    display: flex;
+    overflow-x: auto;
+  }
+  .run-stat {
+    flex: 0 0 auto;
+    min-width: 116px;
+  }
+  .run-strip__head {
+    flex-wrap: wrap;
+  }
+
+  /* Each table row becomes a stacked card. */
+  .apps-table thead {
+    display: none;
+  }
+  .apps-table tr.app-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 8px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .apps-table tr.app-row > .td {
+    height: auto;
+    padding: 0;
+    border: none;
+  }
+  .apps-table .c-company {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .apps-table .c-chev {
+    order: 1;
+  }
+  .apps-table .c-role,
+  .skip-table .c-role {
+    flex: 1 1 100%;
+    order: 2;
+    width: auto;
+    max-width: none;
+  }
+  .apps-table .c-verdict,
+  .apps-table .c-score,
+  .apps-table .c-status {
+    order: 3;
+  }
+  .apps-table .c-why,
+  .skip-table .c-why {
+    flex: 1 1 100%;
+    order: 4;
+    width: auto;
+    max-width: none;
+    white-space: normal;
+  }
+  .apps-table .c-actions {
+    order: 5;
+    margin-left: auto;
+  }
+  .apps-table .c-source {
+    display: none;
+  }
+  .clip,
+  .clip.role,
+  .why {
+    max-width: none;
+    white-space: normal;
+  }
+  .expansion,
+  .refusal-row {
+    display: block;
+  }
+  .expansion > td,
+  .refusal-row > td {
+    display: block;
+    padding: 4px 16px 16px;
+  }
+  .row-form__pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

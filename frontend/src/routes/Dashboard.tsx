@@ -1,6 +1,9 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { get, type PipelineState, type PipelineStatus, type RunStatusContext, type Verdict } from '../api'
+import { describe, type Tone } from '../events'
+import { P } from '../icons'
+import { Icon, Spinner } from '../components/Icon'
 import { TopBarActions, useShell } from '../components/shell'
 import { useAction } from '../components/useAction'
 import { usePoll } from '../components/usePoll'
@@ -83,80 +86,6 @@ interface OverviewContext extends PipelineStatus {
   recent_discoveries: Discovery[]
   recent_outcomes: RecentOutcome[]
   events: FeedEvent[]
-}
-
-type Tone = 'em' | 'am' | 'ro' | 'sk' | 'sl'
-
-// Icon paths from the Dashboard artboards (Main.dc.html, DashboardFirstRun.dc.html).
-const P = {
-  check: 'M5 12l5 5 9-10',
-  chat: 'M4 5h16v11H9l-5 4z',
-  play: 'M8 5v14l11-7z',
-  alert: 'M12 8v5M12 16.5v.5M10.3 3.9L2.5 17.5A2 2 0 0 0 4.2 20.5h15.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z',
-  x: 'M6 6l12 12M18 6L6 18',
-  file: 'M6 3h8l4 4v14H6zM14 3v4h4',
-  user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 20c1.5-4 4.5-6 8-6s6.5 2 8 6',
-  pause: 'M6 5h4v14H6zM14 5h4v14h-4z',
-  skip: 'M6 5l9 7-9 7zM18 5v14',
-  bang: 'M12 6v8M12 18v.5',
-  refused: 'M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18zM12 7.5v5M12 16v.5',
-  allClear: 'M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18zM8 12l3 3 5-6',
-  inbox: 'M3 13h5l1.5 3h5L16 13h5M5 5h14l2 8v6H3v-6z',
-}
-
-function Icon({ d, size = 14, width = 2, fill = false }: { d: string; size?: number; width?: number; fill?: boolean }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill={fill ? 'currentColor' : 'none'}
-         stroke={fill ? 'none' : 'currentColor'} strokeWidth={width} strokeLinecap="round"
-         strokeLinejoin="round" aria-hidden="true">
-      <path d={d} />
-    </svg>
-  )
-}
-
-function Spinner() {
-  return (
-    <svg className="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity={0.35} strokeWidth={3} />
-      <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth={3} strokeLinecap="round" />
-    </svg>
-  )
-}
-
-// -- activity feed (EV1) --
-
-const EVENTS: Record<string, [label: string, tone: Tone, icon: string]> = {
-  submitted: ['Submitted', 'em', P.check],
-  failed: ['Attempt failed', 'ro', P.x],
-  failed_permanent: ['Failed permanently', 'ro', P.x],
-  held_unknown: ['Held — may have been submitted', 'am', P.alert],
-  captcha_held: ['Stopped at a CAPTCHA', 'am', P.alert],
-  submitted_without_decision: ['Submitted without your go-ahead', 'ro', P.alert],
-  draft_without_decision: ['Draft saved without your go-ahead', 'am', P.file],
-  resumable: ['Session resumable', 'sl', P.pause],
-  needs_answer: ['Asked you a question', 'am', P.chat],
-  needs_answer_resolved: ['You answered', 'sl', P.user],
-  human_applied: ['You started applying', 'sl', P.user],
-  human_override: ['You tracked a skipped job', 'sl', P.user],
-  human_dismissed: ['You dismissed a job', 'sl', P.user],
-  human_marked_applied: ['You marked it applied', 'sl', P.user],
-  job_skipped: ['Skipped', 'sl', P.skip],
-  hold_cleared: ['Hold cleared — not submitted', 'sl', P.check],
-  orphan_in_flight_dropped: ['Cleared an interrupted attempt', 'sl', P.x],
-  run_started: ['Apply run started', 'sk', P.play],
-  run_paused: ['Apply run paused', 'sl', P.pause],
-  run_resumed: ['Apply run resumed', 'sl', P.play],
-  run_stopped: ['Apply run stopped', 'sl', P.pause],
-  run_completed: ['Apply run finished', 'sl', P.check],
-  run_autopaused: ['Apply run paused itself', 'am', P.pause],
-  run_error: ['Apply run error', 'ro', P.alert],
-}
-
-function describe(e: FeedEvent): [string, Tone, string] {
-  if (e.payload === 'resume_limit' && (e.type === 'failed' || e.type === 'failed_permanent')) {
-    return ['Resume limit reached', 'ro', P.x]
-  }
-  return EVENTS[e.type] ?? [e.type.replace(/_/g, ' '), 'sl', P.file]
 }
 
 const jobName = (e: { company: string | null; title: string | null }) =>
@@ -348,12 +277,13 @@ function NeedsYou({ run, events }: { run: RunStatusContext | null; events: FeedE
                      sub={`${card.open_prompt!.question}${more > 0 ? ` · +${more} more` : ''}`} />
           )}
           {resumable > 0 && (
-            <NeedRow tone="sl" icon={P.play} action="Review" to="/applications"
+            <NeedRow tone="sl" icon={P.play} action="Review" to="/applications?tab=all&status=interrupted"
                      title={`${resumable} session${resumable === 1 ? '' : 's'} can resume`}
                      sub="Interrupted — continue where they left off" />
           )}
           {failures.map((e) => (
-            <NeedRow key={e.id} tone="ro" icon={P.alert} action="Open" to="/applications" mono
+            <NeedRow key={e.id} tone="ro" icon={P.alert} action="Open" mono
+                     to={`/applications?tab=all&status=${e.type === 'held_unknown' ? 'held' : 'failed'}`}
                      title={`${e.company ?? 'A job'} · ${e.title ?? ''} ${e.type === 'held_unknown' ? 'is held' : 'failed'}`}
                      sub={e.payload ?? e.type} />
           ))}

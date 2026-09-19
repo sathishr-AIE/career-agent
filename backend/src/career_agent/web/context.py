@@ -17,6 +17,9 @@ from career_agent.web import overview, worker
 
 LIST_SQL = """
 SELECT j.id, j.company, j.title, j.location, j.source, j.url,
+       j.priority, j.dismissed_at,
+       EXISTS (SELECT 1 FROM apply_checkpoint cp
+                WHERE cp.job_id = j.id AND cp.status = 'resumable') AS resumable,
        a.verdict, a.rationale, a.stage, a.weighted_score AS score,
        a.role_fit, a.credibility, a.opportunity, a.application_quality, a.eligibility_soft,
        (SELECT ap.status FROM application ap
@@ -33,6 +36,9 @@ SELECT j.id, j.company, j.title, j.location, j.source, j.url,
          ORDER BY ap.id DESC LIMIT 1) AS failure_reason
   FROM job j JOIN assessment a ON a.job_id = j.id
  WHERE j.merged_into_job_id IS NULL AND a.verdict IN ({placeholders})
+   -- only each job's latest assessment: a re-score must not list it twice
+   AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id
+               ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)
  ORDER BY a.weighted_score DESC NULLS LAST, j.discovered_at DESC
 """
 

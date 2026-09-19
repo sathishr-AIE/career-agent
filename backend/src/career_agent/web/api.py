@@ -38,8 +38,13 @@ def api_overview():
 @router.get("/applications")
 def api_applications(show: str = "queue"):
     m = _app()
-    return context.applications_context(
+    ctx = context.applications_context(
         m._conn(), show, m.BRIEF_PATH, scheduled=m.scheduled_task_installed())
+    if show == "skipped":
+        # `jobs` already holds every verdict here; `skipped_jobs` would send
+        # the (large) skip list a second time in the same response.
+        ctx.pop("skipped_jobs")
+    return ctx
 
 
 @router.get("/transcript/{application_id}")
@@ -150,7 +155,7 @@ def api_dismiss(job_id: int):
 
 
 @router.post("/applied/{job_id}")
-def api_mark_applied(job_id: int, when: str = Body("")):
+def api_mark_applied(job_id: int, when: str = Body("", embed=True)):
     m = _app()
     return _result(actions.mark_applied(m._conn(), job_id, when,
                                         brief_path=m.BRIEF_PATH))
@@ -171,7 +176,7 @@ def api_run_status():
 
 
 @router.post("/run/start")
-async def api_run_start(mode: str = Body(...)):
+async def api_run_start(mode: str = Body(..., embed=True)):
     m = _app()
     return _result(await actions.run_start(m._conn(), mode, m.BRIEF_PATH,
                                            m.CANDIDATE_PROFILE_PATH,
@@ -232,7 +237,13 @@ def api_queue_retry(job_id: int, confirm: bool = False):
                                        confirm_not_submitted=confirm))
 
 
+@router.post("/queue/{job_id}/restore")
+def api_queue_restore(job_id: int):
+    m = _app()
+    return _result(actions.queue_restore(m._conn(), job_id))
+
+
 @router.post("/queue/{job_id}/priority")
-def api_queue_priority(job_id: int, direction: str = Body(...)):
+def api_queue_priority(job_id: int, direction: str = Body(..., embed=True)):
     m = _app()
     return _result(actions.queue_priority(m._conn(), job_id, direction))

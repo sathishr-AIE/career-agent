@@ -2102,7 +2102,7 @@ def test_a_resume_with_no_bullets_is_refused(client, tmp_path, monkeypatch):
 _SUBMIT_ROUTES = [("/apply/1", {}), ("/api/apply/1", {}),
                   ("/override/1", {}), ("/api/override/1", {})]
 _TICK_ROUTES = [("/run/start", {"data": {"mode": "manual"}}),
-                ("/api/run/start", {"json": "manual"}),
+                ("/api/run/start", {"json": {"mode": "manual"}}),
                 ("/run/resume", {}), ("/api/run/resume", {}),
                 ("/queue/1/skip", {}), ("/api/queue/1/skip", {})]
 
@@ -2268,3 +2268,113 @@ def test_chat_side_routers_are_mounted(client, monkeypatch):
     assert client.get("/api/profile").json()["profile"]["candidate_name"] == "Jane Doe"
     assert client.get("/api/memory").json() == {"items": []}
     assert client.get("/api/logins").json() == {"items": []}
+
+
+# -- AP1 (redesign Screen 3): the Applications backend slice -------------------
+
+def test_scheduled_task_check_is_cached(monkeypatch):
+    """The check launches PowerShell (about 4 s). The Applications page polls
+    every 3 s, so the answer is cached instead of paid for on every request."""
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(web.subprocess, "run",
+                        lambda *a, **kw: calls.append(a) or SimpleNamespace(stdout=""))
+    monkeypatch.setattr(web, "_SCHEDULED", {})
+    assert web.scheduled_task_installed("T") is False
+    assert web.scheduled_task_installed("T") is False
+    assert len(calls) == 1
+    checked_at, found = web._SCHEDULED["T"]
+    web._SCHEDULED["T"] = (checked_at - web.SCHEDULED_TTL_S - 1, found)
+    web.scheduled_task_installed("T")
+    assert len(calls) == 2
+
+
+def _queued(conn):
+    return [r["job_id"] for r in conn.execute(worker.CANDIDATE_SQL)]
+
+
+def test_queue_skip_takes_the_job_out_of_the_queue(client):
+    conn = db.connect(web.DB_PATH)
+    assert _queued(conn) == [1]
+    assert client.post("/api/queue/1/skip").status_code == 200
+    assert _queued(conn) == [] and worker.queue_count(conn) == 0
+    assert conn.execute("SELECT dismissed_at FROM job WHERE id = 1").fetchone()[0]
+
+
+def test_dismiss_takes_the_job_out_of_the_queue(client):
+    conn = db.connect(web.DB_PATH)
+    assert client.post("/api/dismiss/1").status_code == 200
+    assert _queued(conn) == []
+
+
+def test_restore_puts_a_dismissed_job_back(client):
+    conn = db.connect(web.DB_PATH)
+    client.post("/api/dismiss/1")
+    r = client.post("/api/queue/1/restore")
+    assert r.status_code == 200 and r.json()["ok"]
+    assert _queued(conn) == [1]
+    assert "human_restored" in {e["type"] for e in conn.execute("SELECT type FROM event")}
+
+
+def test_restore_refuses_an_unknown_job(client):
+    assert client.post("/api/queue/999/restore").status_code == 422
+
+
+def test_retry_puts_a_dismissed_job_back_in_the_queue(client):
+    """A requeue has to land in the queue, even for a job dismissed earlier."""
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO application (job_id, resume_version, status)"
+                 " VALUES (1, 'v1', 'failed')")
+    conn.execute("UPDATE job SET dismissed_at = datetime('now') WHERE id = 1")
+    conn.commit()
+    assert client.post("/api/queue/1/retry").status_code == 200
+    assert _queued(conn) == [1]
+
+
+def test_list_sql_uses_only_each_jobs_latest_assessment(client):
+    """A re-score (a PROMPT_VERSION bump) adds a second assessment row; the
+    list must show the job once, with its newest verdict."""
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO assessment (job_id, stage, weighted_score, verdict,"
+                 " rationale, model, prompt_version)"
+                 " VALUES (1, 'scored', 40, 'skip', 're-scored', 'm', 'gate-v2')")
+    conn.commit()
+    jobs = client.get("/api/applications?show=skipped").json()["jobs"]
+    rows = [j for j in jobs if j["id"] == 1]
+    assert len(rows) == 1 and rows[0]["verdict"] == "skip"
+
+
+def test_api_applications_exposes_priority_resumable_and_dismissed(client):
+    conn = db.connect(web.DB_PATH)
+    conn.execute("UPDATE job SET priority = 3, dismissed_at = '2026-09-19 10:00:00'"
+                 " WHERE id = 1")
+    conn.execute("INSERT INTO apply_checkpoint (job_id, session_id, nonce, status)"
+                 " VALUES (2, 's', 'n', 'resumable')")
+    conn.commit()
+    jobs = {j["id"]: j for j in client.get("/api/applications?show=skipped").json()["jobs"]}
+    assert (jobs[1]["priority"], jobs[1]["dismissed_at"], jobs[1]["resumable"]) == (
+        3, "2026-09-19 10:00:00", 0)
+    assert jobs[2]["resumable"] == 1
+
+
+def test_api_applications_sends_each_row_once(client):
+    """show=skipped already returns every verdict in `jobs`; `skipped_jobs`
+    would repeat the (large) skip list in the same response."""
+    assert "skipped_jobs" not in client.get("/api/applications?show=skipped").json()
+    assert "skipped_jobs" in client.get("/api/applications?show=queue").json()
+
+
+def test_single_field_json_routes_accept_the_react_apps_object_bodies(client, monkeypatch):
+    """The React app posts {direction} / {when} / {mode}. A lone `Body(...)`
+    param makes FastAPI expect a bare JSON string instead, which 422'd Move
+    up/down, Mark applied and Start for every click (embed=True, as
+    api_chat's message route already does)."""
+    monkeypatch.setattr(web.actions, "run_start",
+                        lambda *a, **kw: _async_result({"ok": True, "message": "stub"}))
+    assert client.post("/api/queue/1/priority", json={"direction": "down"}).status_code == 200
+    assert client.post("/api/applied/1", json={"when": "2026-09-19"}).status_code == 200
+    assert client.post("/api/run/start", json={"mode": "manual"}).status_code == 200
+
+
+async def _async_result(value):
+    return value

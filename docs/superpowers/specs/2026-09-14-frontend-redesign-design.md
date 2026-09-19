@@ -129,8 +129,8 @@ The picker sits in the composer toolbar, and what it controls depends on the cha
 |---|---|---|---|---|
 | 1 | Application Shell | **Approved** | **Implemented** | OC1, `/api/pipeline/status` |
 | 2 | Dashboard | **Approved** (Claude design canvas) | **Implemented** | EV1, OC1 |
-| 3 | Applications | **Approved** (Claude design canvas) | Not started | none |
-| 4 | Job Details | **Approved** (Claude design canvas) | Not started | JD1 |
+| 3 | Applications | **Approved** (Claude design canvas) | **Implemented** | AP1 |
+| 4 | Job Details | **Approved** (Claude design canvas) | In progress | JD1 |
 | 5 | Chat (Home + Job) | **Approved** (Claude design canvas) | Not started | MS1 |
 | 6 | Facts | **Approved** (Claude design canvas) | Not started | FC1 |
 | 7 | Resumes | **Approved** (Claude design canvas) | Not started | RS1, FC1 (links only) |
@@ -230,6 +230,25 @@ These are no longer design dependencies. The remaining new slices are:
   - The password is write-only: never returned, never logged, and never shown again.
     The response is the metadata row, the same shape as `list_`.
 
+- **AP1, the Applications slice (added 2026-09-18, built with Screen 3).** Found while
+  planning Screen 3, measured on a copy of the real DB:
+  - `scheduled_task_installed()` launched PowerShell (about 4.3 s) on every
+    `/api/applications` request, which the page polls every 3 s. It is now cached for
+    5 minutes.
+  - `show=skipped` sent every row twice (`jobs` and `skipped_jobs`, 2.2 MB). The JSON route
+    drops `skipped_jobs` there.
+  - `LIST_SQL` joined every assessment, so a re-score would list a job twice. It now keeps
+    each job's latest one, and also returns `priority` (the Queue tab sorts like the
+    worker), `dismissed_at` and `resumable`.
+  - Skip and Dismiss only logged an event, so a skipped job stayed queued. They now set
+    `job.dismissed_at`, which `worker.QUEUE_WHERE` excludes. `POST /api/queue/{id}/restore`
+    and a retry clear it (the user's decision, 2026-09-19).
+  - Found during Screen 3's verification: `/api/run/start`, `/api/applied/{id}` and
+    `/api/queue/{id}/priority` each took a lone `Body(...)` string, so FastAPI expected a
+    bare JSON string and 422'd the React app's `{mode}` / `{when}` / `{direction}` bodies.
+    Start, Mark applied and Move up/down had never worked from React. They now use
+    `Body(..., embed=True)`, as `api_chat`'s message route already did.
+
 **HS1 was dropped, because it isn't a gap.** `store.save_hard_skip` writes an `assessment`
 row with `stage = 'hard'`, `verdict = 'skip'` and the reason as `rationale`. `LIST_SQL`
 already returns `stage`, so the Skipped tab can separate hard-filter skips from gate
@@ -308,6 +327,12 @@ These are written before each Stitch design. They are the brief the design must 
   first.
 
 ### 3. Applications
+
+*Built 2026-09-19 with two row states the canvas doesn't draw:* **Interrupted** (a resumable
+checkpoint, amber, primary Continue, shown in All rather than Queue) and **Dismissed** (after
+Skip or Dismiss, slate, primary Undo, hidden from "All statuses" and listed under its own
+chip). The tab and status filter live in the URL (`?tab=all&status=failed`), so the
+Dashboard's Review and Open links land on the right rows.
 
 - **Purpose:** decide what the agent applies to, and follow every application to an
   outcome.

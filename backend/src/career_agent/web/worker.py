@@ -43,6 +43,7 @@ def _outcome_text(conn, job_id: int, result: dict) -> str:
 # this predicate, so the three can't drift apart.
 QUEUE_WHERE = """
    j.merged_into_job_id IS NULL
+   AND j.dismissed_at IS NULL
    AND a.verdict IN ('submit','hold')
    AND a.id = (SELECT id FROM assessment a2 WHERE a2.job_id = j.id
                ORDER BY a2.created_at DESC, a2.id DESC LIMIT 1)
