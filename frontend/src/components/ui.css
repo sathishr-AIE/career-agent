@@ -772,3 +772,70 @@
   line-height: 16px;
   color: var(--ro-fg);
 }
+
+/* -- tailored-resume bullets and their fact chips (the job hub and Resumes) --
+   Scoped under .bullets on purpose: the Facts page owns a `.fact` card and a
+   `.facts` page root of its own, and two global definitions of one name would
+   be settled by stylesheet order rather than by intent. */
+
+.bullets {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bullets li {
+  position: relative;
+  padding-left: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  line-height: 19px;
+  color: var(--text);
+}
+
+.bullets li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: var(--text-5);
+}
+
+.bullets .facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.bullets .fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--sl-fg);
+}
+
+.bullets .fact .mono {
+  color: var(--text-3);
+}
+
+.bullets .fact--gone,
+.bullets .fact--gone .mono {
+  background: var(--ro-bg);
+  border-color: var(--ro-line);
+  color: var(--ro-fg);
+}

@@ -2580,3 +2580,112 @@ def test_job_detail_checkpoint_carries_the_pinned_model(client):
     d = client.get("/api/jobs/1").json()
 
     assert d["checkpoint"]["model"] == "claude-opus-5"
+
+
+# --- RS1: the Resumes page's payload (job link, prompt version, citations) ---
+
+def _api_upload(client, path, filename=None):
+    return client.post("/api/resumes", files={
+        "file": (filename or path.name, path.read_bytes(),
+                 "application/vnd.openxmlformats-officedocument"
+                 ".wordprocessingml.document")})
+
+
+def test_api_resumes_lists_a_version_with_its_job_prompt_and_claims(client, monkeypatch):
+    from career_agent import tailor as tailor_mod
+
+    async def fake_submit(conn, job_id, mode, brief=None, profile=None,
+                          resume_version=None, **kw):
+        return {"ok": True, "job_id": job_id, "status": "draft"}
+
+    monkeypatch.setattr(web.ats_apply, "submit", fake_submit)
+    client.post("/apply/1")
+
+    d = client.get("/api/resumes").json()
+
+    assert d["master"]["exists"] is True
+    [v] = d["versions"]
+    assert (v["job_id"], v["company"], v["title"]) == (1, "Acme", "AI Engineer")
+    assert v["version"] == "tailored-1-r1"
+    assert v["prompt_version"] == tailor_mod.TAILOR_PROMPT_VERSION
+    assert v["summary"] == "Tailored summary."
+    assert v["bullets"][0]["fact_claims"] == ["claim 0"]
+    assert "content" not in v, "the raw JSON is parsed into summary/bullets, not sent twice"
+
+
+def test_api_resumes_reports_a_dead_citation_and_a_missing_prompt_version_as_none(client):
+    """One sentinel for both screens: the job hub already reports a dead
+    citation as None, and a fact whose claim reads 'unknown fact' must not
+    be mistaken for one."""
+    conn = db.connect(web.DB_PATH)
+    conn.execute("INSERT INTO resume (version, path, job_id, content) VALUES (?,?,?,?)",
+                 ("tailored-1-r9", "x.docx", 1,
+                  json.dumps({"summary": "s",
+                              "bullets": [{"text": "t", "fact_ids": [999]}]})))
+    conn.commit()
+
+    v = client.get("/api/resumes").json()["versions"][0]
+
+    assert v["bullets"][0]["fact_claims"] == [None]
+    assert v["prompt_version"] is None
+    hub = client.get("/api/jobs/1").json()["resume"]
+    assert hub["bullets"][0]["fact_claims"] == [None]
+
+
+def test_api_resumes_reports_a_missing_master_with_its_full_path(client, monkeypatch, tmp_path):
+    """The page shows the path so the user knows where to put the file."""
+    missing = tmp_path / "nowhere" / "master.docx"
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", missing)
+
+    master = client.get("/api/resumes").json()["master"]
+
+    assert master["exists"] is False
+    assert master["path"] == str(missing)
+    assert "modified" not in master
+
+
+def test_post_api_resumes_prepares_an_unmarked_docx_and_reports_every_change(
+        client, tmp_path, monkeypatch):
+    import docx
+    target = tmp_path / "resume" / "master.docx"
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", target)
+    source = tmp_path / "plain.docx"
+    doc = docx.Document()
+    doc.add_paragraph("PROFESSIONAL SUMMARY")
+    doc.add_paragraph("Site reliability engineer with 8 years on payments infrastructure.")
+    for i in range(3):
+        doc.add_paragraph(f"Shipped thing {i}", style="List Bullet")
+    doc.save(str(source))
+
+    r = _api_upload(client, source)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["message"] == ("Master resume installed. Prepared it for tailoring."
+                              " Everything else in the document was left untouched.")
+    assert len(body["changes"]) == 2
+    assert "<<SUMMARY>>" in body["changes"][0]
+    assert "<<PROJECT_BULLET>>" in body["changes"][1]
+    assert web.tailor.has_markers(docx.Document(str(target))), "the installed file renders"
+
+
+def test_post_api_resumes_refuses_an_unpreparable_docx_with_422_and_leaves_the_master_alone(
+        client, tmp_path, monkeypatch):
+    import docx
+    target = tmp_path / "resume" / "master.docx"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    build_tailor_template(target)
+    monkeypatch.setattr(web.tailor, "TEMPLATE_PATH", target)
+    good = target.read_bytes()
+    source = tmp_path / "nothing.docx"
+    doc = docx.Document()
+    doc.add_paragraph("Just a name")
+    doc.save(str(source))
+
+    r = _api_upload(client, source)
+
+    assert r.status_code == 422
+    assert r.json()["ok"] is False
+    assert r.json()["message"].startswith("Could not prepare this file:")
+    assert target.read_bytes() == good, "a refused upload leaves the master untouched"

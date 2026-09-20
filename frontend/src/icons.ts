@@ -34,4 +34,6 @@ export const P = {
   plus: 'M12 5v14M5 12h14',
   search: 'M11 5a6 6 0 1 0 0 12 6 6 0 0 0 0-12zM20 20l-4.5-4.5',
   listChecks: 'M4 6l1.5 1.5L8 5M4 12l1.5 1.5L8 11M4 18l1.5 1.5L8 17M11 6h9M11 12h9M11 18h9',
+  upload: 'M12 16V5M7 10l5-5 5 5M5 20h14',
+  doc: 'M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6',
 }

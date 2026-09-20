@@ -52,9 +52,9 @@
       <div class="rationale"><em>{{ v["summary"] }}</em></div>
       {% endif %}
       {% for b in v["bullets"] %}
-      <div class="rationale" title="{{ b['fact_claims'] | join('; ') }}">
+      <div class="rationale" title="{{ b['fact_claims'] | map('default', 'unknown fact', true) | join('; ') }}">
         {{ b["text"] }}
-        <i>(fact {{ b["fact_ids"] | join(", ") }}: {{ b["fact_claims"] | join("; ") }})</i>
+        <i>(fact {{ b["fact_ids"] | join(", ") }}: {{ b["fact_claims"] | map("default", "unknown fact", true) | join("; ") }})</i>
       </div>
       {% endfor %}
     </td>

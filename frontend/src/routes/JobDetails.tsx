@@ -174,7 +174,7 @@ function ResumeCard({ hub }: { hub: HubContext }) {
                       return claim == null ? (
                         <span className="fact fact--gone" key={f}><span className="mono">#{f}</span>Unknown fact</span>
                       ) : (
-                        <Link className="fact" key={f} to="/facts" title={claim}>
+                        <Link className="fact" key={f} to={`/facts?fact=${f}`} title={claim}>
                           <span className="mono">#{f}</span>{claim}
                         </Link>
                       )

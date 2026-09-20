@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { ApiError, del, errorText, post, put } from '../api'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { Icon, Spinner } from '../components/Icon'
@@ -238,11 +238,17 @@ function FactForm({ fact, onSaved, onCancel }: {
   )
 }
 
-function FactCard({ fact, onEdit, onDelete }: {
+function FactCard({ fact, onEdit, onDelete, target }: {
   fact: Fact
   onEdit: () => void
   onDelete: () => void
+  /** Arrived from a resume's fact chip: scroll here and say so briefly. */
+  target?: boolean
 }) {
+  const ref = useRef<HTMLElement>(null)
+  useEffect(() => {
+    if (target) ref.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [target])
   const [label, tone] = CONFIDENCE[fact.confidence]
   const cited = fact.cited_by.length > 0
   // aria-disabled, not disabled: a disabled button shows no tooltip, and the
@@ -250,7 +256,7 @@ function FactCard({ fact, onEdit, onDelete }: {
   const why = cited ? `Cited by ${fact.cited_by.join(', ')} — edit it instead` : undefined
 
   return (
-    <section className="card fact">
+    <section ref={ref} className={target ? 'card fact fact--target' : 'card fact'}>
       <div className="fact__body">
         <p className="fact__claim">{fact.claim}</p>
         <p className="fact__ev">{fact.evidence}</p>
@@ -287,6 +293,8 @@ function FactCard({ fact, onEdit, onDelete }: {
 
 export function Facts() {
   const { toast } = useShell()
+  const [params] = useSearchParams()
+  const target = Number(params.get('fact')) || null
   const { data, error, reload } = usePoll<FactsData>('/api/facts', 0)
   const [editing, setEditing] = useState<number | 'new' | null>(null)
   const [conf, setConf] = useState<Confidence | 'all'>('all')
@@ -317,7 +325,7 @@ export function Facts() {
 
   if (!data) {
     return (
-      <div className="page facts">
+      <div className="page facts-page">
         <div className="page-head"><h1>Facts</h1></div>
         {error ? (
           <div className="alert" role="alert">
@@ -326,7 +334,7 @@ export function Facts() {
             <button className="btn sm" onClick={reload}>Retry</button>
           </div>
         ) : (
-          <div aria-busy="true" className="facts__list">
+          <div aria-busy="true" className="facts-page__list">
             {[0, 1, 2].map((i) => <div key={i} className="skel fact-skel" />)}
           </div>
         )}
@@ -343,7 +351,7 @@ export function Facts() {
   const filtered = shown.length !== items.length
 
   return (
-    <div className="page facts">
+    <div className="page facts-page">
       <TopBarActions>
         <button className="btn pri" onClick={() => setEditing('new')}>
           <Icon d={P.plus} size={14} />Add fact
@@ -362,7 +370,7 @@ export function Facts() {
                  q={q} setQ={setQ} />
       )}
 
-      <div className="facts__list">
+      <div className="facts-page__list">
         {editing === 'new' && (
           <FactForm key="new" onSaved={saved} onCancel={() => setEditing(null)} />
         )}
@@ -385,14 +393,15 @@ export function Facts() {
           shown.map((f) => (
             editing === f.id
               ? <FactForm key={f.id} fact={f} onSaved={saved} onCancel={() => setEditing(null)} />
-              : <FactCard key={f.id} fact={f} onEdit={() => setEditing(f.id)}
+              : <FactCard key={f.id} fact={f} target={f.id === target}
+                          onEdit={() => setEditing(f.id)}
                           onDelete={() => setConfirming(f)} />
           ))
         )}
       </div>
 
       {filtered && shown.length > 0 && (
-        <p className="facts__count">
+        <p className="facts-page__count">
           Showing <span className="mono">{shown.length}</span> of{' '}
           <span className="mono">{items.length}</span>
         </p>

@@ -105,16 +105,24 @@ def resumes_context(conn: sqlite3.Connection, brief_path: Path) -> dict:
     versions = []
     for r in conn.execute(
             "SELECT r.version, datetime(r.created_at, 'localtime') AS created_at,"
-            "       r.content, j.company, j.title"
+            "       r.content, r.job_id, j.company, j.title"
             "  FROM resume r JOIN job j ON j.id = r.job_id"
             " ORDER BY r.id DESC"):
         content = json.loads(r["content"]) if r["content"] else {}
         bullets = content.get("bullets", [])
         for b in bullets:
-            b["fact_claims"] = [claims.get(fid, "unknown fact")
-                               for fid in b.get("fact_ids", [])]
-        versions.append({**dict(r), "summary": content.get("summary", ""),
-                         "bullets": bullets})
+            # None marks a citation that no longer resolves, as
+            # job_detail_context does -- one sentinel for both screens, and a
+            # fact whose claim reads "unknown fact" is not mistaken for one.
+            b["fact_claims"] = [claims.get(fid) for fid in b.get("fact_ids", [])]
+        # RS1: job_id opens the job's hub, prompt_version says which tailoring
+        # prompt wrote this. The raw content string stays out: it is the same
+        # data as summary/bullets, parsed.
+        versions.append({"version": r["version"], "created_at": r["created_at"],
+                         "job_id": r["job_id"], "company": r["company"],
+                         "title": r["title"], "summary": content.get("summary", ""),
+                         "bullets": bullets,
+                         "prompt_version": content.get("prompt_version")})
 
     return {"brief": brief, "daily_cap": brief.daily_cap,
             "today_submitted": today_submitted(conn),

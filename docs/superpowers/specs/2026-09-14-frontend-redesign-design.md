@@ -133,7 +133,7 @@ The picker sits in the composer toolbar, and what it controls depends on the cha
 | 4 | Job Details | **Approved** (Claude design canvas) | **Implemented** | JD1 |
 | 5 | Chat (Home + Job) | **Approved** (Claude design canvas) | **Implemented** | MS1 |
 | 6 | Facts | **Approved** (Claude design canvas) | **Implemented** | FC1 |
-| 7 | Resumes | **Approved** (Claude design canvas) | In progress | RS1, FC1 (links only) |
+| 7 | Resumes | **Approved** (Claude design canvas) | **Implemented** | RS1, FC1 (links only) |
 | 8 | Profile | **Approved** (Claude design canvas) | Not started | none |
 | 9 | Settings | **Approved** (Claude design canvas) | Not started | MS1 |
 | 10 | Memory | **Approved** (Claude design canvas) | Not started | MM1 |
@@ -821,6 +821,33 @@ its job. Decisions made while building it:
   - load error: an inline refusal alert with Retry
 - **Narrow width:** the master card stacks, the upload area goes full width, and rows show
   role, version and Download, with the details moved into the expansion.
+
+**Resumes shipped 2026-09-20 (Screen 8).** `routes/Resumes.tsx` at `/resumes`, off the
+`legacy()` wrapper. Decisions made while building it:
+
+- *Upload is the top-bar button opening a file picker* (the user's call), with the
+  missing-master card offering the same through its own primary. No drop zone.
+- *The file input is cleared on every attempt, not only on success* — re-picking the same
+  file after a refusal fires no `change` event otherwise, and the retry is silently lost.
+- *"Replacing the master affects future tailoring only" is always visible*, not only in
+  the post-upload panel: `changes[]` exists only in the POST response, so the artboard's
+  emerald panel is a just-uploaded state, and a rule shown for five seconds is not said
+  plainly.
+- *Fact chips deep-link to the fact* (the user's call): `/facts?fact=12` scrolls that card
+  into view and rings it briefly, and Screen 4's chips were changed to match so both
+  behave alike. The ring fades on its own, because the URL param outlives the visit.
+- *The bullet list and its fact chips moved from `Job.css` into `ui.css`, scoped under
+  `.bullets`*, and the Facts page's root class was renamed `.facts-page`. Three global
+  names — `.fact`, `.facts` — were being shared by a chip, a chip strip, a card and a page
+  root, with only stylesheet order keeping them apart; the Facts root's
+  `flex-direction: column` leaked into the chip strip and stacked the chips full width.
+  Scoping plus the rename settles it by specificity and by name, with no JSX change on the
+  approved screens.
+- *The version row is `.vrow`, not the artboard's `.row`*: `components/chat/chat.css`
+  already owns `.row` globally (the review card's field table).
+- *Not built:* a drop zone, a LEFT join, pagination or sorting, and any re-tailor or
+  delete-version action — no route exists for either, and the page says so instead
+  ("one per job, reused on Redo draft and Continue").
 
 ### 8. Profile
 

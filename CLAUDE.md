@@ -168,7 +168,13 @@ concurrent dashboard polling don't deadlock on `database is locked`.
    into it, so the page can show a citation before a delete is refused for it. `PROMPT_VERSION` must bump in the same commit
    as any prompt edit — it invalidates every stored assessment and forces a re-score,
    which is what makes a prompt change measurable against `tests/golden/`.
-4. **Tailoring** (`tailor.py`) — one resume render per job, memoized. `ensure_tailored`
+4. **Tailoring** (`tailor.py`) — one resume render per job, memoized. The Resumes page
+   (`routes/Resumes.tsx`, `context.resumes_context`) shows the master template and every
+   version, each with its job, its `prompt_version` (lifted from the content JSON, RS1)
+   and its bullets' fact citations. A citation that no longer resolves is `None` in both
+   `resumes_context` and `job_detail_context` — one sentinel, one rose "Unknown fact"
+   chip, and the chip's CSS lives in `ui.css` scoped under `.bullets` so it cannot collide
+   with the Facts page's own `.fact` card. `ensure_tailored`
    reuses the newest existing version rather than re-tailoring on every Apply click;
    `render_docx` fills a master template (`resume/master.docx`) at two literal marker
    paragraphs (`<<SUMMARY>>`, `<<PROJECT_BULLET>>`), never touching anything else in the
