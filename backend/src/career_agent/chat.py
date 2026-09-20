@@ -50,9 +50,16 @@ def _row_to_message(r) -> dict:
 
 
 def messages_after(conn, conversation_id: int, after_id: int = 0, limit: int = 200) -> list[dict]:
-    rows = conn.execute(
-        "SELECT * FROM message WHERE conversation_id = ? AND id > ? ORDER BY id LIMIT ?",
-        (conversation_id, after_id, limit)).fetchall()
+    if after_id:
+        rows = conn.execute(
+            "SELECT * FROM message WHERE conversation_id = ? AND id > ? ORDER BY id LIMIT ?",
+            (conversation_id, after_id, limit)).fetchall()
+    else:
+        # A first load wants the NEWEST window: the oldest would leave a long
+        # conversation painting old history for many 3 s polls.
+        rows = conn.execute(
+            "SELECT * FROM (SELECT * FROM message WHERE conversation_id = ?"
+            " ORDER BY id DESC LIMIT ?) ORDER BY id", (conversation_id, limit)).fetchall()
     return [_row_to_message(r) for r in rows if r["content"] != _BACKFILL_MARK]
 
 

@@ -633,7 +633,11 @@ async def home_message(conn: sqlite3.Connection, text: str, brief_path: Path, pr
                        conn_factory=None, *, runner=None, tasks: set | None = None) -> dict:
     """One Home chat message: record it, route it (claude, off the loop), and
     answer. Spend or submit intents only open an approve card; pause/resume/stop
-    act directly (cheap, reversible). Never raises."""
+    act directly (cheap, reversible). Refuses a secret exactly as job_message
+    does -- a password is never stored and never reaches the classifier
+    subprocess. Never raises."""
+    if store._SECRET_QA_RE.search(text):
+        return _refuse(422, _SECRET)
     home = chat.home_conversation(conn)
     mid = chat.post_message(conn, home, "user", text)
     try:
@@ -768,8 +772,11 @@ def _answer_home_prompt(conn, row, answer, **ctx) -> dict:
         return _refuse(409, _EXPIRED)
     if chat.answer_prompt_row(conn, row["id"], {"answer": decision}) is None:
         return _refuse(409, _CLOSED)
+    # Tagged, because the chat renders this echo as the card's badge rather
+    # than as a message bubble -- a typed marker, not a match on the wording.
     chat.post_message(conn, row["conversation_id"], "user",
-                      f"{payload.get('question', 'Request')} → {decision}")
+                      f"{payload.get('question', 'Request')} → {decision}",
+                      {"prompt_id": row["id"], "decision": decision})
     if decision == "reject":
         _home_says(conn, "Cancelled")
         return {"ok": True, "message": "Cancelled"}

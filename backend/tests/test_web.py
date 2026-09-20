@@ -2451,3 +2451,56 @@ def test_api_job_detail_points_a_merged_job_at_its_survivor(client):
     d = client.get("/api/jobs/2").json()
     assert d["merged_into"] == {"id": 1, "company": "Acme", "title": "AI Engineer"}
     assert d["row"] is None        # a merged job leaves the Applications list
+
+
+# --- MS1 (scoring half): the chat composer's model picker ------------------
+
+def test_get_settings_models_returns_the_picker_fields(client):
+    """The picker needs three fields. GET /api/settings also loads the brief
+    and the candidate profile (PII) -- weight a chat composer has no use for."""
+    r = client.get("/api/settings/models")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["scoring_model"] == "claude-sonnet-5"
+    assert d["scoring_models"] == ["claude-sonnet-5", "claude-haiku-4-5"]
+    assert d["model_labels"]["claude-haiku-4-5"]
+    assert "candidate" not in d and "brief" not in d
+
+
+def test_put_settings_models_saves_the_scoring_model(client):
+    r = client.put("/api/settings/models", json={"scoring_model": "claude-haiku-4-5"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "scoring_model": "claude-haiku-4-5"}
+    conn = db.connect(web.DB_PATH)
+    assert store.get_settings(conn)["scoring_model"] == "claude-haiku-4-5"
+
+
+def test_put_settings_models_leaves_max_score_per_run_alone(client):
+    """The whole reason this route exists: PUT /api/settings demands
+    max_score_per_run and every brief field, which a picker doesn't have."""
+    conn = db.connect(web.DB_PATH)
+    store.save_settings(conn, "claude-sonnet-5", 40)
+
+    r = client.put("/api/settings/models", json={"scoring_model": "claude-haiku-4-5"})
+
+    assert r.status_code == 200
+    saved = store.get_settings(db.connect(web.DB_PATH))
+    assert (saved["scoring_model"], saved["max_score_per_run"]) == ("claude-haiku-4-5", 40)
+
+
+def test_put_settings_models_rejects_an_unknown_model(client):
+    r = client.put("/api/settings/models", json={"scoring_model": "claude-retired-3"})
+    assert r.status_code == 422
+    assert r.json()["ok"] is False
+    conn = db.connect(web.DB_PATH)
+    assert store.get_settings(conn)["scoring_model"] == "claude-sonnet-5"
+
+
+def test_put_settings_models_with_no_fields_is_a_no_op(client):
+    """Screen 6 adds apply_model to this same route, so a body naming neither
+    model must keep what is stored rather than writing a blank."""
+    r = client.put("/api/settings/models", json={})
+    assert r.status_code == 200
+    assert r.json()["scoring_model"] == "claude-sonnet-5"
+    conn = db.connect(web.DB_PATH)
+    assert store.get_settings(conn)["scoring_model"] == "claude-sonnet-5"

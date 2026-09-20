@@ -1054,3 +1054,31 @@ async def test_skip_supersedes_an_interrupted_session(db_path, runs):
     _resumable(c, 1)
     assert (await actions.queue_skip(c, 1, "brief", "profile"))["ok"]
     assert checkpoint.get(c, 1)["status"] == "done"
+
+
+async def test_a_secret_shaped_home_message_is_refused_and_never_stored(client, conn, monkeypatch):
+    """The job chat already refuses a secret (a password never goes through
+    chat). Home stored it in plaintext and handed it to the classifier
+    subprocess, so it gets the same guard and the same 422."""
+    monkeypatch.setattr(intent_mod, "_default_runner",
+                        lambda *a: pytest.fail("routed a secret"))
+    home = chat.home_conversation(conn)
+
+    r = client.post(f"/api/chat/{home}/messages", json={"text": "my portal password is hunter2"})
+
+    assert r.status_code == 422
+    assert r.json()["message"].startswith("Secrets are never typed into chat")
+    assert chat.messages_after(conn, home) == []
+
+
+async def test_answering_a_home_card_tags_its_echo_with_the_decision(conn, runs, tmp_path,
+                                                                     fake_apply):
+    """The echo is rendered as the card's badge, not as a message bubble, so
+    the client needs a typed marker rather than a match on the wording."""
+    pid = _open_home(conn, question="Run discovery now?")
+
+    _answer(conn, pid, "reject", tmp_path)
+
+    echo = [m for m in _home(conn) if m["role"] == "user"][-1]
+    assert echo["content"] == "Run discovery now? → reject"
+    assert echo["payload"] == {"prompt_id": pid, "decision": "reject"}

@@ -26,4 +26,6 @@ export const P = {
   arrowRight: 'M5 12h14M13 6l6 6-6 6',
   undo: 'M4 12a8 8 0 1 0 3-6.2M4 4v4h4',
   download: 'M12 4v11M7 10l5 5 5-5M5 20h14',
+  bolt: 'M13 3L5 13h6l-1 8 8-10h-6l1-8z',
+  shieldCheck: 'M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3zM9 12l2 2 4-4',
 }

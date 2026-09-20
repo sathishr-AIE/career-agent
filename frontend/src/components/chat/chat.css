@@ -1,0 +1,303 @@
+/* The chat card family and transcript, shared by Home (Screen 5) and the
+   job chat (Screen 6). Values from ChatHome.dc.html and ChatCards.dc.html;
+   the primitives (.card, .btn, .b, .chip, .menu, .alert) stay in ui.css.
+
+   The artboards' generic names (.user, .agent, .sys) are scoped under
+   .tscript on purpose: routes/Chat.css is still a global stylesheet until
+   Screen 6 deletes it, and it owns .msg/.msgs/.composer/.conv. */
+
+.tscript {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding-bottom: 24px;
+}
+
+.tscript__row {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.tscript__end {
+  height: 1px;
+}
+
+/* -- messages -- */
+
+.tscript .user {
+  align-self: flex-end;
+  max-width: 520px;
+  padding: 10px 14px;
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-sm) var(--radius-lg);
+  background: #eaedff;
+  color: #1e1b4b;
+  font-size: 14px;
+  line-height: 20px;
+  white-space: pre-wrap;
+}
+
+.tscript .user--pending {
+  opacity: 0.6;
+}
+
+.tscript .agent {
+  display: flex;
+  gap: 12px;
+  max-width: 640px;
+}
+
+.avatar {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: var(--radius);
+  background: #eef2ff;
+  border: 1px solid #e0e7ff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary);
+}
+
+.agent__col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.agenttext {
+  margin: 0;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.agenttext--faint {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-3);
+}
+
+.agent__open {
+  align-self: flex-start;
+}
+
+.tscript .sys {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.rule {
+  flex-grow: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+/* -- cards -- */
+
+.ccard {
+  flex-grow: 1;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.ccard__head {
+  padding: 8px 14px;
+  border-bottom: 1px solid;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* The indigo "go-ahead" strip. Screen 6 adds an amber --ask twin. */
+.ccard__head--go {
+  background: #eef2ff;
+  border-bottom-color: #e0e7ff;
+  color: var(--primary);
+}
+
+.ccard__body {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ccard__q {
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+}
+
+.ccard__sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text-3);
+}
+
+.ccard__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ccard__hint {
+  font-size: 12px;
+  color: var(--text-5);
+}
+
+.ccard--closed {
+  margin-left: 40px;              /* sits in the avatar gutter */
+  max-width: 640px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #fbfbfe;
+  color: var(--text-3);
+}
+
+.ccard__kind {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-3);
+}
+
+.ccard__closedq {
+  flex-grow: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: #334155;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* -- composer -- */
+
+.cbar {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface);
+}
+
+.cbar--invalid {
+  border-color: #fecdd3;
+}
+
+.cbar__text {
+  min-height: 44px;
+  max-height: 160px;
+  padding: 4px 2px;
+  border: none;
+  outline: none;
+  resize: none;
+  font: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--text);
+  background: none;
+}
+
+.cbar__text::placeholder {
+  color: var(--text-5);
+}
+
+.cbar__helper {
+  font-size: 12px;
+  color: var(--text-3);
+  padding: 0 2px;
+}
+
+.cbar__tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.cbar__send {
+  width: 32px;
+  padding: 0;
+  justify-content: center;
+}
+
+/* -- model picker -- */
+
+.chip--pick {
+  height: 28px;
+  cursor: pointer;
+}
+
+.chip--pick:hover:not(:disabled) {
+  border-color: var(--line-strong);
+}
+
+.chip--locked {
+  height: 28px;
+  color: var(--text-3);
+}
+
+.chip__sep {
+  color: var(--line-strong);
+}
+
+.chip--pick .mono,
+.chip--locked .mono {
+  font-size: 12px;
+  color: #0f172a;
+}
+
+/* The composer sits at the bottom of the page, so its menu opens upward. */
+.menu--up {
+  top: auto;
+  bottom: calc(100% + 4px);
+  left: 0;
+  right: auto;
+}
+
+.menu__tick {
+  width: 14px;
+  display: inline-flex;
+  color: var(--primary);
+}
+
+/* -- new messages pill -- */
+
+.newmsgs {
+  position: sticky;
+  bottom: 8px;
+  align-self: center;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12);
+}
+
+/* -- loading -- */
+
+.skel--user {
+  align-self: flex-end;
+  width: 40%;
+  height: 40px;
+  border-radius: var(--radius-lg);
+}
+
+.skel--agent {
+  width: 60%;
+  height: 56px;
+  margin-left: 40px;
+  border-radius: var(--radius);
+}

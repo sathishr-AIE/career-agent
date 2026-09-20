@@ -131,7 +131,7 @@ The picker sits in the composer toolbar, and what it controls depends on the cha
 | 2 | Dashboard | **Approved** (Claude design canvas) | **Implemented** | EV1, OC1 |
 | 3 | Applications | **Approved** (Claude design canvas) | **Implemented** | AP1 |
 | 4 | Job Details | **Approved** (Claude design canvas) | **Implemented** | JD1 |
-| 5 | Chat (Home + Job) | **Approved** (Claude design canvas) | In progress (Home) | MS1 |
+| 5 | Chat (Home + Job) | **Approved** (Claude design canvas) | Home **implemented**; Job in progress | MS1 |
 | 6 | Facts | **Approved** (Claude design canvas) | Not started | FC1 |
 | 7 | Resumes | **Approved** (Claude design canvas) | Not started | RS1, FC1 (links only) |
 | 8 | Profile | **Approved** (Claude design canvas) | Not started | none |
@@ -185,7 +185,15 @@ in the working tree**:
 
 These are no longer design dependencies. The remaining new slices are:
 
-- **MS1, model settings.** See "Model selection in chat" above.
+- **MS1, model settings.** See "Model selection in chat" above. *Half shipped
+  2026-09-20 with Screen 5, the scoring half only: `GET`/`PUT /api/settings/models`
+  ({`scoring_model`, `scoring_models`, `model_labels`}; the PUT read-modify-writes
+  through `store.save_settings`, so it keeps `max_score_per_run` and validation stays
+  in one place, 422 on an unknown model). A separate GET rather than the existing
+  `GET /api/settings`, which also loads the brief and the candidate profile (PII) a
+  chat composer has no use for. The `apply_model` column, `APPLY_MODELS`, the
+  `ats.submit`/`agent.run_session` wiring and the run's model join the same route at
+  Screen 6, the first screen that renders them.*
 - **EV1, global event feed.** *Shipped 2026-09-18 as `events` inside `GET /api/overview`
   (`overview.recent_events`, 20 rows, `pipeline_*` excluded, plus a `recent` flag for the
   last 24 h), not as a separate route: the Dashboard already polls overview.* Originally:
@@ -610,6 +618,36 @@ Dashboard's Review and Open links land on the right rows.
   - Home's Conversations rail becomes a "Conversations" button that opens a sheet
   - cards go full width
   - the CONFIRM table becomes stacked label/value rows
+
+**Home shipped 2026-09-20 (Screen 5).** `routes/Home.tsx` at `/`, with the card family,
+transcript, composer and picker in `components/chat/` for Screen 6 to reuse. Decisions
+made while building it:
+
+- *The transcript scrolls in its own box*, with the page itself fixed to the viewport.
+  A sticky composer at page level looked right until the transcript got long: sticky
+  keeps content flowing **under** the stuck element, so the newest messages hid behind
+  the composer. The grid row is pinned with `grid-template-rows: minmax(0, 1fr)`, or a
+  long Conversations list sizes the row and pushes the composer past the fold.
+- *The rail's amber dot is derived* from the shell's `/api/run/status` poll
+  (`open_prompt && conversation_id`), not a new field on `/api/chat/conversations`: one
+  job holds the open card at a time. If that stops holding, add an
+  `EXISTS(... status='open')` flag to `chat.list_conversations`.
+- *A closed card's row does not expand.* Only `open_prompt` carries a payload, so
+  expanding would need another route; Home's row already shows the question and the
+  decision. Revisit at Screen 6, where ASK and CONFIRM cards have more to re-read.
+- *The answer echo is tagged, not parsed.* `actions._answer_home_prompt` now writes
+  `{prompt_id, decision}` on its `user` echo, so the client renders it as the card's
+  badge (Approved / Not now) instead of matching on the wording.
+- *A secret typed into Home is refused* (422) exactly as a job message is — the guard
+  was job-only, so Home stored passwords in plaintext and handed them to the classifier
+  subprocess. The Home branch of `POST /api/chat/{cid}/messages` also maps its result to
+  a status code now, as the job branch already did.
+- *A first load returns the newest window.* `chat.messages_after(after_id=0)` returned
+  the oldest 200, so a conversation past 200 messages painted old history until several
+  3 s polls walked the cursor forward.
+- *The model picker owns its popover* rather than growing `Menu.tsx` a custom trigger
+  and an open-upward mode for one caller; it reuses the `.menu` CSS with `.menu--up`.
+- *The empty state is spec-only* (never drawn): the welcome line plus the four chips.
 
 ### 6. Facts
 

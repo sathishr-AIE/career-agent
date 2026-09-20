@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { errorText, get, post, type ChatMessage, type Conversation, type OpenPrompt } from '../api'
-import { Composer } from '../components/chat/Composer'
+import { LegacyComposer } from '../components/chat/LegacyComposer'
 import { Drawer, PANEL_KEYS, panelTitle } from '../components/chat/Drawer'
 import { MessageList } from '../components/chat/MessageList'
 import './Chat.css'
@@ -161,7 +161,7 @@ export function Chat() {
             {resumeError && <div className="qcard__error" role="alert">{resumeError}</div>}
           </div>
         )}
-        <Composer onSend={send} disabled={!cid}
+        <LegacyComposer onSend={send} disabled={!cid}
                  placeholder={jobId ? 'Add a note for the agent' : 'Message the agent'} />
       </main>
       <nav className="chat__rail" aria-label="Panels">

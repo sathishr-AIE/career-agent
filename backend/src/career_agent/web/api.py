@@ -18,7 +18,9 @@ from pathlib import Path
 from fastapi import APIRouter, Body, File, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from career_agent import store
 from career_agent.apply import agent as agent_mod
+from career_agent.config import MODEL_LABELS, SCORING_MODELS
 from career_agent.web import actions, context
 
 router = APIRouter(prefix="/api")
@@ -92,6 +94,33 @@ async def api_upload_resume(file: UploadFile = File(...)):
 def api_settings():
     m = _app()
     return context.settings_context(m._conn(), m.BRIEF_PATH, m.CANDIDATE_PROFILE_PATH)
+
+
+@router.get("/settings/models")
+def api_settings_models():
+    """MS1: just the chat composer's picker fields. GET /api/settings also
+    loads the brief and the candidate profile (PII), which a picker has no
+    use for."""
+    current = store.get_settings(_app()._conn())
+    return {"scoring_model": current["scoring_model"],
+            "scoring_models": list(SCORING_MODELS), "model_labels": MODEL_LABELS}
+
+
+@router.put("/settings/models")
+def api_settings_models_save(body: dict = Body(...)):
+    """MS1: a partial update the chat picker can use -- PUT /api/settings
+    requires max_score_per_run and, with a brief present, every brief field.
+    store.save_settings is still the one validator. Screen 6 adds
+    apply_model here."""
+    m = _app()
+    conn = m._conn()
+    current = store.get_settings(conn)
+    model = body.get("scoring_model") or current["scoring_model"]
+    try:
+        store.save_settings(conn, model, current["max_score_per_run"])
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"ok": False, "message": str(exc)})
+    return {"ok": True, "scoring_model": model}
 
 
 _SETTINGS_DEFAULTS = {

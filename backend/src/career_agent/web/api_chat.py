@@ -78,8 +78,10 @@ async def api_post_message(cid: int, text: str = Body(..., embed=True)):
     if not stripped:
         raise HTTPException(status_code=422, detail="empty message")
     if conv["kind"] == "home":
-        return await actions.home_message(conn, stripped, m.BRIEF_PATH, m.CANDIDATE_PROFILE_PATH,
-                                          m._chat_conn, tasks=m._background_tasks)
+        result = await actions.home_message(conn, stripped, m.BRIEF_PATH,
+                                            m.CANDIDATE_PROFILE_PATH, m._chat_conn,
+                                            tasks=m._background_tasks)
+        return JSONResponse(status_code=200 if result["ok"] else result["code"], content=result)
     result = actions.job_message(conn, cid, conv["job_id"], stripped)
     return JSONResponse(status_code=200 if result["ok"] else result["code"], content=result)
 

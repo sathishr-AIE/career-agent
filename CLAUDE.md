@@ -99,18 +99,32 @@ top-level import back would be circular. This also keeps those path constants a 
 source of truth: `tests/test_web.py` monkeypatches them as `web.DB_PATH` etc., and the
 routers pick up the same patched value.
 
-Chat is the primary UI (`frontend/src/routes/Chat.tsx` at `/` and `/chat/:id`, polling
-every 3 s; `components/chat/` holds the message list, composer, `PromptCard`,
-`ConfirmCard` and `Drawer`). `chat.py` owns the `conversation` (one `home`, one per job),
+Chat is the primary UI, polling every 3 s. Home is the redesigned
+`frontend/src/routes/Home.tsx` at `/`; `/chat/:id` still renders the pre-redesign
+`routes/Chat.tsx` until Screen 6 moves the job chat into the job hub's Chat tab. The
+rebuilt pieces in `components/chat/` are shared by both chat screens —
+`useTranscript` (the cursor poll, keyed by conversation), `Transcript`, `ApproveCard`,
+`Composer`, `ModelPicker` and `chat.css` — beside the pre-redesign `MessageList`,
+`LegacyComposer`, `PromptCard`, `ConfirmCard` and `Drawer`, which only `Chat.tsx` uses.
+`chat.css` must not define `.msg*`, `.composer` or `.conv`: `routes/Chat.css` is global
+and owns those names until Screen 6 deletes it. The composer's model picker writes
+through `GET`/`PUT /api/settings/models` (MS1's scoring half), a partial writer that
+keeps `max_score_per_run` — `PUT /api/settings` demands every brief field, so a picker
+can't use it. `chat.py` owns the `conversation` (one `home`, one per job),
 `message` and `agent_prompt` tables; `web/api_chat.py` serves them. A Home message goes
-to `actions.home_message`, which classifies it with `web/intent.py`'s `route` (a tool-less
+to `actions.home_message`, which refuses a secret-shaped message (`store._SECRET_QA_RE`)
+before storing anything, exactly as `job_message` does, then classifies it with
+`web/intent.py`'s `route` (a tool-less
 one-shot `claude -p --model haiku --json-schema`, run off the loop). Help, queue and
 status answer at once. Pause, resume and stop act directly, but resume only from
 `paused` and pause only from `running`. `find_jobs` and `apply_to` spend credits, so they
 only open an `approve` card (`origin: home`, dispatched through the `HOME_ACTIONS`
 allowlist, expiring after `chat.HOME_PROMPT_TTL` or when a newer card supersedes it).
 `POST /api/chat/prompts/{id}/answer` splits by card. A Home card is answered on the event
-loop, because an approval starts background tasks. Every other answer runs in
+loop, because an approval starts background tasks; its `user` echo carries
+`{prompt_id, decision}`, which is how the chat renders it as the card's badge rather
+than as another message. `chat.messages_after` returns the newest window on a first
+load (`after_id` 0) and appends past the cursor after that. Every other answer runs in
 `run_in_threadpool`, because a password fill uses Playwright's sync API, which refuses to
 run inside a running event loop (`secret_fill._require_no_running_loop` fails loudly if
 that regresses). The pre-chat pages, plus Memory, Logins and Profile, open as drawer

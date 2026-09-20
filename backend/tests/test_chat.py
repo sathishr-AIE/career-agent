@@ -81,3 +81,27 @@ def test_list_conversations_has_last_message_and_order(conn):
     rows = chat.list_conversations(conn)
     assert rows[0]["id"] == cid and rows[0]["last_message"] == "latest"
     assert any(r["id"] == home and r["kind"] == "home" for r in rows)
+
+
+def test_first_load_returns_the_newest_messages(conn):
+    """after_id 0 is a first load. Returning the OLDEST window left a long
+    conversation painting ancient history until several 3 s polls walked the
+    cursor forward."""
+    cid = chat.home_conversation(conn)
+    for n in range(1, 6):
+        chat.post_message(conn, cid, "user", f"m{n}")
+
+    got = chat.messages_after(conn, cid, 0, limit=2)
+
+    assert [m["content"] for m in got] == ["m4", "m5"]
+
+
+def test_a_cursor_still_walks_forward_from_the_oldest(conn):
+    cid = chat.home_conversation(conn)
+    first = chat.post_message(conn, cid, "user", "m1")
+    for n in range(2, 5):
+        chat.post_message(conn, cid, "user", f"m{n}")
+
+    got = chat.messages_after(conn, cid, first, limit=2)
+
+    assert [m["content"] for m in got] == ["m2", "m3"]

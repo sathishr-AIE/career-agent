@@ -42,3 +42,14 @@ export function stamp(utc: string): string {
     ? clock(utc)
     : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock(utc)}`
 }
+
+/** Transcript day divider: "Today", "Yesterday", or "12 Sep". */
+export function dayLabel(utc: string): string {
+  const d = parseUtc(utc)
+  const midnight = new Date()
+  midnight.setHours(0, 0, 0, 0)
+  const days = Math.floor((midnight.getTime() - d.getTime()) / 86400000) + 1
+  if (days <= 0) return 'Today'
+  if (days === 1) return 'Yesterday'
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
