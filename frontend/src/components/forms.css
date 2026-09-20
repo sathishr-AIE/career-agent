@@ -2,6 +2,44 @@
    section nav, fields, the sticky save bar. Values from the approved Profile
    and Settings artboards; base primitives (.card, .btn, .alert) stay in ui.css. */
 
+/* -- the page -- */
+
+.form-page.page {
+  gap: 20px;
+}
+
+/* The page scrolls clear of the save bar. */
+.form-page {
+  padding-bottom: 64px;
+}
+
+.form-page .ch h2 {
+  margin: 0;
+}
+
+.form-page .alert {
+  align-items: center;
+  padding: 10px 14px;
+}
+
+.form-page__retry {
+  margin-left: auto;
+}
+
+.form-skel__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 10px;
+}
+
+.form-skel__card {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 /* -- layout: section nav beside the form -- */
 
 .form-layout {
@@ -134,6 +172,10 @@
   font-size: 12px;
 }
 
+.in.short {
+  width: 120px;
+}
+
 textarea.in {
   height: auto;
   min-height: 64px;
@@ -229,9 +271,309 @@ select.in {
   gap: 8px;
 }
 
-/* The page scrolls clear of the bar. */
-.form-page {
-  padding-bottom: 64px;
+/* -- Settings' controls (Settings.dc.html): tags, switch, stepper, slider, radio cards -- */
+
+.tags {
+  height: auto;
+  min-height: 36px;
+  padding: 5px 6px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  cursor: text;
+}
+
+.tags:focus-within {
+  border-color: var(--link-hover);
+  box-shadow: var(--ring);
+}
+
+.tags input {
+  flex: 1;
+  min-width: 96px;
+  height: 24px;
+  border: none;
+  outline: none;
+  background: transparent;
+  padding: 0 4px;
+  font-size: 13px;
+}
+
+.tags input::placeholder {
+  color: var(--text-5);
+}
+
+.tag {
+  height: 24px;
+  padding: 0 4px 0 8px;
+  border-radius: var(--radius-sm);
+  background: var(--sl-bg);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  color: #334155;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.tag button {
+  border: none;
+  background: none;
+  padding: 0;
+  display: flex;
+  color: var(--text-5);
+}
+
+.tag button:hover {
+  color: var(--text);
+}
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 18px;
+  color: #334155;
+  cursor: pointer;
+}
+
+.switch input {
+  appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 32px;
+  height: 18px;
+  margin: 0;
+  border-radius: 9999px;
+  background: var(--line-strong);
+  cursor: pointer;
+  transition: background 150ms ease-out;
+}
+
+.switch input::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: #ffffff;
+  transition: transform 150ms ease-out;
+}
+
+.switch input:checked {
+  background: var(--primary);
+}
+
+.switch input:checked::before {
+  transform: translateX(14px);
+}
+
+.num-stepper {
+  width: 140px;
+  height: 36px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  display: flex;
+  overflow: hidden;
+}
+
+.num-stepper:focus-within {
+  border-color: var(--link-hover);
+  box-shadow: var(--ring);
+}
+
+.num-stepper.bad {
+  border-color: var(--ro-dot);
+  box-shadow: 0 0 0 3px rgba(225, 29, 72, 0.12);
+}
+
+.num-stepper button {
+  width: 36px;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--sl-fg);
+  font-size: 15px;
+}
+
+.num-stepper button:first-child {
+  border-right: 1px solid var(--line);
+}
+
+.num-stepper button:last-child {
+  border-left: 1px solid var(--line);
+}
+
+.num-stepper button:hover {
+  background: var(--hover);
+}
+
+.num-stepper input {
+  min-width: 0;
+  flex: 1;
+  border: none;
+  outline: none;
+  text-align: center;
+  font-size: 13px;
+  background: transparent;
+}
+
+/* Native spin buttons would duplicate the stepper's and crowd the mono inputs. */
+.num-stepper input::-webkit-inner-spin-button,
+.slider input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.num-stepper input,
+.slider input[type='number'] {
+  -moz-appearance: textfield;
+}
+
+.slider {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.slider input[type='number'] {
+  width: 64px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.slider input[type='range'] {
+  flex: 1;
+  min-width: 0;
+  height: 18px;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.slider input[type='range']::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 9999px;
+  background: linear-gradient(to right, var(--sl-fg) var(--pct), var(--line) var(--pct));
+}
+
+.slider input[type='range']::-moz-range-track {
+  height: 6px;
+  border-radius: 9999px;
+  background: linear-gradient(to right, var(--sl-fg) var(--pct), var(--line) var(--pct));
+}
+
+.slider input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -6px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: 2px solid var(--primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+.slider input[type='range']::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: 2px solid var(--primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+.slider input[type='range']:focus-visible {
+  outline: none;
+}
+
+.slider input[type='range']:focus-visible::-webkit-slider-thumb {
+  box-shadow: var(--ring);
+}
+
+fieldset.radio-cards {
+  margin: 0;
+  padding: 0;
+  border: none;
+  min-width: 0;
+}
+
+fieldset.radio-cards legend {
+  padding: 0;
+  margin-bottom: 6px;
+}
+
+.radio-cards__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.radio-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.radio-card.on {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary) inset;
+  background: #fbfbff;
+}
+
+.radio-card input {
+  appearance: none;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  border-radius: 9999px;
+  border: 1.5px solid var(--line-strong);
+  cursor: pointer;
+}
+
+.radio-card input:checked {
+  border: 5px solid var(--primary);
+}
+
+.radio-card input:focus-visible {
+  outline: 2px solid var(--link-hover);
+  outline-offset: 2px;
+}
+
+.radio-card__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.radio-card__label {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.radio-card.on .radio-card__label {
+  font-weight: 600;
+}
+
+.radio-card__value {
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-3);
 }
 
 @media (max-width: 1024px) {
@@ -267,6 +609,12 @@ select.in {
   }
   .span2 {
     grid-column: auto;
+  }
+  .radio-cards__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .form-skel__nav {
+    display: none;
   }
   .save-bar {
     left: 0;

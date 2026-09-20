@@ -42,7 +42,7 @@ createRoot(document.getElementById('root')!).render(
           <Route path="memory" element={legacy(<Memory />)} />
           <Route path="logins" element={legacy(<Logins />)} />
           <Route path="profile" element={<Profile />} />
-          <Route path="settings" element={legacy(<Settings />)} />
+          <Route path="settings" element={<Settings />} />
         </Route>
       </Routes>
     </DataRouter>

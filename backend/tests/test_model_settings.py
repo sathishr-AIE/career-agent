@@ -103,3 +103,18 @@ def test_run_status_reports_each_live_sessions_model(conn, monkeypatch):
     run = SimpleNamespace(cmd=["claude", "-p", "--model", "claude-opus-5", "--verbose"])
     monkeypatch.setitem(agent_mod.RUNS, 7, run)
     assert context.run_status_context(conn)["live_runs"] == [{"job_id": 7, "model": "claude-opus-5"}]
+
+
+def test_full_settings_save_explains_empty_and_bad_fields_plainly(client, conn):
+    """The Settings page shows these under each field and in its error summary."""
+    r = client.put("/api/settings", json=_settings_form(target_titles=" , ", daily_cap="",
+                                                        staleness_days="soon"))
+    assert r.status_code == 422
+    errors = r.json()["errors"]
+    assert errors["daily_cap"] == "Required"
+    assert errors["staleness_days"] == "Must be a whole number"
+    r = client.put("/api/settings", json=_settings_form(max_score_per_run=-1))
+    assert r.json()["errors"] == {"max_score_per_run": "Can't be negative"}
+    # the brief isn't validated until its numbers parse; fix them and the list error shows
+    r = client.put("/api/settings", json=_settings_form(target_titles=" , "))
+    assert r.json()["errors"] == {"target_titles": "Add at least one"}

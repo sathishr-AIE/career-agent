@@ -1,10 +1,6 @@
 /* The Profile page: values from the approved Profile artboard (Profile.dc.html).
    The form-page kit (section nav, fields, save bar) is components/forms.css. */
 
-.profile.page {
-  gap: 20px;
-}
-
 .profile .page-head p {
   margin-top: 6px;
   display: flex;
@@ -19,19 +15,6 @@
 
 .profile .page-head .mono {
   font-size: 12px;
-}
-
-.profile .ch h2 {
-  margin: 0;
-}
-
-.profile .alert {
-  align-items: center;
-  padding: 10px 14px;
-}
-
-.profile__retry {
-  margin-left: auto;
 }
 
 .btn.sm {
@@ -146,26 +129,4 @@
 
 .entry .ib--danger {
   color: var(--ro-fg);
-}
-
-/* -- loading -- */
-
-.profile-skel__nav {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  padding: 10px;
-}
-
-.profile-skel__card {
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-@media (max-width: 720px) {
-  .profile-skel__nav {
-    display: none;
-  }
 }

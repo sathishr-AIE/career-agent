@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiError, errorText, get, put } from '../api'
 import {
-  ErrorSummary, Field, SaveBar, SectionNav, TextInput, inCls, useLeaveGuard,
+  ErrorSummary, Field, FormSkeleton, LoadError, SaveBar, SectionNav, TextInput, inCls, useLeaveGuard,
   type NavSection, type SummaryItem,
 } from '../components/FormPage'
 import { useShell } from '../components/shell'
@@ -239,26 +239,6 @@ function Summary({ title, meta, when }: { title: string; meta: string; when: str
   )
 }
 
-function Skeleton() {
-  return (
-    <div className="page profile" aria-busy="true">
-      <div className="page-head"><h1>Profile</h1></div>
-      <div className="form-layout">
-        <div className="profile-skel__nav">
-          {[70, 55, 60, 75, 65].map((w) => <span className="skel" key={w} style={{ width: `${w}%` }} />)}
-        </div>
-        <div className="form-sections">
-          {[0, 1, 2].map((i) => (
-            <div className="card profile-skel__card" key={i}>
-              {[35, 90, 90, 60].map((w, j) => <span className="skel" key={j} style={{ width: `${w}%` }} />)}
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
-
 /** The candidate profile (approved Screen 9): the single source of the details
  * the apply agent types into forms. PUT sends the whole profile; the server
  * validates everything before writing anything. */
@@ -304,17 +284,9 @@ export function Profile() {
   }, [errors])
 
   if (!form) {
-    if (!loadError) return <Skeleton />
-    return (
-      <div className="page profile">
-        <div className="page-head"><h1>Profile</h1></div>
-        <div className="alert" role="alert">
-          <Icon d={I.info} size={16} />
-          <span><b>Can't load your profile:</b> {loadError}</span>
-          <button type="button" className="btn profile__retry" onClick={load}>Retry</button>
-        </div>
-      </div>
-    )
+    return loadError
+      ? <LoadError title="Profile" what="your profile" error={loadError} onRetry={load} />
+      : <FormSkeleton title="Profile" />
   }
 
   const f = form

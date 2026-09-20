@@ -3,7 +3,6 @@ import { Facts } from '../../routes/Facts'
 import { Logins } from '../../routes/Logins'
 import { Memory } from '../../routes/Memory'
 import { Resumes } from '../../routes/Resumes'
-import { Settings } from '../../routes/Settings'
 
 /** The old pages, unchanged, in a right-side panel. They still own their
  * own routes -- this only gives them a second home next to the chat. */
@@ -12,7 +11,6 @@ const PANELS: Record<string, { title: string; el: () => ReactNode }> = {
   facts: { title: 'Facts', el: () => <Facts /> },
   memory: { title: 'Memory', el: () => <Memory /> },
   logins: { title: 'Logins', el: () => <Logins /> },
-  settings: { title: 'Settings', el: () => <Settings /> },
 }
 
 export const PANEL_KEYS = Object.keys(PANELS)
