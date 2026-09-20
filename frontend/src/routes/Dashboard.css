@@ -682,3 +682,12 @@
     border-top: 1px solid var(--line-soft);
   }
 }
+
+/* A discovery's title opens the job hub. */
+.row-link {
+  color: inherit;
+}
+
+.row-link:hover {
+  color: var(--link-hover);
+}

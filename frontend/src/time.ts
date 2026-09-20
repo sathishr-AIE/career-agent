@@ -26,3 +26,19 @@ export function ago(utc: string): string {
   if (s < 86400) return `${Math.floor(s / 3600)}h`
   return `${Math.floor(s / 86400)}d`
 }
+
+const pad = (n: number) => String(n).padStart(2, '0')
+
+/** Local "YYYY-MM-DD HH:MM". */
+export function dateTime(utc: string): string {
+  const d = parseUtc(utc)
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock(utc)}`
+}
+
+/** Local "HH:MM" today, "MM-DD HH:MM" otherwise (timeline rows). */
+export function stamp(utc: string): string {
+  const d = parseUtc(utc)
+  return d.toDateString() === new Date().toDateString()
+    ? clock(utc)
+    : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock(utc)}`
+}

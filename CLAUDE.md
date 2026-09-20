@@ -85,6 +85,13 @@ bar) and poll with `components/usePoll.ts`.
 answer for 5 minutes (`SCHEDULED_TTL_S`). Skip and Dismiss set `job.dismissed_at`, which
 `worker.QUEUE_WHERE` excludes; `POST /api/queue/{id}/restore` and a retry clear it.
 
+The job hub lives at `/jobs/:id`: `routes/Job.tsx` is the layout (JD1 data from
+`GET /api/jobs/{id}`, the header and the tabs), with `routes/JobDetails.tsx` as its index
+route. A page names itself in the breadcrumb with `useCrumb` (`components/shell.ts`). The
+job-status rules live once, in `src/jobState.ts` (`stateOf`), `components/useJobActions.ts`
+and `components/JobParts.tsx`, shared by Applications and the hub so both always show the
+same status.
+
 The API routers reach shared state (`DB_PATH`, `BRIEF_PATH`, `_conn()`,
 `_background_tasks`) through a deferred, call-time import of `app.py` (their `_app()`
 helper) rather than a top-level one — `app.py` imports the routers to mount them, so a

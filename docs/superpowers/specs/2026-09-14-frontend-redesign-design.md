@@ -130,8 +130,8 @@ The picker sits in the composer toolbar, and what it controls depends on the cha
 | 1 | Application Shell | **Approved** | **Implemented** | OC1, `/api/pipeline/status` |
 | 2 | Dashboard | **Approved** (Claude design canvas) | **Implemented** | EV1, OC1 |
 | 3 | Applications | **Approved** (Claude design canvas) | **Implemented** | AP1 |
-| 4 | Job Details | **Approved** (Claude design canvas) | In progress | JD1 |
-| 5 | Chat (Home + Job) | **Approved** (Claude design canvas) | Not started | MS1 |
+| 4 | Job Details | **Approved** (Claude design canvas) | **Implemented** | JD1 |
+| 5 | Chat (Home + Job) | **Approved** (Claude design canvas) | In progress (Home) | MS1 |
 | 6 | Facts | **Approved** (Claude design canvas) | Not started | FC1 |
 | 7 | Resumes | **Approved** (Claude design canvas) | Not started | RS1, FC1 (links only) |
 | 8 | Profile | **Approved** (Claude design canvas) | Not started | none |
@@ -192,7 +192,11 @@ These are no longer design dependencies. The remaining new slices are:
   `GET /api/events?limit=` returns recent `event` rows, joined
   to job company and title, newest first, for the Dashboard. Read-only. Per-job events
   come from JD1.
-- **JD1, job detail.** `GET /api/jobs/{job_id}` is read-only and returns, in one payload:
+- **JD1, job detail.** *Shipped 2026-09-19 (`context.job_detail_context`). As built, it also
+  returns `row`, the job's own Applications row (`LIST_SQL`), so the hub derives its status
+  with the same rules as the Applications page; and it never creates the job's conversation
+  (a plain lookup, unlike `chat.conversation_for_job`).* `GET /api/jobs/{job_id}` is
+  read-only and returns, in one payload:
   - the `job` row: company, title, location, `is_remote`, `comp_min`/`comp_max`,
     `posted_at`, `url`, `source`, `description`, `priority`, `discovered_at`
   - every `assessment` row, newest first: stage, verdict, rationale, the five dimensions,
@@ -405,6 +409,17 @@ Dashboard's Review and Open links land on the right rows.
   score and status badges, and the primary action. The run strip stats scroll sideways.
 
 ### 4. Job Details (job hub, Details tab)
+
+*Built 2026-09-19 with these calls:*
+- *Until Screen 6, the Chat tab opens today's `/chat/{conversation_id}` page, and so do
+  Apply, Redo draft, Continue and Track anyway.*
+- *The header shows one primary button; the "other actions" live in its ⋯ menu, as on
+  the artboard.*
+- *The description clamps at the artboard's 120px rather than "about 12 lines".* It
+  renders as plain text, never HTML: `<br>` and block ends become line breaks, and
+  Greenhouse's HTML-escaped markup gets a second decode pass.
+- *The breadcrumb reads "Workspace › Applications › Company · Title" (pages set their
+  own last crumb with `useCrumb`).*
 
 - **Purpose:** everything known about one job in one place: why it was scored the way it
   was, what the agent has done, and what you can do next.

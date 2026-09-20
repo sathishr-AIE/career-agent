@@ -47,6 +47,16 @@ def api_applications(show: str = "queue"):
     return ctx
 
 
+@router.get("/jobs/{job_id}")
+def api_job_detail(job_id: int):
+    """JD1: the job hub's one payload (context.job_detail_context)."""
+    m = _app()
+    ctx = context.job_detail_context(m._conn(), job_id, m.BRIEF_PATH)
+    if ctx is None:
+        return JSONResponse(status_code=404, content={"ok": False, "message": "No such job"})
+    return ctx
+
+
 @router.get("/transcript/{application_id}")
 def api_transcript(application_id: int):
     """The agent's redacted transcript for one application attempt -- so a

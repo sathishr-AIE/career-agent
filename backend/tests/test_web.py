@@ -2378,3 +2378,76 @@ def test_single_field_json_routes_accept_the_react_apps_object_bodies(client, mo
 
 async def _async_result(value):
     return value
+
+
+# -- JD1 (redesign Screen 4): GET /api/jobs/{id}, the job hub's one payload -----
+
+def test_api_job_detail_returns_one_payload(client, brief_path):
+    conn = db.connect(web.DB_PATH)
+    cur = conn.execute(
+        "INSERT INTO application (job_id, resume_version, status, started_at, submitted_at)"
+        " VALUES (1, 'tailored-1-r1', 'submitted', '2026-09-10 10:00:00', '2026-09-10 10:05:00')")
+    conn.execute("INSERT INTO outcome (application_id, type, occurred_at)"
+                 " VALUES (?, 'interview', '2026-09-12 09:00:00')", (cur.lastrowid,))
+    conn.execute(
+        "INSERT INTO apply_checkpoint (job_id, session_id, nonce, status, step, mode,"
+        " resume_count, form_url, notes)"
+        " VALUES (1, 's', 'n', 'resumable', 'waiting', 'manual', 1, 'https://jobs.acme.com/apply', ?)",
+        (json.dumps(["use my Chennai address", "mention the notice period"]),))
+    conn.execute("INSERT INTO resume (version, path, job_id, content) VALUES (?, ?, 1, ?)",
+                 ("tailored-1-r1", "x.docx",
+                  json.dumps({"summary": "Sum.", "bullets": [{"text": "Did it", "fact_ids": [1, 999]}]})))
+    conn.commit()
+    store.log(conn, 1, "human_applied")
+    store.log(conn, 1, "submitted", "https://x/1")
+
+    r = client.get("/api/jobs/1")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["job"]["company"] == "Acme" and d["gate_threshold"] == 72
+    assert [a["verdict"] for a in d["assessments"]] == ["submit"]
+    app = d["applications"][0]
+    assert app["status"] == "submitted" and app["effective_outcome"] == "interview"
+    assert [o["type"] for o in app["outcomes"]] == ["interview"] and app["has_transcript"] is False
+    cp = d["checkpoint"]
+    assert (cp["status"], cp["step"], cp["resume_count"], cp["max_resumes"], cp["notes_count"]) == (
+        "resumable", "waiting", 1, 3, 2)
+    assert "notes" not in cp          # a count only: note text never leaves the backend here
+    assert d["resume"]["version"] == "tailored-1-r1" and d["resume"]["summary"] == "Sum."
+    assert d["resume"]["bullets"][0]["fact_claims"] == ["claim 0", None]   # 999 no longer resolves
+    assert [e["type"] for e in d["events"]] == ["submitted", "human_applied"]
+
+
+def test_api_job_detail_row_matches_the_applications_row(client):
+    """The hub derives its status from the same row the Applications page
+    uses, so the two screens can never disagree about a job."""
+    d = client.get("/api/jobs/1").json()
+    row = next(j for j in client.get("/api/applications?show=skipped").json()["jobs"] if j["id"] == 1)
+    assert d["row"] == row
+
+
+def test_api_job_detail_404_for_an_unknown_job(client):
+    r = client.get("/api/jobs/999")
+    assert r.status_code == 404 and r.json()["ok"] is False
+
+
+def test_api_job_detail_does_not_create_a_conversation(client):
+    from career_agent import chat
+    d = client.get("/api/jobs/1").json()
+    assert d["conversation_id"] is None and d["open_prompt"] is None
+    conn = db.connect(web.DB_PATH)
+    assert conn.execute("SELECT COUNT(*) FROM conversation WHERE job_id = 1").fetchone()[0] == 0
+
+    pid = chat.open_prompt(conn, 1, "text", {"id": "q", "question": "Notice period?"})
+    d = client.get("/api/jobs/1").json()
+    assert d["open_prompt"] == {"id": pid, "kind": "text", "question": "Notice period?"}
+    assert d["conversation_id"] == chat.conversation_for_job(conn, 1)
+
+
+def test_api_job_detail_points_a_merged_job_at_its_survivor(client):
+    conn = db.connect(web.DB_PATH)
+    conn.execute("UPDATE job SET merged_into_job_id = 1 WHERE id = 2")
+    conn.commit()
+    d = client.get("/api/jobs/2").json()
+    assert d["merged_into"] == {"id": 1, "company": "Acme", "title": "AI Engineer"}
+    assert d["row"] is None        # a merged job leaves the Applications list

@@ -11,6 +11,8 @@ import { Applications } from './routes/Applications'
 import { Chat } from './routes/Chat'
 import { Dashboard } from './routes/Dashboard'
 import { Facts } from './routes/Facts'
+import { Job } from './routes/Job'
+import { JobDetails } from './routes/JobDetails'
 import { Logins } from './routes/Logins'
 import { Memory } from './routes/Memory'
 import { Profile } from './routes/Profile'
@@ -30,6 +32,10 @@ createRoot(document.getElementById('root')!).render(
           <Route path="chat/:id" element={legacy(<Chat />)} />
           <Route path="dashboard" element={<Dashboard />} />
           <Route path="applications" element={<Applications />} />
+          {/* The job hub: Details now; Screen 6 adds path="chat". */}
+          <Route path="jobs/:id" element={<Job />}>
+            <Route index element={<JobDetails />} />
+          </Route>
           <Route path="resumes" element={legacy(<Resumes />)} />
           <Route path="facts" element={legacy(<Facts />)} />
           <Route path="memory" element={legacy(<Memory />)} />

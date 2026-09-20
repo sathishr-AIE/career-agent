@@ -1,0 +1,82 @@
+/* Shared job pieces (components/JobParts.tsx): the status badge's reason,
+   the score bars and the outcome / applied forms. Used by Applications and
+   the job hub. */
+
+.status-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reason {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.dims {
+  display: grid;
+  /* columns set inline: the label width differs per screen */
+  align-items: center;
+  gap: 6px 10px;
+  font-size: 12px;
+  color: var(--sl-fg);
+}
+
+.dim {
+  display: contents;
+}
+
+.dim__bar {
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--hover);
+}
+
+.dim__bar > div {
+  height: 6px;
+  border-radius: 9999px;
+  background: #64748b;
+}
+
+.dim .mono {
+  text-align: right;
+}
+
+.row-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.row-form .lbl {
+  margin-bottom: 2px;
+}
+
+.row-form__current {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.row-form__current b {
+  font-weight: 500;
+}
+
+.tone-em { color: var(--em-fg); }
+.tone-ro { color: var(--ro-fg); }
+.tone-sl { color: var(--sl-fg); }
+
+.row-form__pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  gap: 8px;
+}
+
+.row-form__pair .btn {
+  justify-content: center;
+}
+
+@media (max-width: 720px) {
+  .row-form__pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

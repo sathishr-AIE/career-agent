@@ -162,6 +162,90 @@ def applications_context(conn: sqlite3.Connection, show: str,
             **run_status_context(conn)}
 
 
+def job_detail_context(conn: sqlite3.Connection, job_id: int,
+                       brief_path: Path) -> dict | None:
+    """JD1: everything the job hub shows, in one read-only payload, or None
+    for an unknown job. `row` is the job's own Applications row (LIST_SQL), so
+    the hub and the Applications page derive the same status from the same
+    data. Read-only on purpose: chat.conversation_for_job would create the
+    job's conversation just by looking."""
+    job = conn.execute(
+        "SELECT id, company, title, location, is_remote, comp_min, comp_max, posted_at,"
+        "       url, source, description, priority, discovered_at, merged_into_job_id,"
+        "       dismissed_at"
+        "  FROM job WHERE id = ?", (job_id,)).fetchone()
+    if job is None:
+        return None
+    merged_into = None
+    if job["merged_into_job_id"]:
+        merged_into = conn.execute("SELECT id, company, title FROM job WHERE id = ?",
+                                   (job["merged_into_job_id"],)).fetchone()
+    row = conn.execute(
+        f"SELECT * FROM ({LIST_SQL.format(placeholders='?,?,?')}) WHERE id = ?",
+        ["submit", "hold", "skip", job_id]).fetchone()
+
+    assessments = conn.execute(
+        "SELECT stage, verdict, rationale, role_fit, credibility, opportunity,"
+        "       application_quality, eligibility_soft, weighted_score, model,"
+        "       prompt_version, created_at"
+        "  FROM assessment WHERE job_id = ? ORDER BY created_at DESC, id DESC",
+        (job_id,)).fetchall()
+
+    applications = []
+    for a in conn.execute(
+            "SELECT id, status, failure_reason, resume_version, started_at, submitted_at,"
+            "       transcript_path IS NOT NULL AS has_transcript"
+            "  FROM application WHERE job_id = ? ORDER BY id DESC", (job_id,)):
+        applications.append({
+            **dict(a), "has_transcript": bool(a["has_transcript"]),
+            "outcomes": [dict(o) for o in conn.execute(
+                "SELECT type, derived, occurred_at, notes FROM outcome"
+                " WHERE application_id = ? ORDER BY occurred_at DESC, id DESC", (a["id"],))],
+            "effective_outcome": outcomes.effective_outcome(conn, a["id"])})
+
+    checkpoint = None
+    cp = conn.execute(
+        "SELECT status, step, mode, resume_count, form_url, updated_at, notes"
+        "  FROM apply_checkpoint WHERE job_id = ?", (job_id,)).fetchone()
+    if cp:
+        checkpoint = {k: cp[k] for k in ("status", "step", "mode", "resume_count",
+                                          "form_url", "updated_at")}
+        checkpoint["max_resumes"] = ats_apply.MAX_RESUMES
+        # A count only: the notes themselves stay with the agent's session.
+        checkpoint["notes_count"] = len(json.loads(cp["notes"] or "[]"))
+
+    resume = None
+    res = conn.execute("SELECT version, content FROM resume WHERE job_id = ?"
+                       " ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+    if res:
+        content = json.loads(res["content"]) if res["content"] else {}
+        claims = {r["id"]: r["claim"] for r in conn.execute("SELECT id, claim FROM fact")}
+        resume = {"version": res["version"], "summary": content.get("summary", ""),
+                  "bullets": [{"text": b.get("text", ""), "fact_ids": b.get("fact_ids", []),
+                               # None marks a citation that no longer resolves
+                               "fact_claims": [claims.get(f) for f in b.get("fact_ids", [])]}
+                              for b in content.get("bullets", [])]}
+
+    conv = conn.execute("SELECT id FROM conversation WHERE job_id = ?", (job_id,)).fetchone()
+    open_prompt = None
+    prompt = chat.open_prompt_for_job(conn, job_id)
+    if prompt:
+        open_prompt = {"id": prompt["id"], "kind": prompt["kind"],
+                       "question": chat.prompt_title(prompt["kind"], json.loads(prompt["payload"]))}
+
+    return {"job": job, "merged_into": merged_into, "row": row,
+            "assessments": assessments, "applications": applications,
+            "checkpoint": checkpoint, "resume": resume,
+            "conversation_id": conv["id"] if conv else None, "open_prompt": open_prompt,
+            "events": conn.execute("SELECT type, payload, occurred_at FROM event"
+                                   " WHERE job_id = ? ORDER BY id DESC LIMIT 100",
+                                   (job_id,)).fetchall(),
+            "gate_threshold": load_brief(brief_path).gate_threshold,
+            "manual_types": outcomes.MANUAL_TYPES,
+            "outcome_labels": overview.CALLBACK_LABELS,
+            "today": utc_today().isoformat()}
+
+
 def settings_context(conn: sqlite3.Connection, brief_path: Path,
                      candidate_path: Path, *, form=None, errors=None,
                      saved=False) -> dict:

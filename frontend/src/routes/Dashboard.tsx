@@ -66,6 +66,7 @@ interface OutcomeSummary {
 /** EV1: an event row with its job (overview.recent_events). */
 interface FeedEvent {
   id: number
+  job_id: number | null
   type: string
   payload: string | null
   occurred_at: string
@@ -283,7 +284,8 @@ function NeedsYou({ run, events }: { run: RunStatusContext | null; events: FeedE
           )}
           {failures.map((e) => (
             <NeedRow key={e.id} tone="ro" icon={P.alert} action="Open" mono
-                     to={`/applications?tab=all&status=${e.type === 'held_unknown' ? 'held' : 'failed'}`}
+                     to={e.job_id ? `/jobs/${e.job_id}`
+                       : `/applications?tab=all&status=${e.type === 'held_unknown' ? 'held' : 'failed'}`}
                      title={`${e.company ?? 'A job'} · ${e.title ?? ''} ${e.type === 'held_unknown' ? 'is held' : 'failed'}`}
                      sub={e.payload ?? e.type} />
           ))}
@@ -399,7 +401,7 @@ function Discoveries({ rows }: { rows: Discovery[] }) {
               return (
                 <tr key={d.id}>
                   <td className="td">{v ? <span className={`b ${v[1]}`}>{v[0]}</span> : <span className="faint">—</span>}</td>
-                  <td className="td strong">{d.title}</td>
+                  <td className="td strong"><Link to={`/jobs/${d.id}`} className="row-link">{d.title}</Link></td>
                   <td className="td muted">{d.company}</td>
                   <td className="td"><span className="src">{SOURCE[d.source] ?? d.source}</span></td>
                   <td className="td mono strong">

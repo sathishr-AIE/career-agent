@@ -6,12 +6,6 @@
   gap: 20px;
 }
 
-.muted-text {
-  font-size: 13px;
-  line-height: 18px;
-  color: var(--text-3);
-}
-
 .tailored-line {
   margin: 0;
   font-size: 13px;
@@ -79,15 +73,6 @@
   flex-wrap: wrap;
   gap: 12px;
   min-width: 0;
-}
-
-.mode-chip {
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  background: var(--sl-bg);
-  border: 1px solid var(--line);
-  color: var(--sl-fg);
 }
 
 .run-strip__now {
@@ -180,19 +165,6 @@
   gap: 6px;
 }
 
-.link-btn {
-  border: none;
-  background: none;
-  padding: 0;
-  font: inherit;
-  font-weight: 500;
-  color: var(--primary);
-}
-
-.link-btn:hover {
-  color: var(--link-hover);
-}
-
 /* -- the Queue / All / Skipped tables -- */
 
 .apps-table {
@@ -264,6 +236,12 @@
   color: #334155;
 }
 
+/* Company and Role open the job hub. */
+.company:hover .clip,
+.clip.role:hover {
+  color: var(--link-hover);
+}
+
 /* The Role column (Why, on the Skipped tables) takes whatever width is left
    and truncates, so the row never pushes Actions out of the card. */
 .apps-table .c-role,
@@ -286,17 +264,6 @@
 .skip-table .c-role .clip {
   display: inline-block;
   max-width: 240px;
-}
-
-.status-cell {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.reason {
-  font-size: 11px;
-  color: var(--text-3);
 }
 
 .actions {
@@ -329,42 +296,6 @@
   min-width: 0;
 }
 
-.why-text {
-  margin: 0;
-  font-size: 13px;
-  line-height: 20px;
-  color: #334155;
-}
-
-.dims {
-  display: grid;
-  grid-template-columns: 136px minmax(0, 1fr) 28px;
-  align-items: center;
-  gap: 6px 10px;
-  font-size: 12px;
-  color: var(--sl-fg);
-}
-
-.dim {
-  display: contents;
-}
-
-.dim__bar {
-  height: 6px;
-  border-radius: 9999px;
-  background: var(--hover);
-}
-
-.dim__bar > div {
-  height: 6px;
-  border-radius: 9999px;
-  background: #64748b;
-}
-
-.dim .mono {
-  text-align: right;
-}
-
 .resume-version {
   font-size: 13px;
   color: var(--text-strong);
@@ -376,39 +307,6 @@
   gap: 6px;
   font-size: 13px;
   font-weight: 500;
-}
-
-.row-form {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.row-form .lbl {
-  margin-bottom: 2px;
-}
-
-.row-form__current {
-  font-size: 12px;
-  color: var(--text-3);
-}
-
-.row-form__current b {
-  font-weight: 500;
-}
-
-.tone-em { color: var(--em-fg); }
-.tone-ro { color: var(--ro-fg); }
-.tone-sl { color: var(--sl-fg); }
-
-.row-form__pair {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 140px;
-  gap: 8px;
-}
-
-.row-form__pair .btn {
-  justify-content: center;
 }
 
 /* -- a refused action, under its row -- */
@@ -580,8 +478,5 @@
   .refusal-row > td {
     display: block;
     padding: 4px 16px 16px;
-  }
-  .row-form__pair {
-    grid-template-columns: minmax(0, 1fr);
   }
 }

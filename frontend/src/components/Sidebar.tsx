@@ -54,7 +54,8 @@ const NAV: { group: string; items: NavItem[] }[] = [
 ]
 
 /** The nav item (and its group) a path belongs to -- also the breadcrumb.
- * A job chat (/chat/:id) sits under Home until the job hub exists. */
+ * A job chat (/chat/:id) sits under Home until Screen 6 moves it into the job
+ * hub; the job hub (/jobs/:id) sits under Applications. */
 export function navItemFor(pathname: string): (NavItem & { group: string }) | undefined {
   for (const g of NAV) {
     for (const it of g.items) {
@@ -62,6 +63,7 @@ export function navItemFor(pathname: string): (NavItem & { group: string }) | un
         it.to === '/'
           ? pathname === '/' || pathname.startsWith('/chat/')
           : pathname === it.to || pathname.startsWith(`${it.to}/`)
+            || (it.key === 'applications' && pathname.startsWith('/jobs/'))
       if (hit) return { ...it, group: g.group }
     }
   }

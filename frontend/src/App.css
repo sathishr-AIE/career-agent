@@ -58,6 +58,14 @@
   color: var(--text-5);
 }
 
+.crumbs__link {
+  color: var(--text-3);
+}
+
+.crumbs__link:hover {
+  color: var(--link-hover);
+}
+
 .crumbs__here {
   font-weight: 500;
   color: var(--text-strong);

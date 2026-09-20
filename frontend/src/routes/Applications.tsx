@@ -1,14 +1,17 @@
 import { useState, type ReactNode } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { errorText, get, post, type Job, type RunStatusContext, type Verdict } from '../api'
+import { Link, useSearchParams } from 'react-router-dom'
+import type { Job, RunStatusContext } from '../api'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { Icon, Spinner } from '../components/Icon'
+import { AppliedForm, OutcomeForm, ScoreBars, StatusBadge } from '../components/JobParts'
 import { Menu, type MenuItem } from '../components/Menu'
-import { TopBarActions, useShell, type Toast } from '../components/shell'
+import { TopBarActions, useShell } from '../components/shell'
 import { useAction } from '../components/useAction'
+import { useJobActions, type JobActions } from '../components/useJobActions'
 import { usePoll } from '../components/usePoll'
 import { describe, type Tone } from '../events'
 import { P } from '../icons'
+import { applyPath, SOURCE, stateOf, VERDICT, type State } from '../jobState'
 import { clock } from '../time'
 import './Applications.css'
 
@@ -31,19 +34,6 @@ interface ApplicationsContext extends RunStatusContext {
 }
 
 type Tab = 'queue' | 'all' | 'skipped'
-type State = 'in_progress' | 'submitted' | 'held' | 'dismissed' | 'failed' | 'interrupted' | 'drafted' | 'queued'
-
-/** One status per row, first match wins (the spec's row-state table). */
-function stateOf(j: Job): State {
-  if (j.terminal_status === 'in_flight') return 'in_progress'
-  if (j.terminal_status === 'submitted') return 'submitted'
-  if (j.terminal_status === 'held_unknown') return 'held'
-  if (j.dismissed_at) return 'dismissed'
-  if (j.terminal_status === 'failed_permanent') return 'failed'
-  if (j.resumable) return 'interrupted'
-  if (j.has_draft) return 'drafted'
-  return 'queued'
-}
 
 const STATUS_CHIPS: [State | 'all', string][] = [
   ['all', 'All statuses'],
@@ -59,9 +49,6 @@ const STATUS_CHIPS: [State | 'all', string][] = [
 // Shown only when a row has that status: neither is in the approved chip row.
 const OPTIONAL_CHIPS = new Set<string>(['interrupted', 'dismissed'])
 
-const VERDICT: Record<Verdict, [string, Tone]> = { submit: ['Submit', 'em'], hold: ['Hold', 'am'], skip: ['Skip', 'ro'] }
-const SOURCE: Record<string, string> = { linkedin: 'LinkedIn', naukri: 'Naukri', ats: 'Greenhouse' }
-const OUTCOME_TONE: Record<string, Tone> = { screen: 'em', interview: 'em', offer: 'em', rejected: 'ro' }
 const RUN_BADGE: Record<RunStatusContext['run_state']['status'], [string, Tone]> = {
   running: ['Running', 'sk'],
   paused: ['Paused', 'sl'],
@@ -69,82 +56,20 @@ const RUN_BADGE: Record<RunStatusContext['run_state']['status'], [string, Tone]>
   stopped: ['Stopped', 'sl'],
   error: ['Error', 'ro'],
 }
-const DIMENSIONS: [keyof Job, string][] = [
-  ['role_fit', 'Role fit'],
-  ['credibility', 'Credibility'],
-  ['opportunity', 'Opportunity'],
-  ['application_quality', 'Application quality'],
-  ['eligibility_soft', 'Eligibility'],
-]
-
-// ponytail: an Apply-style request lasts the whole agent run, so the page
-// waits this long for a fast guard refusal before opening the job's chat. A
-// refusal after that arrives as a toast (the shell's toasts survive navigation).
-const REFUSAL_WAIT_MS = 1000
-
 /** Queue order as the worker picks it: priority (NULL last), then score. */
 const byQueueOrder = (a: Job, b: Job) =>
   (a.priority ?? Infinity) - (b.priority ?? Infinity) || (b.score ?? -1) - (a.score ?? -1)
-
-const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 // -- a row's actions --
 
 interface RowEnv {
   ctx: ApplicationsContext
   reload: () => void
-  toast: (t: Toast) => void
   expand: (id: number) => void
-  openChat: (jobId: number) => void
 }
-
-/** A row's busy/refusal state plus its actions. Refusals show inline under the
- * row and as a toast (the spec's "each row action refusal"). */
-function useRow(job: Job, env: RowEnv) {
-  const { busy, error, run } = useAction(env.reload, (m) => env.toast({ text: m, tone: 'error' }))
-  const [starting, setStarting] = useState(false)
-  const [startError, setStartError] = useState<string | null>(null)
-
-  const act = (path: string, body?: unknown, done?: string) =>
-    run(path, body).then((r) => {
-      if (r !== undefined && done) env.toast({ text: done })
-      return r
-    })
-
-  /** Apply, Redo draft, Track anyway: start the agent, then open its chat. */
-  const startRun = async (path: string) => {
-    setStarting(true)
-    setStartError(null)
-    const req = post(path)
-    const early = await Promise.race([
-      req.then(() => 'ok' as const, (e: unknown) => e),
-      wait(REFUSAL_WAIT_MS).then(() => 'slow' as const),
-    ])
-    setStarting(false)
-    if (early !== 'ok' && early !== 'slow') {
-      const m = errorText(early)
-      setStartError(m)
-      env.toast({ text: m, tone: 'error' })
-      return
-    }
-    req.catch((e: unknown) => env.toast({ text: errorText(e), tone: 'error' }))
-    env.openChat(job.id)
-  }
-
-  const resume = () =>
-    act(`/api/chat/jobs/${job.id}/resume`).then((r) => {
-      if (r !== undefined) env.openChat(job.id)
-    })
-
-  return { busy: busy || starting, error: startError ?? error, act, startRun, resume }
-}
-
-type Row = ReturnType<typeof useRow>
-
-const applyPath = (j: Job) => (j.verdict === 'skip' ? `/api/override/${j.id}` : `/api/apply/${j.id}`)
 
 /** The one visible primary action for a row's state. */
-function Primary({ job, state, row, env }: { job: Job; state: State; row: Row; env: RowEnv }) {
+function Primary({ job, state, row, env }: { job: Job; state: State; row: JobActions; env: RowEnv }) {
   const btn = (label: string, onClick: () => void) => (
     <button type="button" className="btn sm" disabled={row.busy} onClick={onClick}>
       {row.busy && <Spinner />}
@@ -153,7 +78,7 @@ function Primary({ job, state, row, env }: { job: Job; state: State; row: Row; e
   )
   switch (state) {
     case 'in_progress':
-      return btn('Open chat', () => env.openChat(job.id))
+      return btn('Open chat', row.openChat)
     case 'submitted':
       return btn('Record outcome', () => env.expand(job.id))
     case 'held':
@@ -169,43 +94,11 @@ function Primary({ job, state, row, env }: { job: Job; state: State; row: Row; e
     case 'interrupted':
       return btn('Continue', row.resume)
     case 'drafted':
-      return btn('Open draft', () => env.openChat(job.id))
+      return btn('Open draft', row.openChat)
     case 'queued':
       return job.verdict === 'skip'
         ? btn('Track anyway', () => row.startRun(applyPath(job)))
         : btn('Apply', () => row.startRun(applyPath(job)))
-  }
-}
-
-function StatusBadge({ job, state, ctx }: { job: Job; state: State; ctx: ApplicationsContext }) {
-  const reason = job.failure_reason && <span className="reason mono">{job.failure_reason}</span>
-  switch (state) {
-    case 'in_progress':
-      return ctx.open_prompt && ctx.current_job?.job_id === job.id ? (
-        <span className="b am"><span className="dot dot--am" />Waiting on you</span>
-      ) : (
-        <span className="b sk"><span className="dot dot--sk" />In progress</span>
-      )
-    case 'submitted': {
-      const outcome = ctx.applied[job.id]?.outcome
-      return outcome ? (
-        <span className={`b ${OUTCOME_TONE[outcome] ?? 'sl'}`}>{ctx.outcome_labels[outcome] ?? outcome}</span>
-      ) : (
-        <span className="b sl">Awaiting response</span>
-      )
-    }
-    case 'held':
-      return <span className="status-cell"><span className="b am">Held</span>{reason}</span>
-    case 'failed':
-      return <span className="status-cell"><span className="b ro">Failed</span>{reason}</span>
-    case 'interrupted':
-      return <span className="b am">Interrupted</span>
-    case 'dismissed':
-      return <span className="b sl">Dismissed</span>
-    case 'drafted':
-      return <span className="b sl">Drafted</span>
-    case 'queued':
-      return <span className="b sl">Queued</span>
   }
 }
 
@@ -215,89 +108,25 @@ function ScoreWhy({ job }: { job: Job }) {
   if (job.stage === 'hard') {
     return <p className="why-text">Hard filter: {job.rationale}</p>
   }
-  const dims = DIMENSIONS.filter(([k]) => job[k] != null)
   return (
     <>
       {job.rationale && <p className="why-text">{job.rationale}</p>}
-      {dims.length > 0 && (
-        <div className="dims">
-          {dims.map(([k, label]) => {
-            const v = Math.round(job[k] as number)
-            return (
-              <div className="dim" key={k}>
-                <span>{label}</span>
-                <div className="dim__bar"><div style={{ width: `${v}%` }} /></div>
-                <span className="mono">{v}</span>
-              </div>
-            )
-          })}
-        </div>
-      )}
+      <ScoreBars scores={job} />
     </>
   )
 }
 
-function OutcomeForm({ job, row, ctx }: { job: Job; row: Row; ctx: ApplicationsContext }) {
-  const tracked = ctx.applied[job.id]
-  const [type, setType] = useState(ctx.manual_types[0] ?? '')
-  const [date, setDate] = useState(ctx.today)
-  const [notes, setNotes] = useState('')
-  if (!tracked) return null
-  return (
-    <form className="row-form" onSubmit={(e) => {
-      e.preventDefault()
-      row.act(`/api/outcome/${tracked.application_id}`, { type, occurred_at: date, notes }, 'Outcome recorded')
-    }}>
-      <span className="lbl">Record outcome</span>
-      <span className="row-form__current">
-        Current: {tracked.outcome
-          ? <b className={`tone-${OUTCOME_TONE[tracked.outcome] ?? 'sl'}`}>{ctx.outcome_labels[tracked.outcome] ?? tracked.outcome}</b>
-          : 'Awaiting response'}
-      </span>
-      <div className="row-form__pair">
-        <select className="field" value={type} disabled={row.busy} aria-label="Outcome"
-                onChange={(e) => setType(e.target.value)}>
-          {ctx.manual_types.map((t) => <option key={t} value={t}>{ctx.outcome_labels[t] ?? t}</option>)}
-        </select>
-        <input className="field mono" type="date" value={date} disabled={row.busy} aria-label="Date"
-               onChange={(e) => setDate(e.target.value)} />
-      </div>
-      <input className="field" type="text" placeholder="Notes (optional)" value={notes} disabled={row.busy}
-             aria-label="Notes" onChange={(e) => setNotes(e.target.value)} />
-      <div><button type="submit" className="btn" disabled={row.busy}>Record</button></div>
-    </form>
-  )
-}
-
-function AppliedForm({ job, row, ctx, label }: { job: Job; row: Row; ctx: ApplicationsContext; label: string }) {
-  const [date, setDate] = useState(ctx.today)
-  return (
-    <form className="row-form" onSubmit={(e) => {
-      e.preventDefault()
-      row.act(`/api/applied/${job.id}`, { when: date }, 'Marked applied')
-    }}>
-      <span className="lbl">{label}</span>
-      <span className="row-form__current">
-        {label === 'It was submitted'
-          ? 'Check the employer’s site first. This records it as submitted on this date.'
-          : 'You applied on the site yourself.'}
-      </span>
-      <div className="row-form__pair">
-        <input className="field mono" type="date" value={date} disabled={row.busy} aria-label="Date"
-               onChange={(e) => setDate(e.target.value)} />
-        <button type="submit" className="btn" disabled={row.busy}>{label}</button>
-      </div>
-    </form>
-  )
-}
-
-function Expansion({ job, state, row, ctx, tab }: { job: Job; state: State; row: Row; ctx: ApplicationsContext; tab: Tab }) {
+function Expansion({ job, state, row, ctx, tab }: { job: Job; state: State; row: JobActions; ctx: ApplicationsContext; tab: Tab }) {
   const tailored = job.resume_version?.startsWith('tailored-')
   let form: ReactNode = null
-  if (state === 'submitted') form = <OutcomeForm job={job} row={row} ctx={ctx} />
-  else if (state === 'held') form = <AppliedForm job={job} row={row} ctx={ctx} label="It was submitted" />
-  else if (tab === 'all' && (state === 'queued' || state === 'drafted')) {
-    form = <AppliedForm job={job} row={row} ctx={ctx} label="Mark applied" />
+  const tracked = ctx.applied[job.id]
+  if (state === 'submitted' && tracked) {
+    form = <OutcomeForm applicationId={tracked.application_id} outcome={tracked.outcome} actions={row}
+                        manualTypes={ctx.manual_types} outcomeLabels={ctx.outcome_labels} today={ctx.today} />
+  } else if (state === 'held') {
+    form = <AppliedForm jobId={job.id} today={ctx.today} label="It was submitted" actions={row} />
+  } else if (tab === 'all' && (state === 'queued' || state === 'drafted')) {
+    form = <AppliedForm jobId={job.id} today={ctx.today} label="Mark applied" actions={row} />
   }
   return (
     <tr className="expansion">
@@ -319,8 +148,7 @@ function Expansion({ job, state, row, ctx, tab }: { job: Job; state: State; row:
                 <Icon d={P.download} />Download .docx
               </a>
             )}
-            {/* Screen 4 turns this into "Open job →" (the job hub). */}
-            <a className="icon-link" href={job.url} target="_blank" rel="noreferrer">Open posting ↗</a>
+            <Link className="icon-link" to={`/jobs/${job.id}`}>Open job →</Link>
           </div>
           <div className="expansion__col">{form}</div>
         </div>
@@ -340,7 +168,7 @@ function AppRow({ job, env, tab, expanded, onToggle, edge }: {
   /** Queue tab only: whether this row is first/last, to disable Move up/down. */
   edge?: { first: boolean; last: boolean }
 }) {
-  const row = useRow(job, env)
+  const row = useJobActions(job.id, env.reload)
   const state = stateOf(job)
   const [confirming, setConfirming] = useState(false)
   const v = job.verdict ? VERDICT[job.verdict] : null
@@ -391,16 +219,20 @@ function AppRow({ job, env, tab, expanded, onToggle, edge }: {
           </button>
         </td>
         <td className="td c-company">
-          <span className="company"><span className="logo">{job.company.charAt(0).toUpperCase()}</span>
-            <span className="clip" title={job.company}>{job.company}</span></span>
+          <Link className="company" to={`/jobs/${job.id}`}><span className="logo">{job.company.charAt(0).toUpperCase()}</span>
+            <span className="clip" title={job.company}>{job.company}</span></Link>
         </td>
-        <td className="td c-role"><span className="clip role" title={job.title}>{job.title}</span></td>
+        <td className="td c-role"><Link className="clip role" to={`/jobs/${job.id}`} title={job.title}>{job.title}</Link></td>
         <td className="td c-source"><span className="src">{SOURCE[job.source] ?? job.source}</span></td>
         <td className="td c-verdict">{v && <span className={`b ${v[1]}`}>{v[0]}</span>}</td>
         <td className="td c-score mono">
           {job.score != null ? <>{Math.round(job.score)}<span className="score-of">/100</span></> : <span className="faint">—</span>}
         </td>
-        <td className="td c-status"><StatusBadge job={job} state={state} ctx={env.ctx} /></td>
+        <td className="td c-status">
+          <StatusBadge state={state} reason={job.failure_reason} outcomeLabels={env.ctx.outcome_labels}
+                       waiting={!!env.ctx.open_prompt && env.ctx.current_job?.job_id === job.id}
+                       outcome={env.ctx.applied[job.id]?.outcome} />
+        </td>
         <td className="td c-actions">
           <span className="actions">
             <Primary job={job} state={state} row={row} env={env} />
@@ -472,16 +304,16 @@ function AppTable({ rows, env, tab, open, toggle, empty }: {
 // -- Skipped tab --
 
 function GateRow({ job, env }: { job: Job; env: RowEnv }) {
-  const row = useRow(job, env)
+  const row = useJobActions(job.id, env.reload)
   const state = stateOf(job)
   return (
     <>
       <tr className="app-row">
         <td className="td c-company">
-          <span className="company"><span className="logo">{job.company.charAt(0).toUpperCase()}</span>
-            <span className="clip" title={job.company}>{job.company}</span></span>
+          <Link className="company" to={`/jobs/${job.id}`}><span className="logo">{job.company.charAt(0).toUpperCase()}</span>
+            <span className="clip" title={job.company}>{job.company}</span></Link>
         </td>
-        <td className="td c-role"><span className="clip role" title={job.title}>{job.title}</span></td>
+        <td className="td c-role"><Link className="clip role" to={`/jobs/${job.id}`} title={job.title}>{job.title}</Link></td>
         <td className="td c-source"><span className="src">{SOURCE[job.source] ?? job.source}</span></td>
         <td className="td c-score mono">
           {job.score != null ? <>{Math.round(job.score)}<span className="score-of">/100</span></> : <span className="faint">—</span>}
@@ -552,10 +384,10 @@ function Skipped({ jobs, env }: { jobs: Job[]; env: RowEnv }) {
             {hard.map((j) => (
               <tr className="app-row" key={j.id}>
                 <td className="td c-company">
-                  <span className="company"><span className="logo">{j.company.charAt(0).toUpperCase()}</span>
-                    <span className="clip" title={j.company}>{j.company}</span></span>
+                  <Link className="company" to={`/jobs/${j.id}`}><span className="logo">{j.company.charAt(0).toUpperCase()}</span>
+                    <span className="clip" title={j.company}>{j.company}</span></Link>
                 </td>
-                <td className="td c-role"><span className="clip role" title={j.title}>{j.title}</span></td>
+                <td className="td c-role"><Link className="clip role" to={`/jobs/${j.id}`} title={j.title}>{j.title}</Link></td>
                 <td className="td c-source"><span className="src">{SOURCE[j.source] ?? j.source}</span></td>
                 <td className="td c-score mono faint">—</td>
                 <td className="td c-why"><span className="why reason-text" title={j.rationale ?? ''}>{j.rationale}</span></td>
@@ -714,7 +546,6 @@ function Skeleton() {
 export function Applications() {
   const { data: ctx, error, reload } = usePoll<ApplicationsContext>('/api/applications?show=skipped')
   const { toast } = useShell()
-  const nav = useNavigate()
   const [params, setParams] = useSearchParams()
   const [open, setOpen] = useState<Set<number>>(() => new Set())
   const runCtl = useAction(reload, (m) => toast({ text: m, tone: 'error' }))
@@ -731,11 +562,6 @@ export function Applications() {
       return next
     })
   const expand = (id: number) => setOpen((s) => (s.has(id) ? s : new Set(s).add(id)))
-  const openChat = (jobId: number) =>
-    get<{ id: number }>(`/api/chat/jobs/${jobId}/conversation`)
-      .then((c) => nav(`/chat/${c.id}`))
-      .catch((e: unknown) => toast({ text: errorText(e), tone: 'error' }))
-
   const topBar = ctx && (
     <TopBarActions>
       <RunControls ctx={ctx} busy={runCtl.busy} act={(path, body) => void runCtl.run(path, body)} />
@@ -755,7 +581,7 @@ export function Applications() {
     )
   }
 
-  const env: RowEnv = { ctx, reload, toast, expand, openChat }
+  const env: RowEnv = { ctx, reload, expand }
   const tracked = ctx.jobs.filter((j) => j.verdict === 'submit' || j.verdict === 'hold')
   const skipped = ctx.jobs.filter((j) => j.verdict === 'skip')
   const queue = tracked.filter((j) => {

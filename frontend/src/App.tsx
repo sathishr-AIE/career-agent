@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Outlet, useLocation } from 'react-router-dom'
+import { Link, Outlet, useLocation } from 'react-router-dom'
 import type { RunStatusContext } from './api'
 import { Sidebar, navItemFor } from './components/Sidebar'
 import { ShellContext, type Toast } from './components/shell'
@@ -22,6 +22,7 @@ export function App() {
 
   const run = usePoll<RunStatusContext>('/api/run/status').data
   const [actions, setActions] = useState<HTMLElement | null>(null)
+  const [crumb, setCrumb] = useState<string | null>(null)
   const [toasts, setToasts] = useState<(Toast & { id: number })[]>([])
   const nextToast = useRef(0)
   const dismiss = useCallback((id: number) => setToasts((ts) => ts.filter((t) => t.id !== id)), [])
@@ -33,7 +34,7 @@ export function App() {
     },
     [dismiss],
   )
-  const shell = useMemo(() => ({ run, toast, actions }), [run, toast, actions])
+  const shell = useMemo(() => ({ run, toast, actions, setCrumb }), [run, toast, actions])
 
   useEffect(() => {
     if (!navOpen) return
@@ -66,7 +67,15 @@ export function App() {
                     <span className="crumbs__sep mono" aria-hidden="true">›</span>
                   </>
                 )}
-                <span className="crumbs__here" aria-current="page">{here?.label ?? 'Page not found'}</span>
+                {crumb && here ? (
+                  <>
+                    <Link className="crumbs__link" to={here.to}>{here.label}</Link>
+                    <span className="crumbs__sep mono" aria-hidden="true">›</span>
+                    <span className="crumbs__here" aria-current="page">{crumb}</span>
+                  </>
+                ) : (
+                  <span className="crumbs__here" aria-current="page">{here?.label ?? 'Page not found'}</span>
+                )}
               </nav>
             </div>
             <div className="topbar__actions" ref={setActions} />

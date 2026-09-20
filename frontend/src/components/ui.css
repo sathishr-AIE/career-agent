@@ -666,3 +666,40 @@
   font-size: 11px;
   color: var(--text-5);
 }
+
+/* -- small shared pieces (Applications, the job hub) -- */
+
+.muted-text {
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text-3);
+}
+
+.mode-chip {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--sl-bg);
+  border: 1px solid var(--line);
+  color: var(--sl-fg);
+}
+
+.link-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 500;
+  color: var(--primary);
+}
+
+.link-btn:hover {
+  color: var(--link-hover);
+}
+
+.why-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: #334155;
+}
