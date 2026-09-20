@@ -42,6 +42,14 @@ def test_get_memory_lists_keyed_and_untwinned_literal_rows(client, conn):
     assert store.qa_normalize("Notice period?") not in labels, "literal twin hidden"
 
 
+def test_get_memory_states_the_re_confirm_window(client):
+    """MM1: the page labels its chip "Re-confirm every N days" from this,
+    rather than hardcoding the window apply/agent.py measures staleness by."""
+    from career_agent.apply.ats import QA_VOLATILE_WINDOW_DAYS
+
+    assert client.get("/api/memory").json()["volatile_window_days"] == QA_VOLATILE_WINDOW_DAYS
+
+
 def test_put_memory_trims_and_saves(client, conn):
     store.qa_upsert(conn, "Years of experience?", "6", is_volatile=False)
     row_id = store.qa_lookup(conn, "Years of experience?")["id"]

@@ -1,11 +1,9 @@
 import { useEffect, type ReactNode } from 'react'
 import { Logins } from '../../routes/Logins'
-import { Memory } from '../../routes/Memory'
 
 /** The old pages, unchanged, in a right-side panel. They still own their
  * own routes -- this only gives them a second home next to the chat. */
 const PANELS: Record<string, { title: string; el: () => ReactNode }> = {
-  memory: { title: 'Memory', el: () => <Memory /> },
   logins: { title: 'Logins', el: () => <Logins /> },
 }
 

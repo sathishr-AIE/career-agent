@@ -2266,7 +2266,7 @@ def test_chat_side_routers_are_mounted(client, monkeypatch):
                  "/api/chat/conversations", "/api/overview", "/"):
         assert client.get(path).status_code == 200, path
     assert client.get("/api/profile").json()["profile"]["candidate_name"] == "Jane Doe"
-    assert client.get("/api/memory").json() == {"items": []}
+    assert client.get("/api/memory").json() == {"items": [], "volatile_window_days": 30}
     assert client.get("/api/logins").json() == {"items": []}
 
 
