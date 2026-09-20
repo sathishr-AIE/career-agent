@@ -1,0 +1,383 @@
+/* Facts (approved Screen 7). Values from Facts.dc.html; the primitives
+   (.card, .btn, .b, .chip, .field, .fl, .seg, .empty, .alert) are in
+   components/ui.css. */
+
+.facts {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.facts__list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.facts__count {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.fact-skel {
+  height: 92px;
+  border-radius: var(--radius);
+}
+
+/* -- coverage -- */
+
+.cov {
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.cov__count {
+  min-width: 150px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cov__n {
+  font-size: 28px;
+  line-height: 34px;
+  font-weight: 600;
+}
+
+.cov__unit {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.cov__bar {
+  flex-grow: 1;
+  min-width: 0;
+}
+
+.cov__track {
+  position: relative;
+  height: 8px;
+  border-radius: 9999px;
+  background: var(--line-soft);
+}
+
+.cov__fill {
+  height: 100%;
+  border-radius: 9999px;
+  background: var(--am-dot);
+}
+
+.cov--ro .cov__fill { background: var(--ro-dot); }
+.cov--em .cov__fill { background: var(--em-dot); }
+
+.cov__tick {
+  position: absolute;
+  top: -4px;
+  width: 2px;
+  height: 16px;
+  background: var(--text-5);
+}
+
+.cov__scale {
+  position: relative;
+  height: 16px;
+  margin-top: 8px;
+}
+
+.cov__label {
+  position: absolute;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-3);
+}
+
+.cov__msg {
+  margin: 0;
+  max-width: 280px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 18px;
+  color: #78350f;
+}
+
+.cov__msg > svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--am-fg);
+}
+
+.cov--ro .cov__msg { color: var(--ro-fg); }
+.cov--ro .cov__msg > svg { color: var(--ro-fg); }
+.cov--em .cov__msg { color: var(--em-fg); }
+.cov--em .cov__msg > svg { color: var(--em-fg); }
+
+/* -- filters -- */
+
+.filters {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.filters__chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.filters__chips .chip {
+  height: 28px;
+  cursor: pointer;
+}
+
+.filters__sep {
+  width: 1px;
+  height: 20px;
+  margin: 0 6px;
+  background: var(--line);
+}
+
+/* The "Cited only" chip carries its own switch. */
+.tgl {
+  width: 24px;
+  height: 14px;
+  padding: 2px;
+  border-radius: 9999px;
+  background: var(--line-strong);
+  display: inline-flex;
+  transition: background 0.12s ease;
+}
+
+.tgl__knob {
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  background: var(--surface);
+  transition: transform 0.12s ease;
+}
+
+.chip[aria-pressed='true'] .tgl {
+  background: var(--primary);
+}
+
+.chip[aria-pressed='true'] .tgl__knob {
+  transform: translateX(10px);
+}
+
+.filters__search {
+  position: relative;
+  width: 280px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.filters__search > svg {
+  position: absolute;
+  left: 10px;
+  color: var(--text-5);
+  pointer-events: none;
+}
+
+.filters__search .field {
+  padding-left: 30px;
+}
+
+/* -- the add / edit form -- */
+
+.form {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border-color: #c7c4d8;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.08);
+}
+
+.form__f {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.form__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 280px;
+  gap: 12px;
+}
+
+.seg--form {
+  height: 36px;
+}
+
+.seg--form .seg__opt {
+  flex: 1;
+  height: 30px;
+  font-size: 13px;
+}
+
+.form__note {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--am-bg);
+  border: 1px solid var(--am-line);
+  font-size: 12px;
+  line-height: 17px;
+  color: #78350f;
+}
+
+.form__actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* -- fact cards -- */
+
+.fact {
+  padding: 14px 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.fact__body {
+  flex-grow: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fact__claim {
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+}
+
+.fact__ev {
+  margin: 0;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text-3);
+}
+
+.fact__meta {
+  margin-top: 2px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--sl-fg);
+}
+
+.meta--cite {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+.meta--cite:hover {
+  border-color: var(--primary);
+}
+
+.fact__side {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.fact__btns {
+  display: flex;
+  gap: 8px;
+}
+
+.fact__del {
+  color: var(--ro-fg);
+  border-color: transparent;
+}
+
+.fact__del[aria-disabled='true'] {
+  color: var(--line-strong);
+  border-color: var(--line);
+  cursor: not-allowed;
+}
+
+.fact__cap {
+  font-size: 11px;
+  color: var(--text-5);
+}
+
+/* Narrow width swaps the buttons for the ⋯ menu, as the sidebar and Home
+   swap their rails for a sheet. */
+.fact__menu {
+  display: none;
+}
+
+@media (max-width: 1024px) {
+  .form__grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .form__grid > .form__f:last-child {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 720px) {
+  .cov {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .cov__bar {
+    order: 3;
+    flex-basis: 100%;
+  }
+  .cov__msg {
+    max-width: none;
+  }
+  .filters {
+    flex-wrap: wrap;
+  }
+  .filters__chips {
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+  .filters__search {
+    width: 100%;
+  }
+  .form__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .fact__btns,
+  /* the menu's note says the same thing */
+  .fact__cap {
+    display: none;
+  }
+  .fact__menu {
+    display: block;
+  }
+}

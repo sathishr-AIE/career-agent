@@ -160,10 +160,12 @@ concurrent dashboard polling don't deadlock on `database is locked`.
 3. **Scored gate** (`gate.py`) — the LLM call. Scores five weighted dimensions
    (`Verdict` in `models.py`) against the `CareerBrief`'s facts store, refusing to run at
    all below `MIN_FACTS_HARD` (10) facts. The `fact` table (verified claims, each with its
-   own evidence) is edited from the Facts drawer panel (`web/api_facts.py`,
+   own evidence) is edited from the Facts page (`routes/Facts.tsx`, `web/api_facts.py`,
    `store.fact_list`/`fact_add`/`fact_update`/`fact_delete`) — a delete is refused with 409
-   if a tailored resume's `resume.content` JSON still cites that fact id
-   (`store.fact_cited_by`). `PROMPT_VERSION` must bump in the same commit
+   if a tailored resume's `resume.content` JSON still cites that fact id.
+   `store.fact_citations` is the one implementation behind both that guard and the
+   list's `cited_by` (FC1): one pass over `resume.content`, with `fact_cited_by` a lookup
+   into it, so the page can show a citation before a delete is refused for it. `PROMPT_VERSION` must bump in the same commit
    as any prompt edit — it invalidates every stored assessment and forces a re-score,
    which is what makes a prompt change measurable against `tests/golden/`.
 4. **Tailoring** (`tailor.py`) — one resume render per job, memoized. `ensure_tailored`

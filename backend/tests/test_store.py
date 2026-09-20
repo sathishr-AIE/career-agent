@@ -610,3 +610,41 @@ def test_save_settings_rejects_an_unknown_apply_model(conn):
         store.save_settings(conn, "claude-haiku-4-5", 50, apply_model="gpt-4")
     s = store.get_settings(conn)
     assert (s["scoring_model"], s["apply_model"]) == ("claude-sonnet-5", "claude-sonnet-5")
+
+
+def _resume(conn, version, bullets, path="x.docx"):
+    conn.execute("INSERT INTO resume (version, path, content) VALUES (?, ?, ?)",
+                 (version, path, json.dumps({"bullets": bullets})))
+    conn.commit()
+
+
+def test_fact_citations_maps_each_fact_to_the_resumes_that_cite_it(conn):
+    """One pass for the whole list: the fact list and the delete guard must
+    never disagree about who cites what."""
+    _seed_facts(conn, n=3)
+    _resume(conn, "tailored-1", [{"text": "a", "fact_ids": [1]},
+                                 {"text": "b", "fact_ids": [1, 2]}])   # 1 twice
+    _resume(conn, "tailored-2", [{"text": "c", "fact_ids": [1]}])
+
+    assert store.fact_citations(conn) == {1: ["tailored-1", "tailored-2"],
+                                          2: ["tailored-1"]}
+
+
+def test_fact_citations_ignores_unparseable_resume_content(conn):
+    _seed_facts(conn, n=1)
+    conn.execute("INSERT INTO resume (version, path, content) VALUES ('bad', 'x.docx', 'not json')")
+    conn.execute("INSERT INTO resume (version, path, content) VALUES ('untailored', 'x.docx', NULL)")
+    conn.commit()
+    _resume(conn, "tailored-1", [{"text": "a", "fact_ids": [1]}])
+
+    assert store.fact_citations(conn) == {1: ["tailored-1"]}
+
+
+def test_fact_cited_by_answers_for_one_fact(conn):
+    """The delete guard's authority, now a lookup into the same map."""
+    _seed_facts(conn, n=2)
+    _resume(conn, "tailored-1", [{"text": "a", "fact_ids": [1]}])
+    _resume(conn, "tailored-2", [{"text": "b", "fact_ids": [1]}])
+
+    assert store.fact_cited_by(conn, 1) == ["tailored-1", "tailored-2"]
+    assert store.fact_cited_by(conn, 2) == []

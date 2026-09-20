@@ -139,17 +139,30 @@ def fact_update(conn, fact_id: int, row: dict) -> bool:
     return cur.rowcount > 0
 
 
-def fact_cited_by(conn, fact_id: int) -> list[str]:
-    """Resume versions whose tailored bullets cite this fact (resume.content JSON)."""
-    cited = []
-    for r in conn.execute("SELECT version, content FROM resume WHERE content IS NOT NULL"):
+def fact_citations(conn) -> dict[int, list[str]]:
+    """{fact_id: [resume versions whose tailored bullets cite it]}, in one pass
+    over resume.content -- the Facts list needs every fact's citations, and a
+    per-fact scan would re-parse every resume once per fact. The set per row
+    keeps a resume that cites the same fact in two bullets from listing twice.
+
+    ponytail: re-parses the JSON on each call; a citation table only if the
+    resume table ever outgrows one row per tailored job."""
+    cited: dict[int, list[str]] = {}
+    for r in conn.execute("SELECT version, content FROM resume"
+                          " WHERE content IS NOT NULL ORDER BY id"):
         try:
             bullets = json.loads(r["content"]).get("bullets", [])
         except (ValueError, AttributeError):
             continue
-        if any(fact_id in (b.get("fact_ids") or []) for b in bullets):
-            cited.append(r["version"])
+        for fact_id in {f for b in bullets for f in (b.get("fact_ids") or [])}:
+            cited.setdefault(fact_id, []).append(r["version"])
     return cited
+
+
+def fact_cited_by(conn, fact_id: int) -> list[str]:
+    """Resume versions citing this fact -- the delete guard's authority. One
+    implementation behind both it and the list, so they can't drift."""
+    return fact_citations(conn).get(fact_id, [])
 
 
 def fact_delete(conn, fact_id: int) -> bool:

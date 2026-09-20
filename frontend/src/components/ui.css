@@ -703,3 +703,72 @@
   line-height: 20px;
   color: #334155;
 }
+
+/* -- segmented control (Applications' apply mode, Facts' confidence) -- */
+
+.seg {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius);
+  background: var(--hover);
+  border: 1px solid var(--line);
+}
+
+.seg__opt {
+  height: 26px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 12px;
+  color: var(--text-5);
+}
+
+.seg__opt.is-on {
+  background: var(--surface);
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+  font-weight: 500;
+  color: var(--text-strong);
+}
+
+.seg__opt:disabled {
+  cursor: not-allowed;
+}
+
+/* -- form labels and field errors (the component sheet's form state) --
+   Sentence case, unlike .lbl, which is the 11px uppercase section caption. */
+
+.fl {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 500;
+  color: #334155;
+}
+
+.req {
+  color: var(--ro-fg);
+}
+
+.field.area {
+  height: auto;
+  min-height: 64px;
+  padding: 8px 10px;
+  line-height: 18px;
+  resize: vertical;
+}
+
+.field[aria-invalid='true'] {
+  border-color: #fb7185;
+  background: #fffafa;
+}
+
+.fe {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ro-fg);
+}

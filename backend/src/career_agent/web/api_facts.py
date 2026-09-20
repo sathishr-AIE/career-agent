@@ -22,7 +22,13 @@ def _invalid(errors: dict) -> JSONResponse:
 
 @router.get("/facts")
 def api_get_facts():
-    return {"items": store.fact_list(_app()._conn()),
+    conn = _app()._conn()
+    # FC1: who cites what, so the page can show it before a delete is refused
+    # for it. Merged here rather than in fact_list, which stays a single-table
+    # read.
+    cited = store.fact_citations(conn)
+    return {"items": [{**f, "cited_by": cited.get(f["id"], [])}
+                      for f in store.fact_list(conn)],
             "min_hard": MIN_FACTS_HARD, "min_warn": MIN_FACTS_WARN}
 
 

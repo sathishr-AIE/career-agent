@@ -132,8 +132,8 @@ The picker sits in the composer toolbar, and what it controls depends on the cha
 | 3 | Applications | **Approved** (Claude design canvas) | **Implemented** | AP1 |
 | 4 | Job Details | **Approved** (Claude design canvas) | **Implemented** | JD1 |
 | 5 | Chat (Home + Job) | **Approved** (Claude design canvas) | **Implemented** | MS1 |
-| 6 | Facts | **Approved** (Claude design canvas) | In progress | FC1 |
-| 7 | Resumes | **Approved** (Claude design canvas) | Not started | RS1, FC1 (links only) |
+| 6 | Facts | **Approved** (Claude design canvas) | **Implemented** | FC1 |
+| 7 | Resumes | **Approved** (Claude design canvas) | In progress | RS1, FC1 (links only) |
 | 8 | Profile | **Approved** (Claude design canvas) | Not started | none |
 | 9 | Settings | **Approved** (Claude design canvas) | Not started | MS1 |
 | 10 | Memory | **Approved** (Claude design canvas) | Not started | MM1 |
@@ -738,6 +738,31 @@ its job. Decisions made while building it:
   - save or delete success: a toast
 - **Narrow width:** the coverage bar stays full width, filters scroll sideways, and the
   card actions move into a ⋯ menu.
+
+**Facts shipped 2026-09-20 (Screen 7).** `routes/Facts.tsx` at `/facts`, off the
+`legacy()` wrapper. Decisions made while building it:
+
+- *Edit happens in place, inside that fact's card* (the user's call); Add opens the same
+  form at the top of the list. One `FactForm`, two render sites, keyed by fact id so
+  switching rows remounts it with a fresh draft instead of syncing one in an effect.
+- *A cited fact's Delete carries `aria-disabled`, not `disabled`* — a truly disabled
+  button renders no tooltip, and the tooltip is where the reason lives. The click
+  handler no-ops, which the verification asserts with a forced click.
+- *The Save gate checks raw non-empty, not trimmed*, so a whitespace-only claim still
+  reaches the server — otherwise the per-field 422 path could never be exercised.
+- *The coverage bar's scale is derived* (`max(min_warn * 1.2, n)`), which reproduces the
+  artboard's tick positions exactly at 10/20 and survives a threshold change.
+- *Refusals toast the server's message verbatim and still reload*: a 409 that arrives
+  while the confirm dialog is open leaves the row and gives its card the Cited tag.
+- *`.seg` moved from `Applications.css` to `components/ui.css`* (byte-identical, so
+  Applications is unchanged) and `.fl`, `.req`, `.fe`, `.field[aria-invalid]` and
+  `.field.area` were added there — the component sheet's own form-label and field-error
+  state, which Facts is simply the first screen to need. `.lbl` is untouched.
+- *`del` joined `src/api.ts`*: Facts, Memory and Logins each had their own copy, and the
+  wrapper's only CRUD gap is now closed for the screens still to come.
+- *Not built:* a deep link from a resume's fact chip to a row (add it when Resumes needs
+  one), URL-persisted filters, and a count-only facts endpoint for the sidebar dot and
+  the Dashboard checklist, which still fetch the list and count it.
 
 ### 7. Resumes
 

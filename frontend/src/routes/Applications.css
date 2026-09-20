@@ -12,39 +12,7 @@
   color: var(--text-3);
 }
 
-/* -- top bar: the Manual / Auto segmented control -- */
-
-.seg {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px;
-  border-radius: var(--radius);
-  background: var(--hover);
-  border: 1px solid var(--line);
-}
-
-.seg__opt {
-  height: 26px;
-  padding: 0 10px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  font-size: 12px;
-  color: var(--text-5);
-}
-
-.seg__opt.is-on {
-  background: var(--surface);
-  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.06);
-  font-weight: 500;
-  color: var(--text-strong);
-}
-
-.seg__opt:disabled {
-  cursor: not-allowed;
-}
-
+/* .seg* live in ui.css; the lock is Applications' own. */
 .seg__lock {
   display: inline-flex;
   margin: 0 6px 0 2px;

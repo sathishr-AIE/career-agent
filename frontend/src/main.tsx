@@ -39,7 +39,7 @@ createRoot(document.getElementById('root')!).render(
             <Route path="chat" element={<JobChat />} />
           </Route>
           <Route path="resumes" element={legacy(<Resumes />)} />
-          <Route path="facts" element={legacy(<Facts />)} />
+          <Route path="facts" element={<Facts />} />
           <Route path="memory" element={legacy(<Memory />)} />
           <Route path="logins" element={legacy(<Logins />)} />
           <Route path="profile" element={legacy(<Profile />)} />
