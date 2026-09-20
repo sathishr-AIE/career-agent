@@ -1,0 +1,400 @@
+/* The Resumes page: values from the approved Resumes artboard (Resumes.dc.html). */
+
+.resumes__retry {
+  margin-left: auto;
+}
+
+.resumes__skel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.resumes__skel-card {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* -- master card -- */
+
+.master {
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.master__icon {
+  width: 44px;
+  height: 52px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--text-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.master__icon--none {
+  background: var(--am-bg);
+  border-color: var(--am-line);
+  color: var(--am-fg);
+}
+
+.master__text {
+  flex-grow: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.master__title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.master__meta {
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text-3);
+}
+
+.master__path {
+  font-size: 12px;
+  color: #334155;
+  word-break: break-all;
+}
+
+.master__upload,
+.master__result {
+  margin: 0 16px 16px;
+}
+
+/* The drop zone: a file picker that also takes a dragged file. */
+.drop {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 18px;
+  color: #334155;
+}
+
+.drop > svg {
+  color: var(--text-3);
+}
+
+.drop--over {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.drop__busy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-3);
+}
+
+.linklike {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--primary);
+  text-decoration: underline;
+}
+
+.master__result {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.master__result--ok {
+  background: var(--em-bg);
+  border: 1px solid var(--em-line);
+  color: #065f46;
+}
+
+.master__result > svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.master__result-text {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.master__changes-head {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.master__changes {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.master__note {
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--em-fg);
+}
+
+.master__how {
+  width: 100%;
+  border: none;
+  border-top: 1px solid var(--line-soft);
+  background: none;
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--sl-fg);
+  text-align: left;
+}
+
+.master__how:hover {
+  background: var(--surface-2);
+}
+
+.master__how-body {
+  padding: 0 16px 16px;
+  font-size: 13px;
+  line-height: 19px;
+  color: #334155;
+}
+
+.master__how-body p {
+  margin: 0 0 8px;
+}
+
+.master__how-body ul {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.master__how-body .mono {
+  font-size: 12px;
+}
+
+/* -- tailored versions -- */
+
+.versions__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.versions__head h2 {
+  margin: 0;
+}
+
+.versions__filter {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.versions__filter svg {
+  position: absolute;
+  left: 10px;
+  color: var(--text-5);
+  pointer-events: none;
+}
+
+.versions__filter .field {
+  width: 240px;
+  padding-left: 30px;
+}
+
+.vrow {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1.4fr) 200px 110px 70px 90px 90px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  height: 44px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+}
+
+.vrow:last-child {
+  border-bottom: none;
+}
+
+.vrow--head {
+  height: 36px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.vrow--open {
+  background: #fbfbfe;
+  border-bottom: none;
+}
+
+.vrow__toggle {
+  border: none;
+  background: none;
+  padding: 0;
+  display: flex;
+  color: var(--text-5);
+}
+
+.vrow--open .vrow__toggle {
+  color: var(--sl-fg);
+}
+
+.vrow__job {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vrow__version,
+.vrow .mono {
+  font-size: 12px;
+}
+
+.vrow__download {
+  font-weight: 500;
+  text-align: right;
+}
+
+.vdetail {
+  background: #fbfbfe;
+  padding: 4px 16px 18px 52px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.vdetail__summary {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: #334155;
+  max-width: 760px;
+}
+
+.vdetail__bullets {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vbullet {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vbullet__text {
+  font-size: 13px;
+  line-height: 19px;
+}
+
+.vbullet__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-left: 10px;
+}
+
+.fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--sl-fg);
+}
+
+.fact .mono {
+  font-size: 11px;
+}
+
+a.fact:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.fact--gone {
+  background: var(--ro-bg);
+  border-color: var(--ro-line);
+  color: var(--ro-fg);
+}
+
+@media (max-width: 1024px) {
+  .vrow {
+    grid-template-columns: 24px minmax(0, 1.4fr) 160px 110px 90px;
+  }
+  /* Bullets and prompt move into the expansion at this width. */
+  .vrow > :nth-child(5),
+  .vrow > :nth-child(6) {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .master {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .versions__filter,
+  .versions__filter .field {
+    width: 100%;
+  }
+  .ch:has(.versions__filter) {
+    flex-wrap: wrap;
+  }
+  .vrow {
+    grid-template-columns: 24px minmax(0, 1fr) 90px;
+  }
+  .vrow > :nth-child(3),
+  .vrow > :nth-child(4) {
+    display: none;
+  }
+  .vdetail {
+    padding-left: 16px;
+  }
+}

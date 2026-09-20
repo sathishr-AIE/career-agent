@@ -4,7 +4,9 @@ import {
   ErrorSummary, Field, FormSkeleton, LoadError, SaveBar, SectionNav, TextInput, inCls, useLeaveGuard,
   type NavSection, type SummaryItem,
 } from '../components/FormPage'
+import { Icon } from '../components/Icon'
 import { useShell } from '../components/shell'
+import { P } from '../icons'
 import './Profile.css'
 
 // -- shapes /api/profile returns (web/api_profile.py, config.CandidateProfile) --
@@ -158,25 +160,6 @@ function summarize(errors: Record<string, string>, f: ProfileForm): SummaryItem[
 const dates = (start: string, end: string, current = false) =>
   !start && !end && !current ? '' : `${start || '…'} – ${current ? 'Present' : end || '…'}`
 
-const I = {
-  chevron: 'M9 6l6 6-6 6',
-  up: 'M12 19V5M6 11l6-6 6 6',
-  down: 'M12 5v14M6 13l6 6 6-6',
-  remove: 'M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12',
-  plus: 'M12 5v14M5 12h14',
-  lock: 'M6 11h12v9H6zM8.5 11V8a3.5 3.5 0 0 1 7 0v3',
-  info: 'M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18zM12 7.5v5M12 16v.5',
-}
-
-function Icon({ d, size = 14, width = 2 }: { d: string; size?: number; width?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={width}
-         strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d={d} />
-    </svg>
-  )
-}
-
 /** A native month picker (it already produces YYYY-MM). An older free-text
  * date a picker can't show stays a text input, so it is never silently hidden. */
 function MonthInput({ id, label, value, onChange, error }: {
@@ -212,16 +195,16 @@ function Entry({ open, onToggle, heading, summary, first, last, onMove, onRemove
     <div className={open ? 'entry entry--open' : 'entry'}>
       <div className="entry__head">
         <button type="button" className="entry__toggle" aria-expanded={open} onClick={onToggle}>
-          <Icon d={I.chevron} />
+          <Icon d={P.chevronRight} />
           {open ? <span className="entry__name">{heading}</span> : summary}
         </button>
         <span className="entry__actions">
           <button type="button" className="ib" title="Move up" aria-label="Move up" disabled={first}
-                  onClick={() => onMove(-1)}><Icon d={I.up} /></button>
+                  onClick={() => onMove(-1)}><Icon d={P.up} /></button>
           <button type="button" className="ib" title="Move down" aria-label="Move down" disabled={last}
-                  onClick={() => onMove(1)}><Icon d={I.down} /></button>
+                  onClick={() => onMove(1)}><Icon d={P.down} /></button>
           <button type="button" className="ib ib--danger" title="Remove" aria-label="Remove"
-                  onClick={onRemove}><Icon d={I.remove} /></button>
+                  onClick={onRemove}><Icon d={P.trash} /></button>
         </span>
       </div>
       {open && <div className="grid2">{children}</div>}
@@ -357,7 +340,7 @@ export function Profile() {
       <div className="page-head">
         <h1>Profile</h1>
         <p>
-          <Icon d={I.lock} />
+          <Icon d={P.lock} />
           <span>
             Stored only on this machine in <span className="mono">candidate_profile.toml</span>, never committed.
             The apply agent fills application forms from it.
@@ -367,13 +350,13 @@ export function Profile() {
 
       {!exists && (
         <div className="alert am" role="status">
-          <Icon d={I.info} size={16} />
+          <Icon d={P.refused} size={16} />
           <span>No profile saved yet — the apply agent can't fill contact details until you save one.</span>
         </div>
       )}
       {errors.form && (
         <div className="alert" role="alert">
-          <Icon d={I.info} size={16} />
+          <Icon d={P.refused} size={16} />
           <span><b>Nothing was saved:</b> {errors.form}</span>
         </div>
       )}
@@ -436,7 +419,7 @@ export function Profile() {
                 const row = emptyWork()
                 set({ work_history: [...f.work_history, row] })
                 addOpen(row.id)
-              }}><Icon d={I.plus} size={12} width={2.5} />Add work entry</button>
+              }}><Icon d={P.plus} size={12} width={2.5} />Add work entry</button>
             </div>
             <div className="entries">
               {f.work_history.length === 0 && <p className="entries__none">No work history yet.</p>}
@@ -487,7 +470,7 @@ export function Profile() {
                 const row = emptyEdu()
                 set({ education: [...f.education, row] })
                 addOpen(row.id)
-              }}><Icon d={I.plus} size={12} width={2.5} />Add education entry</button>
+              }}><Icon d={P.plus} size={12} width={2.5} />Add education entry</button>
             </div>
             <div className="entries">
               {f.education.length === 0 && <p className="entries__none">No education yet.</p>}

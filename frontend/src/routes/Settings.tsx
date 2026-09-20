@@ -5,7 +5,9 @@ import {
   ErrorSummary, FormSkeleton, LoadError, RadioCards, SaveBar, SectionNav, Slider, Stepper, Switch, TagInput,
   TextInput, useLeaveGuard, type NavSection,
 } from '../components/FormPage'
+import { Icon } from '../components/Icon'
 import { useShell } from '../components/shell'
+import { P } from '../icons'
 import './Settings.css'
 
 // -- shapes /api/settings returns (context.settings_context) --
@@ -85,17 +87,6 @@ const FIELDS: [keyof SettingsForm, string, string][] = [
   ['apply_model', 'Apply agent model', 'settings-models'],
   ['max_score_per_run', 'Jobs scored per run', 'settings-models'],
 ]
-
-function Icon({ d, size = 14 }: { d: string; size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
-         strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d={d} />
-    </svg>
-  )
-}
-
-const INFO = 'M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18zM12 7.5v5M12 16v.5'
 
 /** Settings (approved Screen 10): how the agent searches, filters, scores and
  * paces itself. PUT sends the whole form; the server validates everything
@@ -204,7 +195,7 @@ export function Settings() {
 
       {errors.form && (
         <div className="alert" role="alert">
-          <Icon d={INFO} size={16} />
+          <Icon d={P.refused} size={16} />
           <span><b>Nothing was saved:</b> {errors.form}</span>
         </div>
       )}
@@ -268,7 +259,7 @@ export function Settings() {
             </>
           ) : (
             <section className="alert settings__broken" id="settings-brief" role="alert">
-              <Icon d={INFO} size={16} />
+              <Icon d={P.refused} size={16} />
               <span>
                 <b>Career brief unavailable:</b> {ctx.brief_error}
                 <span className="settings__why">
@@ -308,12 +299,12 @@ export function Settings() {
               </div>
               <Link className="btn" to="/profile">
                 Open Profile
-                <Icon d="M5 12h14M13 6l6 6-6 6" />
+                <Icon d={P.arrowRight} />
               </Link>
             </div>
             {ctx.candidate_error && (
               <div className="alert" role="alert">
-                <Icon d={INFO} size={16} />
+                <Icon d={P.refused} size={16} />
                 <span><b>Your profile file can't be read:</b> {ctx.candidate_error}</span>
               </div>
             )}

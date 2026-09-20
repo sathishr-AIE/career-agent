@@ -26,4 +26,9 @@ export const P = {
   arrowRight: 'M5 12h14M13 6l6 6-6 6',
   undo: 'M4 12a8 8 0 1 0 3-6.2M4 4v4h4',
   download: 'M12 4v11M7 10l5 5 5-5M5 20h14',
+  upload: 'M12 16V5M7 10l5-5 5 5M5 20h14',
+  plus: 'M12 5v14M5 12h14',
+  trash: 'M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12',
+  search: 'M11 5a6 6 0 1 0 0 12a6 6 0 0 0 0-12zM20 20l-4.5-4.5',
+  fileLines: 'M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6',
 }
