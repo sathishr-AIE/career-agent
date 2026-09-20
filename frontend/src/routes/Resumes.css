@@ -221,23 +221,8 @@
   margin: 0;
 }
 
-.versions__filter {
-  position: relative;
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
-}
-
-.versions__filter svg {
-  position: absolute;
-  left: 10px;
-  color: var(--text-5);
-  pointer-events: none;
-}
-
 .versions__filter .field {
   width: 240px;
-  padding-left: 30px;
 }
 
 .vrow {

@@ -1,0 +1,324 @@
+/* The Facts page: values from the approved Facts artboard (Facts.dc.html). */
+
+.facts__retry {
+  margin-left: auto;
+}
+
+.facts__skel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.facts__skel-card {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* -- coverage against the two thresholds -- */
+
+.coverage {
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.coverage__count {
+  min-width: 150px;
+  display: flex;
+  flex-direction: column;
+}
+
+.coverage__n {
+  font-size: 28px;
+  line-height: 34px;
+  font-weight: 600;
+}
+
+.coverage__bar {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.coverage__track {
+  position: relative;
+  height: 8px;
+  border-radius: 9999px;
+  background: var(--line-soft);
+}
+
+.coverage__fill {
+  height: 8px;
+  border-radius: 9999px;
+}
+
+.coverage__fill--ro { background: var(--ro-dot); }
+.coverage__fill--am { background: var(--am-dot); }
+.coverage__fill--em { background: var(--em-dot); }
+
+.coverage__tick {
+  position: absolute;
+  top: -4px;
+  width: 2px;
+  height: 16px;
+  background: var(--text-5);
+}
+
+.coverage__marks {
+  position: relative;
+  height: 16px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.coverage__marks span {
+  position: absolute;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.coverage__msg {
+  max-width: 280px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.coverage__msg svg {
+  flex-shrink: 0;
+}
+
+.coverage__msg--ro { color: var(--ro-fg); }
+.coverage__msg--am { color: #78350f; }
+.coverage__msg--em { color: #065f46; }
+
+/* -- filters -- */
+
+.facts__filters {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.facts__chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.facts__sep {
+  width: 1px;
+  height: 20px;
+  background: var(--line);
+  margin: 0 6px;
+}
+
+.facts__filter {
+  width: 280px;
+}
+
+/* The toggle inside the "Cited only" chip. */
+.mini-switch {
+  position: relative;
+  width: 24px;
+  height: 14px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: var(--line-strong);
+  transition: background 150ms ease-out;
+}
+
+.mini-switch::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  background: var(--surface);
+  transition: transform 150ms ease-out;
+}
+
+.mini-switch--on {
+  background: var(--primary);
+}
+
+.mini-switch--on::before {
+  transform: translateX(10px);
+}
+
+/* -- the add / edit form -- */
+
+.fact-form {
+  border-color: #c7c4d8;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.08);
+}
+
+.fact-form__body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.fact-form__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 280px;
+  gap: 12px;
+}
+
+.fact-form__cited {
+  border-radius: var(--radius);
+  background: var(--am-bg);
+  border: 1px solid var(--am-line);
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 17px;
+  color: #78350f;
+}
+
+.fact-form__cited .mono {
+  font-size: 12px;
+}
+
+.fact-form__actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* -- one fact -- */
+
+.fact-card {
+  padding: 14px 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  scroll-margin-top: 24px;
+}
+
+/* Arriving from a citation chip on Resumes. */
+.fact-card.is-target {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+}
+
+.fact-card__text {
+  flex-grow: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fact-card__claim {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+}
+
+.fact-card__evidence {
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text-3);
+}
+
+.fact-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--sl-fg);
+}
+
+.meta .mono {
+  font-size: 11px;
+}
+
+.meta--link {
+  color: var(--primary);
+}
+
+.fact-card__side {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.fact-card__actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* ui.css's .btn.rose-text would otherwise keep a disabled Delete rose. */
+.fact-card__actions .btn:disabled {
+  color: var(--line-strong);
+  cursor: not-allowed;
+}
+
+.fact-card__menu {
+  display: none;
+}
+
+.fact-card__note {
+  font-size: 11px;
+  color: var(--text-5);
+}
+
+@media (max-width: 720px) {
+  .coverage {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 16px;
+  }
+  .coverage__msg {
+    max-width: none;
+  }
+  .facts__filters {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .facts__chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+  .facts__filter {
+    width: 100%;
+  }
+  .fact-form__row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* Edit and Delete move into the ⋯ menu. */
+  .fact-card__actions {
+    display: none;
+  }
+  .fact-card__menu {
+    display: block;
+  }
+}

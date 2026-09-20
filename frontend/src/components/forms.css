@@ -576,6 +576,54 @@ fieldset.radio-cards legend {
   color: var(--text-3);
 }
 
+/* -- segmented control (Facts' confidence, Memory's kind) -- */
+
+.segmented {
+  display: flex;
+  height: 36px;
+  padding: 2px;
+  box-sizing: border-box;
+  border-radius: var(--radius);
+  background: var(--sl-bg);
+  border: 1px solid var(--line);
+}
+
+.segmented button {
+  flex-grow: 1;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+.segmented button[aria-pressed='true'] {
+  background: var(--surface);
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+  font-weight: 500;
+  color: var(--text);
+}
+
+/* -- a text filter with its magnifier inside -- */
+
+.searchbox {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.searchbox svg {
+  position: absolute;
+  left: 10px;
+  color: var(--text-5);
+  pointer-events: none;
+}
+
+.searchbox input {
+  padding-left: 30px;
+}
+
 @media (max-width: 1024px) {
   .save-bar {
     left: 64px;

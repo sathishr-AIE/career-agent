@@ -17,13 +17,6 @@
   font-size: 12px;
 }
 
-.btn.sm {
-  height: 28px;
-  padding: 0 10px;
-  font-size: 12px;
-  line-height: 16px;
-}
-
 .btn.sm svg {
   color: var(--sl-fg);
 }

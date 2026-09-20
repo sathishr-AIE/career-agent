@@ -310,7 +310,7 @@ export function Resumes() {
             <span className="help">· one per job, reused on Redo draft and Continue</span>
           </span>
           {versions.length > 0 && (
-            <span className="versions__filter">
+            <span className="searchbox versions__filter">
               <Icon d={P.search} />
               <input className="field" value={filter} onChange={(e) => setFilter(e.target.value)}
                      placeholder="Filter by company or role" aria-label="Filter versions" />

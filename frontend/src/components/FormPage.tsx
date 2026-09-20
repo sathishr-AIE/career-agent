@@ -393,3 +393,24 @@ export function RadioCards({ name, label, options, labels, value, onChange, erro
     </fieldset>
   )
 }
+
+/** One row of mutually exclusive choices, e.g. High / Medium / Low. */
+export function Segmented({ id, label, options, value, onChange, error, help }: {
+  id: string
+  label: string
+  options: [string, string][]
+  value: string
+  onChange: (v: string) => void
+  error?: string
+  help?: string
+}) {
+  return (
+    <Field id={id} label={label} error={error} help={help}>
+      <span className="segmented" id={id} role="group" aria-label={label}>
+        {options.map(([v, text]) => (
+          <button key={v} type="button" aria-pressed={v === value} onClick={() => onChange(v)}>{text}</button>
+        ))}
+      </span>
+    </Field>
+  )
+}
