@@ -24,8 +24,8 @@ the repo root since they cover the whole project, not one side of the split.
 The dashboard used to be FastAPI serving Jinja2+htmx directly on `:8000`. That Jinja app
 still exists and still works (`career-agent serve`), and every one of its pages (`/`,
 `/applications`, `/resumes`, `/settings`) now has a React counterpart. The React portal
-is chat-first; the old pages render beside the chat as drawer panels. Both frontends
-still call the same `context.py`/`actions.py` functions, so don't assume
+is chat-first, and every page now has its own route (the chat drawers are gone). Both
+frontends still call the same `context.py`/`actions.py` functions, so don't assume
 `backend/src/career_agent/web/templates/` is dead code.
 
 ## Commands
@@ -99,18 +99,19 @@ top-level import back would be circular. This also keeps those path constants a 
 source of truth: `tests/test_web.py` monkeypatches them as `web.DB_PATH` etc., and the
 routers pick up the same patched value.
 
-Chat is the primary UI, polling every 3 s. Home is the redesigned
-`frontend/src/routes/Home.tsx` at `/`; `/chat/:id` still renders the pre-redesign
-`routes/Chat.tsx` until Screen 6 moves the job chat into the job hub's Chat tab. The
-rebuilt pieces in `components/chat/` are shared by both chat screens —
-`useTranscript` (the cursor poll, keyed by conversation), `Transcript`, `ApproveCard`,
-`Composer`, `ModelPicker` and `chat.css` — beside the pre-redesign `MessageList`,
-`LegacyComposer`, `PromptCard`, `ConfirmCard` and `Drawer`, which only `Chat.tsx` uses.
-`chat.css` must not define `.msg*`, `.composer` or `.conv`: `routes/Chat.css` is global
-and owns those names until Screen 6 deletes it. The composer's model picker writes
-through `GET`/`PUT /api/settings/models` (MS1's scoring half), a partial writer that
-keeps `max_score_per_run` — `PUT /api/settings` demands every brief field, so a picker
-can't use it. `chat.py` owns the `conversation` (one `home`, one per job),
+Chat is the primary UI, polling every 3 s: Home at `/` (`frontend/src/routes/Home.tsx`)
+and the job chat as the hub's Chat tab at `/jobs/:id/chat` (`routes/JobChat.tsx`).
+`/chat/:id` redirects to the job's tab (`ChatRedirect`, from the conversation's
+`job_id`). `components/chat/` holds the shared pieces: `useTranscript` (the cursor poll,
+keyed by conversation), `Transcript` (which takes `card` and `notes` props rather than
+forking per screen), `ApproveCard` (Home's go-ahead), `AskCard` (choice/text/approve/
+`approve_account`, with `need_password` rendered as a notice, never a card),
+`ConfirmCard`, `Composer`, `ModelPicker` and `chat.css`. Both composers' pickers write
+through `GET`/`PUT /api/settings/models` (MS1), a partial writer that keeps
+`max_score_per_run` and leaves whichever model the body omits — `PUT /api/settings`
+demands every brief field, so a picker can't use it. The job chat's picker locks to
+`apply_checkpoint.model` while the session is `running`/`waiting`: that is this job's
+pinned model, unlike `/api/run/status`, which is global. `chat.py` owns the `conversation` (one `home`, one per job),
 `message` and `agent_prompt` tables; `web/api_chat.py` serves them. A Home message goes
 to `actions.home_message`, which refuses a secret-shaped message (`store._SECRET_QA_RE`)
 before storing anything, exactly as `job_message` does, then classifies it with
@@ -121,9 +122,11 @@ status answer at once. Pause, resume and stop act directly, but resume only from
 only open an `approve` card (`origin: home`, dispatched through the `HOME_ACTIONS`
 allowlist, expiring after `chat.HOME_PROMPT_TTL` or when a newer card supersedes it).
 `POST /api/chat/prompts/{id}/answer` splits by card. A Home card is answered on the event
-loop, because an approval starts background tasks; its `user` echo carries
-`{prompt_id, decision}`, which is how the chat renders it as the card's badge rather
-than as another message. `chat.messages_after` returns the newest window on a first
+loop, because an approval starts background tasks. Every answer echo carries
+`{prompt_id, decision}` — Home's and a job's — which is how the chat shows it on the
+card's closed row instead of as a message; in a job chat an untagged `user` message is
+a note to the agent, and `job_message`'s follow-up system line carries
+`{note_for, delivered}` so it renders as that note's delivery status. `chat.messages_after` returns the newest window on a first
 load (`after_id` 0) and appends past the cursor after that. Every other answer runs in
 `run_in_threadpool`, because a password fill uses Playwright's sync API, which refuses to
 run inside a running event loop (`secret_fill._require_no_running_loop` fails loudly if
@@ -177,7 +180,15 @@ conn_factory=None, resume=False)` runs one live session per job. `agent.run_sess
 spawns `build_cmd`'s `claude -p` with `--input-format stream-json --output-format
 stream-json` and an explicit `--session-id`, driving a real Chrome (`apply/chrome.py`)
 over CDP through a Playwright MCP server pinned to `@playwright/mcp@0.0.80`.
-`apply/runner.py`'s `AgentRun` keeps stdin open. A reader thread turns the stream into
+The model comes from `setting.apply_model` (`config.APPLY_MODELS`; haiku is
+deliberately not on offer): `submit` is the only link holding a connection, so it reads
+the model, pins it on `apply_checkpoint.model` and binds it to the live runner
+(`partial(_live_run_agent, model=...)`, never through the runner call every injected
+fake declares). A resume reuses the pin — `build_cmd` puts `--model` on a `--resume`
+too, so an unpinned resume would switch models mid-session — and `build_cmd` translates
+the stored id to the CLI's own alias (`config.APPLY_CLI_ALIAS`), since `"sonnet"` is the
+only value ever run here and no test can catch a wrong one. A retired id falls back to
+the default with a warning. `apply/runner.py`'s `AgentRun` keeps stdin open. A reader thread turns the stream into
 `RunEvents` callbacks, which `ats._chat_events` narrates into the job's conversation (a
 connection per event, since they fire off-thread). One writer thread owns stdin through
 a queue, so a blocked pipe never stalls the reader or an HTTP answer. The live run sits

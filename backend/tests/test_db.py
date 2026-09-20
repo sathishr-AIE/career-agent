@@ -154,3 +154,27 @@ def test_progress_columns_are_added_idempotently(conn):
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(run_state)")]
     assert cols.count("stage") == 1
     assert cols.count("found") == 1
+
+
+def test_setting_has_an_apply_model_column_defaulting_to_sonnet(conn):
+    assert conn.execute("SELECT apply_model FROM setting").fetchone()[0] == "claude-sonnet-5"
+
+
+def test_apply_model_is_added_to_an_existing_setting_row(conn):
+    """The schema string only builds a fresh DB. An installed career.db gets
+    the column through _add_column_if_missing, without losing its choices."""
+    conn.execute("UPDATE setting SET scoring_model = 'claude-haiku-4-5', max_score_per_run = 50")
+    conn.execute("ALTER TABLE setting DROP COLUMN apply_model")
+    conn.commit()
+
+    db.init_schema(conn)
+
+    row = conn.execute("SELECT * FROM setting").fetchone()
+    assert row["apply_model"] == "claude-sonnet-5"
+    assert (row["scoring_model"], row["max_score_per_run"]) == ("claude-haiku-4-5", 50)
+
+
+def test_apply_checkpoint_has_a_model_column_added_idempotently(conn):
+    db.init_schema(conn)
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(apply_checkpoint)")]
+    assert cols.count("model") == 1

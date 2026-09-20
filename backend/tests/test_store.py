@@ -583,3 +583,30 @@ def test_qa_remember_still_refuses_real_secret_questions(conn, question):
 def test_qa_remember_does_not_over_match_ordinary_questions(conn, question):
     store.qa_remember(conn, question, "x")
     assert conn.execute("SELECT COUNT(*) n FROM qa_bank").fetchone()["n"] == 1
+
+
+def test_settings_default_apply_model_is_sonnet(conn):
+    assert store.get_settings(conn)["apply_model"] == "claude-sonnet-5"
+
+
+def test_save_settings_leaves_the_apply_model_alone_when_not_given(conn):
+    """Nine callers pass two positional args. Omitting the model must keep
+    what is stored rather than blanking it."""
+    store.save_settings(conn, "claude-sonnet-5", 25, apply_model="claude-opus-5")
+
+    store.save_settings(conn, "claude-haiku-4-5", 30)
+
+    s = store.get_settings(conn)
+    assert (s["scoring_model"], s["apply_model"]) == ("claude-haiku-4-5", "claude-opus-5")
+
+
+def test_save_settings_round_trips_the_apply_model(conn):
+    store.save_settings(conn, "claude-sonnet-5", 25, apply_model="claude-opus-5")
+    assert store.get_settings(conn)["apply_model"] == "claude-opus-5"
+
+
+def test_save_settings_rejects_an_unknown_apply_model(conn):
+    with pytest.raises(ValueError, match="unknown apply model"):
+        store.save_settings(conn, "claude-haiku-4-5", 50, apply_model="gpt-4")
+    s = store.get_settings(conn)
+    assert (s["scoring_model"], s["apply_model"]) == ("claude-sonnet-5", "claude-sonnet-5")

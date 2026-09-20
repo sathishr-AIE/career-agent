@@ -41,6 +41,7 @@ export function Composer({ onSend, placeholder = 'Message the agent', toolbar, h
   }
 
   return (
+    <>
     <form className={`cbar card${invalid ? ' cbar--invalid' : ''}`} onSubmit={submit}>
       <textarea
         ref={box}
@@ -57,7 +58,6 @@ export function Composer({ onSend, placeholder = 'Message the agent', toolbar, h
           el.style.height = `${Math.min(el.scrollHeight, 160)}px`
         }}
       />
-      {helper && <div className="cbar__helper">{helper}</div>}
       <div className="cbar__tools">
         {toolbar}
         <button className="btn pri cbar__send" type="submit"
@@ -66,5 +66,7 @@ export function Composer({ onSend, placeholder = 'Message the agent', toolbar, h
         </button>
       </div>
     </form>
+    {helper && <p className="cbar__helper">{helper}</p>}
+    </>
   )
 }

@@ -131,8 +131,8 @@ The picker sits in the composer toolbar, and what it controls depends on the cha
 | 2 | Dashboard | **Approved** (Claude design canvas) | **Implemented** | EV1, OC1 |
 | 3 | Applications | **Approved** (Claude design canvas) | **Implemented** | AP1 |
 | 4 | Job Details | **Approved** (Claude design canvas) | **Implemented** | JD1 |
-| 5 | Chat (Home + Job) | **Approved** (Claude design canvas) | Home **implemented**; Job in progress | MS1 |
-| 6 | Facts | **Approved** (Claude design canvas) | Not started | FC1 |
+| 5 | Chat (Home + Job) | **Approved** (Claude design canvas) | **Implemented** | MS1 |
+| 6 | Facts | **Approved** (Claude design canvas) | In progress | FC1 |
 | 7 | Resumes | **Approved** (Claude design canvas) | Not started | RS1, FC1 (links only) |
 | 8 | Profile | **Approved** (Claude design canvas) | Not started | none |
 | 9 | Settings | **Approved** (Claude design canvas) | Not started | MS1 |
@@ -193,7 +193,14 @@ These are no longer design dependencies. The remaining new slices are:
   `GET /api/settings`, which also loads the brief and the candidate profile (PII) a
   chat composer has no use for. The `apply_model` column, `APPLY_MODELS`, the
   `ats.submit`/`agent.run_session` wiring and the run's model join the same route at
-  Screen 6, the first screen that renders them.*
+  Screen 6, the first screen that renders them.* **Completed 2026-09-20 with Screen 6**,
+  with one amendment: the spec said `/api/run/status` returns the live run's model, but
+  that endpoint is global and falls back to the newest open card on any job, so during a
+  manual Apply it would show another job's model in this job's composer. The model is
+  pinned on `apply_checkpoint.model` instead and reaches the picker through JD1, which
+  the hub already polls. `build_cmd` translates the stored id to the CLI's own alias
+  (`APPLY_CLI_ALIAS`), because `"sonnet"` is the only `--model` value this project has
+  ever run and no test can catch a wrong one.
 - **EV1, global event feed.** *Shipped 2026-09-18 as `events` inside `GET /api/overview`
   (`overview.recent_events`, 20 rows, `pipeline_*` excluded, plus a `recent` flag for the
   last 24 h), not as a separate route: the Dashboard already polls overview.* Originally:
@@ -648,6 +655,32 @@ made while building it:
 - *The model picker owns its popover* rather than growing `Menu.tsx` a custom trigger
   and an open-upward mode for one caller; it reuses the `.menu` CSS with `.menu--up`.
 - *The empty state is spec-only* (never drawn): the welcome line plus the four chips.
+
+**The job chat shipped 2026-09-20 (Screen 6),** as the hub's Chat tab at
+`/jobs/:id/chat`, and the pre-redesign chat page is gone (`routes/Chat.tsx`, its
+stylesheet, the drawer and the old cards). `/chat/:id` redirects: a conversation knows
+its job. Decisions made while building it:
+
+- *The card family lives in `components/chat/`*: `AskCard` (choice, text, approve and
+  `approve_account`, all one amber "Agent asks" strip) and a rebuilt `ConfirmCard`, with
+  `Transcript` gaining two props — which card to render, and whether a user message is a
+  note — rather than forking a second transcript.
+- *`need_password` is a notice, not a card*: a sky row saying the backend is signing in,
+  with no actions, because the backend answers that card itself.
+- *A closed card's row shows what was answered* ("What is your notice period? → 30
+  days"), which is why the backend now tags a job card's answer echo. It still does not
+  expand: only an open prompt carries a payload, so expanding would need a route that
+  does not exist.
+- *A note's delivery line is folded under its bubble* as a status, using the `note_for`
+  tag rather than matching the backend's wording.
+- *The picker locks to the session's own pinned model* (`checkpoint.model`) while the
+  session runs, with the artboard's tooltip; otherwise it writes the setting.
+- *The Continue banner is amber*, per the artboard, overriding the "sky card" in the UX
+  text above. Sky is reserved for the signing-in notice.
+- *The Chat tab creates the job's conversation on first visit*, exactly as the old Chat
+  button did on click, so an unapplied job shows its empty state rather than a spinner.
+- *The tab owns its height* (`.hub--chat`), so the transcript scrolls in its own box
+  while the Details tab still scrolls with the page.
 
 ### 6. Facts
 

@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { Link, NavLink, Outlet, useParams } from 'react-router-dom'
+import { Link, NavLink, Outlet, useLocation, useParams } from 'react-router-dom'
 import type { Job as JobRow } from '../api'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { Icon, Spinner } from '../components/Icon'
@@ -67,6 +67,9 @@ export interface JobDetail {
     status: 'running' | 'waiting' | 'resumable' | 'done'
     step: string
     mode: string | null
+    /** The model this session was pinned to (MS1): the Chat tab's picker
+     * locks to it while the session runs. */
+    model: string | null
     resume_count: number
     max_resumes: number
     form_url: string | null
@@ -156,14 +159,14 @@ function HubHeader({ d, state, actions, setForm, askClearHold }: Omit<HubContext
         }
         break
       case 'drafted':
-        main = primary('Open draft', actions.openChat)
+        main = primary('Open draft', () => actions.openChat())
         items = [
           { label: 'Redo draft', icon: P.undo, onSelect: () => actions.startRun(applyPath(row)) },
           markApplied, 'sep', dismiss,
         ]
         break
       case 'in_progress':
-        main = primary('Open chat', actions.openChat)
+        main = primary('Open chat', () => actions.openChat())
         break
       case 'interrupted':
         main = primary('Continue where it left off', actions.resume, P.play)
@@ -243,10 +246,9 @@ function HubHeader({ d, state, actions, setForm, askClearHold }: Omit<HubContext
         )}
         <nav className="hub-tabs" aria-label="Job">
           <NavLink end to={`/jobs/${job.id}`} className="hub-tab">Details</NavLink>
-          {/* Interim: the job's chat page. Screen 6 turns this into /jobs/:id/chat. */}
-          <button type="button" className="hub-tab" onClick={actions.openChat}>
+          <NavLink to={`/jobs/${job.id}/chat`} className="hub-tab">
             Chat{d.open_prompt && <span className="dot dot--am" role="img" aria-label="A card is waiting" />}
-          </button>
+          </NavLink>
         </nav>
       </div>
     </div>
@@ -283,6 +285,9 @@ function HubSkeleton() {
  * and otherwise when the window regains focus. */
 export function Job() {
   const jobId = Number(useParams().id)
+  // The Chat tab is a fixed-height column (its transcript scrolls itself);
+  // Details scrolls with the page.
+  const chatTab = useLocation().pathname.endsWith('/chat')
   const [live, setLive] = useState(false)
   const { data: d, error, status, reload } = usePoll<JobDetail>(`/api/jobs/${jobId}`, live ? 3000 : 0)
   const nowLive = !!d && (d.applications.some((a) => a.status === 'in_flight')
@@ -320,7 +325,7 @@ export function Job() {
   const state = d.row ? stateOf(d.row) : null
   const hub: HubContext = { d, state, actions, form, setForm, askClearHold: () => setConfirming(true) }
   return (
-    <div className="hub">
+    <div className={chatTab ? 'hub hub--chat' : 'hub'}>
       <HubHeader {...hub} />
       <Outlet context={hub} />
       {confirming && (

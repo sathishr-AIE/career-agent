@@ -273,7 +273,7 @@ function NeedsYou({ run, events }: { run: RunStatusContext | null; events: FeedE
         <div>
           {card && (
             // Interim target: the job's chat. Screen 6 moves it to the job hub's Chat tab.
-            <NeedRow tone="am" icon={P.chat} action="Answer" to={`/chat/${card.conversation_id}`}
+            <NeedRow tone="am" icon={P.chat} action="Answer" to={`/jobs/${card.current_job!.job_id}/chat`}
                      title={`${card.current_job!.company} · ${card.current_job!.title} is waiting on you`}
                      sub={`${card.open_prompt!.question}${more > 0 ? ` · +${more} more` : ''}`} />
           )}

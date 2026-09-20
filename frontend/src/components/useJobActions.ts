@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { errorText, get, post } from '../api'
+import { errorText, post } from '../api'
 import { useShell } from './shell'
 import { useAction } from './useAction'
 
@@ -20,11 +20,10 @@ export function useJobActions(jobId: number, reload: () => void) {
   const [starting, setStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
 
-  /** Interim target: the job's chat page. Screen 6 moves it to the hub's Chat tab. */
-  const openChat = () =>
-    get<{ id: number }>(`/api/chat/jobs/${jobId}/conversation`)
-      .then((c) => nav(`/chat/${c.id}`))
-      .catch((e: unknown) => toast({ text: errorText(e), tone: 'error' }))
+  /** The job hub's Chat tab. `after` is a resume watermark: the tab keeps
+   * Continue busy until the resumed run posts past it. */
+  const openChat = (after?: number) =>
+    nav(`/jobs/${jobId}/chat`, after ? { state: { after } } : undefined)
 
   const act = (path: string, body?: unknown, done?: string) =>
     run(path, body).then((r) => {
@@ -55,7 +54,7 @@ export function useJobActions(jobId: number, reload: () => void) {
   /** Continue an interrupted session, then open its chat. */
   const resume = () =>
     act(`/api/chat/jobs/${jobId}/resume`).then((r) => {
-      if (r !== undefined) openChat()
+      if (r !== undefined) openChat((r as { after?: number }).after)
     })
 
   return { busy: busy || starting, error: startError ?? error, act, startRun, resume, openChat }

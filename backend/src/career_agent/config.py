@@ -12,9 +12,21 @@ from pydantic import BaseModel, Field
 SCORING_MODELS = ("claude-sonnet-5", "claude-haiku-4-5")
 DEFAULT_SCORING_MODEL = SCORING_MODELS[0]
 
+# The apply agent drives a browser, so it needs a stronger model than the
+# scorer -- haiku is deliberately not on offer.
+APPLY_MODELS = ("claude-sonnet-5", "claude-opus-5")
+DEFAULT_APPLY_MODEL = APPLY_MODELS[0]
+
+# `claude --model` takes the CLI's own aliases. "sonnet" is the only value
+# this project has ever run, and no test can catch a wrong one (the suite
+# never spawns `claude`), so the stored id is translated here rather than
+# passed through.
+APPLY_CLI_ALIAS = {"claude-sonnet-5": "sonnet", "claude-opus-5": "opus"}
+
 MODEL_LABELS = {
     "claude-sonnet-5": "Sonnet — better judgement (default)",
     "claude-haiku-4-5": "Haiku — faster, lighter on rate limits",
+    "claude-opus-5": "Opus — strongest, for hard application forms",
 }
 
 

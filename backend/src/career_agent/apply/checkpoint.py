@@ -18,21 +18,22 @@ def _set(conn, job_id: int, sql: str, *args) -> None:
 
 
 def start(conn, job_id: int, session_id: str, nonce: str, mode: str | None = None,
-          can_submit: bool | None = None, resume_count: int = 0) -> None:
+          can_submit: bool | None = None, resume_count: int = 0,
+          model: str | None = None) -> None:
     """A fresh session: everything resets, the counters included (resume_count
-    only carries over a mode-mismatch restart). mode and can_submit are what a
-    resume must match (see ats.submit). Notes reset too -- they were guidance
-    for the session that just ended, not for a new, unrelated one."""
+    only carries over a mode-mismatch restart). mode, can_submit and model are
+    what a resume must keep (see ats.submit). Notes reset too -- they were
+    guidance for the session that just ended, not for a new, unrelated one."""
     conn.execute(
         "INSERT INTO apply_checkpoint (job_id, session_id, nonce, status, mode, can_submit,"
-        " resume_count) VALUES (?, ?, ?, 'running', ?, ?, ?)"
+        " resume_count, model) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)"
         " ON CONFLICT(job_id) DO UPDATE SET session_id = excluded.session_id,"
         " nonce = excluded.nonce, step = 'start', answers = '{}', form_url = NULL,"
         " open_prompt_id = NULL, status = 'running', mode = excluded.mode,"
         " can_submit = excluded.can_submit, approve_sent = 0, resume_count = excluded.resume_count,"
-        " auto_resumed = 0, notes = '[]', updated_at = datetime('now')",
+        " auto_resumed = 0, notes = '[]', model = excluded.model, updated_at = datetime('now')",
         (job_id, session_id, nonce, mode, None if can_submit is None else int(can_submit),
-         resume_count))
+         resume_count, model))
     conn.commit()
 
 

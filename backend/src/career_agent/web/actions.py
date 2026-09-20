@@ -23,7 +23,7 @@ from career_agent import chat, credentials, outcomes, store, tailor
 from career_agent.apply import agent as agent_mod
 from career_agent.apply import ats as ats_apply
 from career_agent.apply import checkpoint, secret_fill
-from career_agent.config import (SCORING_MODELS, CandidateProfile,
+from career_agent.config import (APPLY_MODELS, SCORING_MODELS, CandidateProfile,
                                  CareerBrief, load_brief, save_brief,
                                  save_candidate_profile)
 from career_agent.security import load_key
@@ -239,12 +239,14 @@ def job_message(conn: sqlite3.Connection, cid: int, job_id: int, text: str) -> d
     except Exception:
         log.exception("could not pin a chat note to job %s's checkpoint", job_id)
     run = agent_mod.RUNS.get(job_id)
-    if run is not None and run.add_note(text):
-        chat.post_message(conn, cid, "system",
-                          "Noted — the agent gets this with your next answer.")
-    else:
-        chat.post_message(conn, cid, "system",
-                          "No live session for this job — the note was saved but not sent.")
+    delivered = run is not None and run.add_note(text)
+    # Tagged with the note it belongs to: the chat renders this as a status
+    # line under the note bubble, not as a message of its own.
+    chat.post_message(
+        conn, cid, "system",
+        "Noted — the agent gets this with your next answer." if delivered
+        else "No live session for this job — the note was saved but not sent.",
+        {"note_for": mid, "delivered": delivered})
     return {"ok": True, "message_id": mid}
 
 
@@ -438,6 +440,7 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
         else:
             summary = {"approve": "Approved the application",
                        "cancel": "Cancelled this application"}[decision]
+        decided = decision
     else:
         value = answer.get("answer")
         if kind == "choice" and value not in payload.get("options", []):
@@ -452,6 +455,7 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
                 "remember": bool(answer.get("remember", True))}
         shown = "(hidden)" if payload.get("sensitive") else value
         summary = f"{payload.get('question', kind)} → {shown}"
+        decided = shown        # what the closed card's row shows, never a secret
         if kind == "approve_account":
             body = {"id": payload.get("id"), "answer": value}
             summary = (f"{'Approved' if value == 'approve' else 'Rejected'} creating an "
@@ -465,7 +469,8 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
         store.qa_upsert(conn, payload["question"], value, is_volatile=False)
         store.log(conn, row["job_id"], "needs_answer_resolved")
         _unpark(conn, row["job_id"])
-        chat.post_message(conn, row["conversation_id"], "user", summary)
+        chat.post_message(conn, row["conversation_id"], "user", summary,
+                          {"prompt_id": prompt_id, "decision": decided})
         return {"ok": True, "message": "Answer saved"}
 
     run = agent_mod.RUNS.get(row["job_id"])
@@ -518,7 +523,11 @@ def answer_prompt(conn: sqlite3.Connection, prompt_id: int, answer: dict,
     # summary first means a memory-store hiccup below can never turn a
     # delivered answer into a failed response (see the two try/excepts).
     if summary:
-        chat.post_message(conn, row["conversation_id"], "user", summary)
+        # An untagged user message in a job chat is a note to the agent, so
+        # an answer echo says which card it answered (the chat shows it on
+        # that card's closed row instead of as a bubble).
+        chat.post_message(conn, row["conversation_id"], "user", summary,
+                          {"prompt_id": prompt_id, "decision": decided})
     if notice:                                  # never the password itself
         chat.post_message(conn, row["conversation_id"], "system", notice)
     # Remember a successfully-sent choice/text answer for next time, unless
@@ -1135,6 +1144,12 @@ def save_settings(conn: sqlite3.Connection, form: dict, brief_path: Path,
     scoring_model = form.get("scoring_model", "")
     if scoring_model not in SCORING_MODELS:
         errors["scoring_model"] = f"unknown scoring model: {scoring_model}"
+    # Optional: the Jinja form and the React Settings page own the scoring
+    # half, so an absent apply_model keeps what is stored rather than
+    # blanking the agent's model.
+    apply_model = form.get("apply_model") or None
+    if apply_model is not None and apply_model not in APPLY_MODELS:
+        errors["apply_model"] = f"unknown apply model: {apply_model}"
     if max_score_per_run_n is not None and max_score_per_run_n < 0:
         errors["max_score_per_run"] = "cannot be negative"
 
@@ -1145,7 +1160,8 @@ def save_settings(conn: sqlite3.Connection, form: dict, brief_path: Path,
         save_brief(brief_path, brief)
     if candidate is not None:
         save_candidate_profile(candidate_path, candidate)
-    store.save_settings(conn, scoring_model, max_score_per_run_n)
+    store.save_settings(conn, scoring_model, max_score_per_run_n,
+                        apply_model=apply_model)
     return {"ok": True, "errors": {}}
 
 

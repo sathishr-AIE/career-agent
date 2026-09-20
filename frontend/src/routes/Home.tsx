@@ -39,8 +39,7 @@ function Rail({ convs, waitingId, onPick }: {
   return (
     <div className="card">
       {convs.map((c) => (
-        // Interim target until Screen 6 puts the job chat in the job hub.
-        <Link key={c.id} className="conv-row" to={`/chat/${c.id}`} onClick={onPick}>
+        <Link key={c.id} className="conv-row" to={`/jobs/${c.job_id}/chat`} onClick={onPick}>
           <span className="conv-row__top">
             <span className="conv-row__title">
               {c.id === waitingId && <span className="dot dot--am" />}

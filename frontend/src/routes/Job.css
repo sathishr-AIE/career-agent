@@ -595,3 +595,22 @@
     flex-wrap: wrap;
   }
 }
+
+/* -- the Chat tab: the header band, then a column that owns the rest -- */
+
+.hub--chat {
+  /* 56px top bar + .app__page's 32px top and bottom padding. */
+  height: calc(100vh - 120px);
+  display: flex;
+  flex-direction: column;
+}
+
+.hub--chat .hub-head {
+  flex-shrink: 0;
+}
+
+@media (max-width: 720px) {
+  .hub--chat {
+    height: calc(100vh - 88px);
+  }
+}

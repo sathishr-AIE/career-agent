@@ -61,7 +61,7 @@ export function navItemFor(pathname: string): (NavItem & { group: string }) | un
     for (const it of g.items) {
       const hit =
         it.to === '/'
-          ? pathname === '/' || pathname.startsWith('/chat/')
+          ? pathname === '/'
           : pathname === it.to || pathname.startsWith(`${it.to}/`)
             || (it.key === 'applications' && pathname.startsWith('/jobs/'))
       if (hit) return { ...it, group: g.group }
@@ -188,8 +188,8 @@ export function Sidebar() {
   const here = navItemFor(pathname)?.key
   const queued = run?.stats.queued ?? 0
   const cards = run?.open_prompt_count ?? 0
-  // Interim target: the job's chat. Screen 6 moves it to the job hub's Chat tab.
-  const answerTo = run?.open_prompt && run.conversation_id ? `/chat/${run.conversation_id}` : null
+  const answerTo = run?.open_prompt && run.current_job
+    ? `/jobs/${run.current_job.job_id}/chat` : null
 
   return (
     <aside className="sidebar">

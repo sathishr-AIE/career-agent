@@ -5,7 +5,7 @@ import sqlite3
 
 from career_agent import normalize
 from career_agent.apply import ats
-from career_agent.config import SCORING_MODELS, CareerBrief
+from career_agent.config import APPLY_MODELS, SCORING_MODELS, CareerBrief
 from career_agent.models import Job, Verdict
 
 logger = logging.getLogger(__name__)
@@ -436,15 +436,22 @@ def get_settings(conn) -> sqlite3.Row:
     return conn.execute("SELECT * FROM setting WHERE id = 1").fetchone()
 
 
-def save_settings(conn, scoring_model: str, max_score_per_run: int) -> None:
+def save_settings(conn, scoring_model: str, max_score_per_run: int,
+                  apply_model: str | None = None) -> None:
+    """`apply_model` is a keyword, and None leaves the stored value alone:
+    most callers only own the scoring half (the settings form, the chat
+    picker), and a missing field must never blank the other one."""
     if scoring_model not in SCORING_MODELS:
         raise ValueError(f"unknown scoring model: {scoring_model}")
+    if apply_model is not None and apply_model not in APPLY_MODELS:
+        raise ValueError(f"unknown apply model: {apply_model}")
     if max_score_per_run < 0:
         raise ValueError("max_score_per_run cannot be negative")
     conn.execute(
         "UPDATE setting SET scoring_model = ?, max_score_per_run = ?,"
-        " updated_at = datetime('now') WHERE id = 1",
-        (scoring_model, max_score_per_run))
+        " apply_model = COALESCE(?, apply_model), updated_at = datetime('now')"
+        " WHERE id = 1",
+        (scoring_model, max_score_per_run, apply_model))
     conn.commit()
 
 

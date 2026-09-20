@@ -56,7 +56,7 @@ function Attention({ hub }: { hub: HubContext }) {
   }
   if (d.open_prompt) {
     return (
-      <Banner tone="am" icon={P.chat} action={<button type="button" className="link-btn" onClick={actions.openChat}>Answer →</button>}>
+      <Banner tone="am" icon={P.chat} action={<button type="button" className="link-btn" onClick={() => actions.openChat()}>Answer →</button>}>
         <b>Waiting on you:</b> {d.open_prompt.question}
       </Banner>
     )

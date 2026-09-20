@@ -1094,3 +1094,19 @@ def test_the_prompt_forbids_asking_for_secrets():
     ask = agent_mod._steps_section("manual", False).split("== HOW TO ASK THE HUMAN ==")[1]
     assert "Never ASK for a password, a one-time code" in ask
     assert "RESULT:FAILED:account_required" in ask
+
+
+# -- MS1: the stored model id vs the CLI's own alias --
+
+def test_build_cmd_maps_a_setting_model_id_to_the_cli_alias(tmp_path):
+    """The setting stores full ids (one format for both pickers); `claude
+    --model` takes its aliases. An id nobody aliased passes through."""
+    def model_of(m, **kw):
+        cmd = agent_mod.build_cmd(m, tmp_path / "mcp.json", "s-1", **kw)
+        return cmd[cmd.index("--model") + 1]
+
+    assert model_of("claude-sonnet-5") == "sonnet"
+    assert model_of("claude-opus-5") == "opus"
+    assert model_of("some-future-model") == "some-future-model"
+    # A resumed session must carry the same model: --model is on every argv.
+    assert model_of("claude-opus-5", resume=True) == "opus"

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from career_agent import chat, outcomes, store, tailor
 from career_agent.apply import ats as ats_apply
-from career_agent.config import (MODEL_LABELS, SCORING_MODELS,
+from career_agent.config import (APPLY_MODELS, MODEL_LABELS, SCORING_MODELS,
                                  CandidateProfile, load_brief,
                                  load_candidate_profile)
 from career_agent.web import overview, worker
@@ -205,10 +205,12 @@ def job_detail_context(conn: sqlite3.Connection, job_id: int,
 
     checkpoint = None
     cp = conn.execute(
-        "SELECT status, step, mode, resume_count, form_url, updated_at, notes"
+        "SELECT status, step, mode, model, resume_count, form_url, updated_at, notes"
         "  FROM apply_checkpoint WHERE job_id = ?", (job_id,)).fetchone()
     if cp:
-        checkpoint = {k: cp[k] for k in ("status", "step", "mode", "resume_count",
+        # `model` is what the job chat's picker locks to while the session
+        # runs: this job's pin, not the global run status's idea of a model.
+        checkpoint = {k: cp[k] for k in ("status", "step", "mode", "model", "resume_count",
                                           "form_url", "updated_at")}
         checkpoint["max_resumes"] = ats_apply.MAX_RESUMES
         # A count only: the notes themselves stay with the agent's session.
@@ -276,7 +278,7 @@ def settings_context(conn: sqlite3.Connection, brief_path: Path,
             "daily_cap": brief.daily_cap if brief else "-",
             "today_submitted": today_submitted(conn),
             "settings": settings, "scoring_models": SCORING_MODELS,
-            "model_labels": MODEL_LABELS, "form": form or {},
+            "apply_models": APPLY_MODELS, "model_labels": MODEL_LABELS, "form": form or {},
             "errors": errors or {}, "saved": saved}
 
 

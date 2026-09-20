@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { Icon, Spinner } from '../Icon'
 import { P } from '../../icons'
@@ -31,31 +31,62 @@ function Avatar() {
 /** A closed card: its question and what was decided. It does not expand --
  * a closed prompt's payload never comes back with the messages, and the row
  * already says everything Home's cards hold. */
+const KIND_LABEL: Record<string, string> = {
+  approve: 'Go-ahead',
+  confirm: 'Review',
+  approve_account: 'Account',
+}
+
 function ClosedCard({ m, echo }: { m: ChatMessage; echo: Echo | undefined }) {
-  const kind = (m.payload as { kind?: string } | null)?.kind
+  const kind = (m.payload as { kind?: string } | null)?.kind ?? ''
   const [text, tone] = echo
-    ? DECIDED[echo.decision] ?? ['Answered', 'b sl']
+    ? DECIDED[echo.decision] ?? ['Answered', 'b em']
     : m.prompt_status === 'answered' ? ['Answered', 'b em'] : ['Expired', 'b sl']
+  // A free-text answer is worth showing on the row itself: it is what the
+  // agent was told, and the card it came from can no longer be opened.
+  const answer = echo && !(echo.decision in DECIDED) ? echo.decision : null
   return (
     <div className="ccard--closed card">
       <Icon d={P.chevronRight} size={14} />
-      <span className="ccard__kind">{kind === 'approve' ? 'Go-ahead' : 'Agent asked'}</span>
-      <span className="ccard__closedq">{m.content}</span>
+      <span className="ccard__kind">{KIND_LABEL[kind] ?? 'Agent asked'}</span>
+      <span className="ccard__closedq">
+        {m.content}
+        {answer && <span className="ccard__answer"> → {answer}</span>}
+      </span>
       <span className={tone}>{text}</span>
     </div>
   )
 }
 
+/** A note typed into a job chat, with the backend's own delivery line folded
+ * under it as a status. A note is guidance: it never approves anything. */
+function Note({ m, status }: { m: ChatMessage; status: ChatMessage | undefined }) {
+  const delivered = (status?.payload as { delivered?: boolean } | null)?.delivered
+  return (
+    <div className="note">
+      <div className="note__bubble">
+        <span className="note__label"><Icon d={P.file} size={12} /> Note to agent</span>
+        {m.content}
+      </div>
+      {status && (
+        <span className="note__status">
+          {delivered && <Icon d={P.clock} size={12} />}
+          {status.content}
+        </span>
+      )}
+    </div>
+  )
+}
+
 function AgentMessage({ m }: { m: ChatMessage }) {
-  const cid = (m.payload as { conversation_id?: number } | null)?.conversation_id
+  const jobId = (m.payload as { job_id?: number } | null)?.job_id
   return (
     <div className="agent">
       <Avatar />
       <div className="agent__col">
         <p className="agenttext">{m.content}</p>
-        {typeof cid === 'number' && (
-          // Interim until Screen 6 moves the job chat into the job hub.
-          <Link className="btn agent__open" to={`/chat/${cid}`}>
+        {typeof jobId === 'number' && (
+          <Link className="btn agent__open" to={`/jobs/${jobId}/chat`}>
             Open job chat <Icon d={P.arrowRight} size={14} />
           </Link>
         )}
@@ -68,12 +99,19 @@ function AgentMessage({ m }: { m: ChatMessage }) {
  * composer has sent but the poll hasn't returned yet; `thinking` says the
  * agent is still working (a Home message waits on the intent classifier,
  * which can take seconds). */
-export function Transcript({ messages, openPrompt, onAnswered, pending, thinking = false }: {
+export function Transcript({ messages, openPrompt, onAnswered, pending, thinking = false,
+                            card, notes = false }: {
   messages: ChatMessage[]
   openPrompt: OpenPrompt | null
   onAnswered: () => void
   pending?: string | null
   thinking?: boolean
+  /** How to render the open card. Home's go-ahead card is the default; a job
+   * chat passes its ASK/CONFIRM cards, which hang in the avatar gutter. */
+  card?: (prompt: OpenPrompt) => ReactNode
+  /** Job chats: a user message is a note to the agent, with the system line
+   * that follows folded under it as a delivery status. */
+  notes?: boolean
 }) {
   const end = useRef<HTMLDivElement>(null)
   const [atBottom, setAtBottom] = useState(true)
@@ -99,9 +137,12 @@ export function Transcript({ messages, openPrompt, onAnswered, pending, thinking
   }, [atBottom, lastId, pending, thinking])
 
   const echoes = new Map<number, Echo>()
+  const statuses = new Map<number, ChatMessage>()
   for (const m of messages) {
     const e = echoOf(m)
     if (e) echoes.set(e.prompt_id, e)
+    const noteFor = (m.payload as { note_for?: number } | null)?.note_for
+    if (m.role === 'system' && typeof noteFor === 'number') statuses.set(noteFor, m)
   }
 
   // A divider before the first message of each local day.
@@ -120,9 +161,14 @@ export function Transcript({ messages, openPrompt, onAnswered, pending, thinking
                 <span className="rule" /><span className="mono">{dividers[i]}</span><span className="rule" />
               </div>
             )}
-            {m.role === 'user' && !echoOf(m) && <div className="user">{m.content}</div>}
+            {m.role === 'user' && !echoOf(m) && (
+              notes ? <Note m={m} status={statuses.get(m.id)} />
+                    : <div className="user">{m.content}</div>
+            )}
             {m.role === 'agent' && <AgentMessage m={m} />}
-            {m.role === 'system' && (
+            {/* A note's delivery line renders under its bubble, not as its
+                own message. */}
+            {m.role === 'system' && !(m.payload as { note_for?: number } | null)?.note_for && (
               <div className="sys">
                 <span className="rule" /><span>{m.content}</span>
                 <span className="mono">{clock(m.created_at)}</span><span className="rule" />
@@ -130,9 +176,11 @@ export function Transcript({ messages, openPrompt, onAnswered, pending, thinking
             )}
             {m.role === 'prompt' && (
               openPrompt && (m.payload as { prompt_id?: number } | null)?.prompt_id === openPrompt.id
-                ? <div className="agent"><Avatar />
-                    <ApproveCard key={openPrompt.id} prompt={openPrompt} onAnswered={onAnswered} />
-                  </div>
+                ? card
+                  ? <div className="jcard">{card(openPrompt)}</div>
+                  : <div className="agent"><Avatar />
+                      <ApproveCard key={openPrompt.id} prompt={openPrompt} onAnswered={onAnswered} />
+                    </div>
                 : <ClosedCard m={m} echo={echoes.get((m.payload as { prompt_id?: number } | null)?.prompt_id ?? -1)} />
             )}
           </div>

@@ -477,7 +477,7 @@ function RunStrip({ ctx, refusal }: { ctx: ApplicationsContext; refusal: string 
           {ctx.open_prompt && ctx.conversation_id && (
             // Interim target: the job's chat. Screen 6 moves it to the job hub's Chat tab.
             <span className="b am">
-              <span className="dot dot--am" />Card waiting · <Link to={`/chat/${ctx.conversation_id}`}>Answer →</Link>
+              <span className="dot dot--am" />Card waiting · <Link to={`/jobs/${ctx.current_job!.job_id}/chat`}>Answer →</Link>
             </span>
           )}
         </div>

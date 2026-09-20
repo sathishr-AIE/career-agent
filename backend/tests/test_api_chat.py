@@ -1082,3 +1082,37 @@ async def test_answering_a_home_card_tags_its_echo_with_the_decision(conn, runs,
     echo = [m for m in _home(conn) if m["role"] == "user"][-1]
     assert echo["content"] == "Run discovery now? → reject"
     assert echo["payload"] == {"prompt_id": pid, "decision": "reject"}
+
+
+async def test_a_job_note_tags_its_delivery_status_line(conn, runs):
+    """The job chat folds this line under the note bubble as its status, so
+    it needs a marker -- matching the wording would break on a copy edit."""
+    cid = chat.conversation_for_job(conn, 1)
+    runs[1] = _LiveRun()
+
+    actions.job_message(conn, cid, 1, "Skip the optional cover letter.")
+    delivered = chat.messages_after(conn, cid)[-1]
+
+    assert delivered["role"] == "system"
+    assert delivered["payload"] == {"note_for": delivered["id"] - 1, "delivered": True}
+
+    runs.clear()
+    actions.job_message(conn, cid, 1, "Mention the Kubernetes migration.")
+    saved = chat.messages_after(conn, cid)[-1]
+
+    assert saved["payload"] == {"note_for": saved["id"] - 1, "delivered": False}
+
+
+async def test_a_job_card_answer_echo_is_tagged_with_its_prompt(conn, runs):
+    """Every untagged user message in a job chat renders as a note, so an
+    answer echo has to say which card it answered."""
+    cid = chat.conversation_for_job(conn, 1)
+    # The parked needs_answer card: answerable with no live run.
+    pid = chat.open_prompt(conn, 1, "text", {"id": "q1", "question": "Notice period?",
+                                             "origin": "needs_answer"})
+
+    r = actions.answer_prompt(conn, pid, {"answer": "30 days", "remember": False})
+
+    assert r["ok"]
+    echo = [m for m in chat.messages_after(conn, cid) if m["role"] == "user"][-1]
+    assert echo["payload"] == {"prompt_id": pid, "decision": "30 days"}

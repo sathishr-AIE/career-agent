@@ -2470,7 +2470,8 @@ def test_get_settings_models_returns_the_picker_fields(client):
 def test_put_settings_models_saves_the_scoring_model(client):
     r = client.put("/api/settings/models", json={"scoring_model": "claude-haiku-4-5"})
     assert r.status_code == 200
-    assert r.json() == {"ok": True, "scoring_model": "claude-haiku-4-5"}
+    assert r.json() == {"ok": True, "scoring_model": "claude-haiku-4-5",
+                        "apply_model": "claude-sonnet-5"}
     conn = db.connect(web.DB_PATH)
     assert store.get_settings(conn)["scoring_model"] == "claude-haiku-4-5"
 
@@ -2504,3 +2505,78 @@ def test_put_settings_models_with_no_fields_is_a_no_op(client):
     assert r.json()["scoring_model"] == "claude-sonnet-5"
     conn = db.connect(web.DB_PATH)
     assert store.get_settings(conn)["scoring_model"] == "claude-sonnet-5"
+
+
+# --- MS1 (apply half): the job chat's picker, and the agent's own model ---
+
+def test_get_settings_models_returns_both_pickers(client):
+    d = client.get("/api/settings/models").json()
+    assert d["apply_model"] == "claude-sonnet-5"
+    assert d["apply_models"] == ["claude-sonnet-5", "claude-opus-5"]
+    assert d["model_labels"]["claude-opus-5"]
+
+
+def test_put_settings_models_saves_the_apply_model(client):
+    r = client.put("/api/settings/models", json={"apply_model": "claude-opus-5"})
+    assert r.status_code == 200
+    assert r.json()["apply_model"] == "claude-opus-5"
+    conn = db.connect(web.DB_PATH)
+    s = store.get_settings(conn)
+    assert (s["apply_model"], s["scoring_model"]) == ("claude-opus-5", "claude-sonnet-5")
+
+
+def test_put_settings_models_rejects_an_unknown_apply_model(client):
+    r = client.put("/api/settings/models", json={"apply_model": "claude-haiku-4-5"})
+    assert r.status_code == 422
+    assert r.json()["ok"] is False
+    conn = db.connect(web.DB_PATH)
+    assert store.get_settings(conn)["apply_model"] == "claude-sonnet-5"
+
+
+def test_put_settings_models_with_no_fields_keeps_both(client):
+    conn = db.connect(web.DB_PATH)
+    store.save_settings(conn, "claude-haiku-4-5", 40, apply_model="claude-opus-5")
+
+    r = client.put("/api/settings/models", json={})
+
+    assert r.status_code == 200
+    s = store.get_settings(db.connect(web.DB_PATH))
+    assert (s["scoring_model"], s["apply_model"]) == ("claude-haiku-4-5", "claude-opus-5")
+
+
+def test_put_api_settings_keeps_the_apply_model_when_the_form_omits_it(client, brief_path):
+    """The settings form and the Jinja page only own the scoring half; a
+    missing field must never blank the agent's model."""
+    conn = db.connect(web.DB_PATH)
+    store.save_settings(conn, "claude-sonnet-5", 25, apply_model="claude-opus-5")
+
+    r = client.put("/api/settings", json={
+        "target_titles": "AI Engineer", "search_locations": "Chennai",
+        "locations": "Chennai, Remote", "remote_ok": True,
+        "daily_cap": 5, "gate_threshold": 72, "staleness_days": 30,
+        "scoring_model": "claude-haiku-4-5", "max_score_per_run": 25,
+        "brief_present": True, "candidate_present": False,
+    })
+
+    assert r.status_code == 200
+    s = store.get_settings(db.connect(web.DB_PATH))
+    assert (s["scoring_model"], s["apply_model"]) == ("claude-haiku-4-5", "claude-opus-5")
+
+
+def test_api_settings_offers_the_apply_models(client, brief_path):
+    d = client.get("/api/settings").json()
+    assert d["apply_models"] == ["claude-sonnet-5", "claude-opus-5"]
+    assert d["settings"]["apply_model"] == "claude-sonnet-5"
+
+
+def test_job_detail_checkpoint_carries_the_pinned_model(client):
+    """The job chat's picker locks to the model the live session was pinned
+    to, which is this job's own, not whatever the global run status holds."""
+    conn = db.connect(web.DB_PATH)
+    from career_agent.apply import checkpoint
+    checkpoint.start(conn, 1, "s-1", "n-1", mode="manual", can_submit=False,
+                     model="claude-opus-5")
+
+    d = client.get("/api/jobs/1").json()
+
+    assert d["checkpoint"]["model"] == "claude-opus-5"

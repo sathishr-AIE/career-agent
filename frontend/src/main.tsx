@@ -8,10 +8,10 @@ import './components/ui.css'
 import './legacy.css'
 import { App } from './App'
 import { Applications } from './routes/Applications'
-import { Chat } from './routes/Chat'
 import { Dashboard } from './routes/Dashboard'
 import { Facts } from './routes/Facts'
 import { Home } from './routes/Home'
+import { ChatRedirect, JobChat } from './routes/JobChat'
 import { Job } from './routes/Job'
 import { JobDetails } from './routes/JobDetails'
 import { Logins } from './routes/Logins'
@@ -30,14 +30,13 @@ createRoot(document.getElementById('root')!).render(
       <Routes>
         <Route element={<App />}>
           <Route index element={<Home />} />
-          {/* The job chat keeps the pre-redesign page until Screen 6
-              moves it into the job hub's Chat tab. */}
-          <Route path="chat/:id" element={legacy(<Chat />)} />
+          {/* Links and bookmarks from before the job chat moved into the hub. */}
+          <Route path="chat/:id" element={<ChatRedirect />} />
           <Route path="dashboard" element={<Dashboard />} />
           <Route path="applications" element={<Applications />} />
-          {/* The job hub: Details now; Screen 6 adds path="chat". */}
           <Route path="jobs/:id" element={<Job />}>
             <Route index element={<JobDetails />} />
+            <Route path="chat" element={<JobChat />} />
           </Route>
           <Route path="resumes" element={legacy(<Resumes />)} />
           <Route path="facts" element={legacy(<Facts />)} />

@@ -2,9 +2,8 @@
    job chat (Screen 6). Values from ChatHome.dc.html and ChatCards.dc.html;
    the primitives (.card, .btn, .b, .chip, .menu, .alert) stay in ui.css.
 
-   The artboards' generic names (.user, .agent, .sys) are scoped under
-   .tscript on purpose: routes/Chat.css is still a global stylesheet until
-   Screen 6 deletes it, and it owns .msg/.msgs/.composer/.conv. */
+   The artboards' generic names (.user, .agent, .sys) stay scoped under
+   .tscript: they are too generic to own globally. */
 
 .tscript {
   display: flex;
@@ -219,9 +218,10 @@
 }
 
 .cbar__helper {
+  margin: 0;
+  padding: 0 4px;
   font-size: 12px;
   color: var(--text-3);
-  padding: 0 2px;
 }
 
 .cbar__tools {
@@ -300,4 +300,261 @@
   height: 56px;
   margin-left: 40px;
   border-radius: var(--radius);
+}
+
+/* -- job chat: cards in the avatar gutter, notes, and the review table -- */
+
+.jcard {
+  margin-left: 40px;
+  min-width: 0;
+}
+
+.ccard__head--ask {
+  background: var(--am-bg);
+  border-bottom-color: var(--am-line);
+  color: var(--am-fg);
+}
+
+.ccard__head--review {
+  background: var(--surface-2);
+  border-bottom-color: var(--line);
+  color: var(--text);
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  font-size: 13px;
+}
+
+.ccard__head--review svg {
+  color: var(--primary);
+}
+
+.ccard__head-l,
+.ccard__head-r {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ccard__mode {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--sl-fg);
+  font-size: 11px;
+}
+
+.ccard__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ccard__row .field {
+  flex-grow: 1;
+}
+
+/* The agent's suggestion: outlined, never filled -- it is a default, not
+   the primary action. */
+.ccard__default {
+  border-color: var(--primary);
+  color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary) inset;
+}
+
+.ccard__remember {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #334155;
+}
+
+.ccard__remember input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+}
+
+.ccard__warn,
+.ccard__notes {
+  margin: 0;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--sl-fg);
+}
+
+.ccard__warn {
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+
+.ccard__notes {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text-3);
+}
+
+.ccard__foot {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ccard__answer {
+  color: var(--sl-fg);
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  gap: 6px 12px;
+  font-size: 13px;
+  line-height: 18px;
+  word-break: break-word;
+}
+
+.kv__k {
+  color: var(--text-3);
+}
+
+/* -- the review card's field table -- */
+
+.rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+  line-height: 18px;
+  word-break: break-word;
+}
+
+.row__k {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-3);
+}
+
+.row--secret {
+  background: #fbfbfe;
+}
+
+.row__secret {
+  color: var(--text-3);
+}
+
+.ccard__grid {
+  padding: 12px 14px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+}
+
+.ccard__grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ccard__file {
+  font-size: 12px;
+  color: #334155;
+  word-break: break-all;
+}
+
+.mems {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mem {
+  display: inline-flex;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--sl-fg);
+}
+
+/* -- signing in (need_password): a notice, never a card -- */
+
+.signin {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  font-size: 13px;
+  line-height: 18px;
+  color: #0c4a6e;
+}
+
+.signin svg {
+  flex-shrink: 0;
+  color: #0369a1;
+}
+
+/* -- notes to the agent -- */
+
+.note {
+  align-self: flex-end;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: 520px;
+}
+
+.note__bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 14px 10px;
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-sm) var(--radius-lg);
+  background: var(--sl-bg);
+  border: 1px solid var(--line);
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.note__label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--sl-fg);
+}
+
+.note__status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-3);
 }

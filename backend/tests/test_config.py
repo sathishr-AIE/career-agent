@@ -290,3 +290,16 @@ def test_unchanged_sections_keep_their_formatting(tmp_path):
     p.write_text(text, encoding="utf-8")
     save_candidate_profile(p, _full_profile(candidate_phone="+91-2"))
     assert "[address]  # home" in p.read_text(encoding="utf-8")
+
+
+def test_apply_models_exclude_haiku_and_carry_labels_and_cli_aliases():
+    """MS1: the browser-driving agent needs a stronger model, so haiku is
+    deliberately out. Every id needs a label for the picker and a CLI alias
+    for `claude --model`."""
+    from career_agent.config import (APPLY_CLI_ALIAS, APPLY_MODELS,
+                                     DEFAULT_APPLY_MODEL, MODEL_LABELS)
+    assert APPLY_MODELS == ("claude-sonnet-5", "claude-opus-5")
+    assert DEFAULT_APPLY_MODEL == "claude-sonnet-5"
+    assert all(m in MODEL_LABELS for m in APPLY_MODELS)
+    assert APPLY_CLI_ALIAS["claude-sonnet-5"] == "sonnet"
+    assert APPLY_CLI_ALIAS["claude-opus-5"] == "opus"

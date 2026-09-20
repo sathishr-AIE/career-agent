@@ -10,13 +10,15 @@ import shutil
 import sqlite3
 import threading
 import uuid
+from functools import partial
 from pathlib import Path
 
 from career_agent import chat
 from career_agent.apply import agent as agent_mod
 from career_agent.apply import checkpoint
 from career_agent.apply.runner import RunEvents
-from career_agent.config import CandidateProfile, CareerBrief
+from career_agent.config import (APPLY_MODELS, DEFAULT_APPLY_MODEL,
+                                 CandidateProfile, CareerBrief)
 from career_agent.models import Job
 
 log = logging.getLogger(__name__)
@@ -179,20 +181,34 @@ def preflight() -> None:
         raise agent_mod.PreconditionError(str(exc)) from exc
 
 
+def _apply_model(settings) -> str:
+    """The stored apply model, or the default when it has been retired out
+    from under the row -- `claude --model <retired>` would fail at spawn on
+    every job. run.py does the same for the scoring model."""
+    model = settings["apply_model"]
+    if model in APPLY_MODELS:
+        return model
+    log.warning("stored apply model %r is not a known model; falling back to %s",
+                model, DEFAULT_APPLY_MODEL)
+    return DEFAULT_APPLY_MODEL
+
+
 async def _live_run_agent(prompt: str, job_id: int, nonce: str,
                           events: RunEvents, session_id: str | None = None,
-                          resume: bool = False):
+                          resume: bool = False, model: str = DEFAULT_APPLY_MODEL):
     """Default agent runner: a real Chrome around a real `claude` session.
     Tests inject their own run_agent instead -- nothing in the test suite
     ever reaches this, by house convention (no test spawns a browser or a
-    subprocess)."""
+    subprocess). `model` is bound by submit() (the only link holding a
+    connection) rather than passed through the runner call, which every
+    injected fake declares positionally."""
     from career_agent.apply import chrome as chrome_mod
 
     proc = chrome_mod.launch_chrome()
     try:
         return await agent_mod.run_agent(prompt, job_id=job_id, nonce=nonce,
                                          events=events, session_id=session_id,
-                                         resume=resume)
+                                         resume=resume, model=model)
     except asyncio.CancelledError:
         _kill_live(job_id, events)   # before cleanup: never leave claude driving a dead Chrome
         raise
@@ -769,7 +785,6 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
                    _resume_text(resume_row),
                    str(_stage_resume(resume_path, profile, job_id)))
     score = score_row["weighted_score"] if score_row else None
-    runner = run_agent or _live_run_agent
     can_submit = SUBMISSION_IMPLEMENTED or run_agent is not None
     carried = 0
     if resume and (cp["mode"], cp["can_submit"]) != (mode, int(can_submit)):
@@ -790,6 +805,13 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
     # cannot guess it, so it cannot forge an outcome, a CONFIRM, or an ASK.
     # A resume keeps the nonce: the resumed session already knows it.
     nonce = cp["nonce"] if resume else agent_mod.new_nonce()
+    # ...and the model, for the same reason: build_cmd puts --model on a
+    # --resume too, so an unpinned resume would hand the session a different
+    # model half way through. A mismatch restart above cleared `resume`, so
+    # it re-pins today's choice -- it is a new session.
+    model = (cp["model"] or _apply_model(store.get_settings(conn))) if resume \
+        else _apply_model(store.get_settings(conn))
+    runner = run_agent or partial(_live_run_agent, model=model)
     pinned = cp["answers"] if resume else None
     prompt = agent_mod.build_prompt(*prompt_args, mode=mode, can_submit=can_submit,
                                     nonce=nonce, pinned_answers=pinned, score=score,
@@ -836,7 +858,8 @@ async def submit(conn: sqlite3.Connection, job_id: int, mode: str,
         if resume:
             _checkpoint(checkpoint.resume, conn, job_id)
         else:
-            _checkpoint(checkpoint.start, conn, job_id, session_id, nonce, mode, can_submit, carried)
+            _checkpoint(checkpoint.start, conn, job_id, session_id, nonce, mode, can_submit,
+                        carried, model)
         try:
             result, detail = await _run(runner, first, job_id, nonce, events,
                                         session_id=session_id, resume=resume)

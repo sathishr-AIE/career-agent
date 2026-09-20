@@ -1,0 +1,94 @@
+/* The job hub's Chat tab (approved Screen 6). ChatJob.dc.html: one centred
+   760px column under the hub header, no rail, the composer group pinned at
+   the bottom. The transcript scrolls in its own box — the same lesson Home
+   learned: a sticky composer lets new messages slide underneath it. */
+
+.jchat {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+}
+
+.jchat__col {
+  width: 760px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.jchat__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.jchat__foot {
+  margin-top: auto;
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.jchat__empty {
+  margin: auto 0;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--text-3);
+}
+
+.jchat__wait {
+  padding: 24px 0;
+}
+
+/* The interrupted-session banner: amber, as the artboard draws it (sky is
+   reserved for the "signing in" notice). */
+.jchat__resume {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--am-bg);
+  border: 1px solid var(--am-line);
+  font-size: 13px;
+  line-height: 18px;
+  color: #78350f;
+}
+
+.jchat__resume > svg {
+  flex-shrink: 0;
+  color: var(--am-fg);
+}
+
+.jchat__resume > span {
+  flex-grow: 1;
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  /* Cards take the full width instead of hanging in the avatar gutter. */
+  .jcard,
+  .ccard--closed {
+    margin-left: 0;
+  }
+  .row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  .ccard__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .kv {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px 0;
+  }
+  .jchat__resume {
+    flex-wrap: wrap;
+  }
+}

@@ -41,11 +41,14 @@ export function ModelPicker({ label, value, options, optionLabel, onPick, busy =
     }
   }, [open])
 
+  // A running `claude -p` session keeps the model it was spawned with, so
+  // the chip states the session's own model and `lockedText` explains why.
   if (lockedText) {
     return (
       <span className="chip chip--locked" title={lockedText}>
         <Icon d={P.lock} size={12} />
-        {lockedText}
+        {label}
+        <span className="mono">{value ? shortModel(value) : '—'}</span>
       </span>
     )
   }
