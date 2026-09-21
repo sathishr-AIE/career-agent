@@ -72,14 +72,24 @@ still what the Jinja `/applications` page requests. Before deleting either, grep
 callers first. (`GET /api/pipeline/status` was on this list until the redesigned sidebar
 started polling it.)
 
-**Frontend redesign in progress** (`docs/superpowers/specs/2026-09-14-frontend-redesign-design.md`).
+**Frontend redesign** (`docs/superpowers/specs/2026-09-14-frontend-redesign-design.md`),
+now complete: every page is rebuilt, and `legacy()`/`legacy.css` are gone.
 The React shell is `App.tsx` plus `components/Sidebar.tsx` (nav and the agent status card,
-polling `/api/run/status` and `/api/pipeline/status`). Routes wrapped in `legacy()` in
-`main.tsx` are pre-redesign pages, styled by `src/legacy.css`; the redesign's primitives
-live in `components/ui.css` and reuse the design artboards' class names. New pages get
-the shared shell services from `components/shell.ts` (`useShell()` for the app-wide
+polling `/api/run/status` and `/api/pipeline/status`). The redesign's primitives live in
+`components/ui.css` and reuse the design artboards' class names. Pages get the shared
+shell services from `components/shell.ts` (`useShell()` for the app-wide
 `/api/run/status` poll and `toast()`, and `<TopBarActions>` to put page buttons in the top
 bar) and poll with `components/usePoll.ts`.
+
+`main.tsx` wraps the `<Routes>` tree in a data router (`createBrowserRouter` over one
+splat route), because `FormPage`'s `useLeaveGuard` needs `useBlocker`, which only works
+under one. The form pages (Profile, Settings, Memory, Logins) are built from
+`components/FormPage.tsx` + `forms.css`: `FormPage`, `SectionNav`, `TextInput`,
+`TagInput`, `SaveBar`, `ErrorSummary` and `useLeaveGuard`, which returns the shared
+`ConfirmDialog` for the page to render. Those pages' input is `.in` (36px); every other
+screen's is `ui.css`'s `.field` (32px). Two classes on purpose — unifying them would
+repaint eight shipped screens for 4px — but the label bits (`.fl`, `.req`, `.fe`) have
+one owner, `ui.css`.
 
 `web.scheduled_task_installed()` shells out to PowerShell (about 4 s), so it caches its
 answer for 5 minutes (`SCHEDULED_TTL_S`). Skip and Dismiss set `job.dismissed_at`, which
@@ -130,8 +140,7 @@ a note to the agent, and `job_message`'s follow-up system line carries
 load (`after_id` 0) and appends past the cursor after that. Every other answer runs in
 `run_in_threadpool`, because a password fill uses Playwright's sync API, which refuses to
 run inside a running event loop (`secret_fill._require_no_running_loop` fails loudly if
-that regresses). The pre-chat pages, plus Memory, Logins and Profile, open as drawer
-panels.
+that regresses).
 
 ### Two independent state machines, one SQLite DB
 
@@ -343,9 +352,11 @@ Configuration is split by who owns it and how sensitive it is — don't conflate
   `[[education]]`, which the agent uses to fill those form sections. Same `_save_toml`
   round-trip helper as the brief, nested arrays of tables included.
 - `ats_boards.toml` (`Board`, `config.py`) — which company ATS boards to scrape directly.
-- `setting` table (`store.py`, via the Settings page) — operational choices
-  (`scoring_model`, `max_score_per_run`) that aren't part of the career brief and don't
-  need version control.
+- `setting` table (`store.py`, via the Settings page and the chat composers' pickers) —
+  operational choices (`scoring_model`, `apply_model`, `max_score_per_run`) that aren't
+  part of the career brief and don't need version control. `save_settings` takes
+  `apply_model` as a keyword and `COALESCE`s it, so a form that owns only the scoring
+  half can never blank the agent's model.
 - `.env` — tokens plus `CREDENTIAL_KEY`, the Fernet key for the `site_credential`
   table. Losing it makes every stored login unreadable (`CredentialKeyError`).
 

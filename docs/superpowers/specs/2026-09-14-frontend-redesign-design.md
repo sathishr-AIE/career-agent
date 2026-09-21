@@ -134,13 +134,20 @@ The picker sits in the composer toolbar, and what it controls depends on the cha
 | 5 | Chat (Home + Job) | **Approved** (Claude design canvas) | **Implemented** | MS1 |
 | 6 | Facts | **Approved** (Claude design canvas) | **Implemented** | FC1 |
 | 7 | Resumes | **Approved** (Claude design canvas) | **Implemented** | RS1, FC1 (links only) |
-| 8 | Profile | **Approved** (Claude design canvas) | Not started | none |
-| 9 | Settings | **Approved** (Claude design canvas) | Not started | MS1 |
-| 10 | Memory | **Approved** (Claude design canvas) | Not started | MM1 |
-| 11 | Logins | **Approved** (Claude design canvas) | Not started | LG1 |
+| 8 | Profile | **Approved** (Claude design canvas) | **Implemented** | none |
+| 9 | Settings | **Approved** (Claude design canvas) | **Implemented** | MS1 |
+| 10 | Memory | **Approved** (Claude design canvas) | **Implemented** | MM1 |
+| 11 | Logins | **Approved** (Claude design canvas) | **Implemented** | LG1 |
 
 Design statuses: Pending → UX defined → In review → **Approved**. Implementation statuses:
 Not started → In progress → **Implemented**.
+
+**All eleven screens are implemented (2026-09-21).** Screens 1-7 were built on
+`feat/frontend-redesign` one at a time, each reviewed before the next was planned.
+Profile, Settings, Memory and Logins were built in parallel on
+`feat/frontend-redesign-7-12` and came in with that branch's merge, which is also where
+the two sides' duplicate Facts, Resumes and MS1 work was reconciled — see that merge
+commit for which version of each was kept and why.
 
 **Stitch outage (2026-09-14).** Screen generation timed out on every attempt, including a
 one-line prompt in an empty project. Screen edits still worked. While it lasts, screens
