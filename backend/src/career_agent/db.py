@@ -226,6 +226,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
                                "INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "resume", "job_id", "INTEGER REFERENCES job(id)")
     _add_column_if_missing(conn, "resume", "content", "TEXT")
+    # MS1: the apply agent's model, validated against config.APPLY_MODELS in Python.
+    _add_column_if_missing(conn, "setting", "apply_model",
+                           "TEXT NOT NULL DEFAULT 'claude-sonnet-5'")
     _add_column_if_missing(conn, "application", "failure_reason", "TEXT")
     _add_column_if_missing(conn, "application", "transcript_path", "TEXT")
     # S4 personalized memory: keyed preferences layered onto the existing
@@ -243,8 +246,6 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "qa_bank", "twin_key", "TEXT")
     # Resume bookkeeping (apply/checkpoint.py): what a resume must match,
     # whether a DECISION approve went out, the resume cap, the worker's one auto-resume.
-    _add_column_if_missing(conn, "setting", "apply_model",
-                           "TEXT NOT NULL DEFAULT 'claude-sonnet-5'")
     # The model this session was started on: a --resume must not switch
     # models mid-session, exactly as it must not switch mode/can_submit.
     # NULL means an older row that predates the pin; submit falls back to

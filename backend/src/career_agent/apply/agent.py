@@ -890,6 +890,20 @@ def build_cmd(model: str, mcp_path, session_id: str,
 RUNS: "dict[int, AgentRun]" = {}   # job_id -> its live run; the answer API sends into it
 
 
+def live_runs() -> list[dict]:
+    """{job_id, model} per live session, read from the argv it was spawned
+    with (build_cmd's --model) -- what it really runs on. That argv holds the
+    CLI alias, so it is translated back to the stored id here: the picker
+    matches these against APPLY_MODELS, and "sonnet" is not one of them.
+    A snapshot: RUNS changes on run threads."""
+    ids = {alias: model for model, alias in APPLY_CLI_ALIAS.items()}
+    out = []
+    for jid, run in list(RUNS.items()):
+        alias = run.cmd[run.cmd.index("--model") + 1]
+        out.append({"job_id": jid, "model": ids.get(alias, alias)})
+    return out
+
+
 def run_session(prompt: str, *, job_id: int, nonce: str, session_id: str, events,
                 cdp_port: int = 9222, timeout_s: float = 1200,
                 answer_wait_s: float = 1800, model: str = DEFAULT_APPLY_MODEL, resume: bool = False,

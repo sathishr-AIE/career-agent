@@ -1,0 +1,80 @@
+/* The Settings page: values from the approved Settings artboard
+   (Settings.dc.html). Controls and layout are the form-page kit
+   (components/forms.css). */
+
+.set-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.set-body .grid2 {
+  padding: 0;
+  gap: 16px;
+}
+
+.settings .ch .help {
+  text-align: right;
+}
+
+.settings__broken {
+  scroll-margin-top: 24px;
+}
+
+.form-page .settings__broken {
+  align-items: flex-start;
+}
+
+.settings__why {
+  display: block;
+  margin-top: 4px;
+  color: #9f1239;
+}
+
+.settings__candidate-row {
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settings__candidate-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text-3);
+}
+
+.settings__candidate-text h2 {
+  margin: 0;
+}
+
+.settings__candidate .btn {
+  flex-shrink: 0;
+  color: var(--text);
+}
+
+.settings__candidate .btn svg {
+  color: var(--sl-fg);
+}
+
+.settings__candidate .alert {
+  margin: 0 16px 16px;
+}
+
+@media (max-width: 720px) {
+  .settings .ch {
+    flex-wrap: wrap;
+  }
+  .settings .ch .help {
+    text-align: left;
+  }
+  .settings__candidate-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

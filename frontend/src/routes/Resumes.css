@@ -46,6 +46,14 @@
   gap: 14px;
 }
 
+/* Dragging a file over the card. Outline rather than border so the card
+   doesn't shift by a pixel as it highlights. */
+.master--over {
+  outline: 2px dashed var(--link-hover);
+  outline-offset: -4px;
+  background: var(--surface-2);
+}
+
 .master__id {
   display: flex;
   align-items: flex-start;

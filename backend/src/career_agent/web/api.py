@@ -136,6 +136,7 @@ _SETTINGS_DEFAULTS = {
     "scoring_model": "", "max_score_per_run": "", "brief_present": False,
     "candidate_present": False, "candidate_name": "", "candidate_email": "",
     "candidate_phone": "", "linkedin_url": "", "portfolio_url": "",
+    "apply_model": "",
 }
 _SETTINGS_NUMERIC_FIELDS = ("salary_floor_inr", "daily_cap", "gate_threshold",
                            "staleness_days", "max_score_per_run")

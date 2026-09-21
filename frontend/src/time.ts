@@ -53,3 +53,10 @@ export function dayLabel(utc: string): string {
   if (days === 1) return 'Yesterday'
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
+
+/** Local calendar date, "2026-09-14". */
+export function localDay(utc: string): string {
+  const d = parseUtc(utc)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}

@@ -1029,12 +1029,12 @@ def _parse_int(raw: str, field: str, errors: dict) -> int | None:
     its framework 422 the request before this function runs, bypassing the
     'nothing was saved' story and losing every other field submitted."""
     if not raw.strip():
-        errors[field] = "is required"
+        errors[field] = "Required"
         return None
     try:
         return int(raw)
     except ValueError:
-        errors[field] = "must be a whole number"
+        errors[field] = "Must be a whole number"
         return None
 
 
@@ -1061,9 +1061,11 @@ def _validate_brief(form: dict, daily_cap: int, gate_threshold: int,
     except ValidationError as exc:
         for err in exc.errors():
             field = err["loc"][0] if err["loc"] else "form"
-            errors[str(field)] = err["msg"]
+            # An empty required list (target_titles, search_locations) reads
+            # plainly under its field, not as pydantic's "List should have...".
+            errors[str(field)] = "Add at least one" if err["type"] == "too_short" else err["msg"]
     except ValueError:
-        errors["salary_floor_inr"] = "must be a whole number, or blank"
+        errors["salary_floor_inr"] = "Must be a whole number, or blank"
     return None
 
 
@@ -1081,7 +1083,8 @@ def save_settings(conn: sqlite3.Connection, form: dict, brief_path: Path,
     (truthy/blank), salary_floor_inr, daily_cap, gate_threshold,
     staleness_days, scoring_model, max_score_per_run, brief_present
     (truthy/blank), candidate_present (truthy/blank), candidate_name,
-    candidate_email, candidate_phone, linkedin_url, portfolio_url."""
+    candidate_email, candidate_phone, linkedin_url, portfolio_url, and the
+    optional apply_model (blank keeps the stored one)."""
     errors: dict[str, str] = {}
 
     # max_score_per_run's control is on the page unconditionally, so it's
@@ -1151,7 +1154,7 @@ def save_settings(conn: sqlite3.Connection, form: dict, brief_path: Path,
     if apply_model is not None and apply_model not in APPLY_MODELS:
         errors["apply_model"] = f"unknown apply model: {apply_model}"
     if max_score_per_run_n is not None and max_score_per_run_n < 0:
-        errors["max_score_per_run"] = "cannot be negative"
+        errors["max_score_per_run"] = "Can't be negative"
 
     if errors:
         return {"ok": False, "errors": errors}

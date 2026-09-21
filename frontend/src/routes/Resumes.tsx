@@ -66,22 +66,41 @@ function Bullets({ summary, bullets }: { summary: string; bullets: Bullet[] }) {
   )
 }
 
-function MasterCard({ master, result, onPick, busy }: {
+function MasterCard({ master, result, onPick, busy, onFile }: {
   master: ResumesData['master']
   result: ActionResult | null
   onPick: () => void
   busy: boolean
+  onFile: (file: File) => void
 }) {
+  // The card itself is the drop target -- a separate dropzone would be a
+  // second upload control saying the same thing as the top bar's button.
+  const [over, setOver] = useState(false)
+  const dz = {
+    onDragOver: (e: React.DragEvent) => {
+      e.preventDefault()
+      setOver(true)
+    },
+    onDragLeave: () => setOver(false),
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault()
+      setOver(false)
+      const file = e.dataTransfer.files?.[0]
+      if (file && !busy) onFile(file)
+    },
+  }
+  const cls = (base: string) => (over ? `${base} master--over` : base)
+
   if (!master.exists) {
     return (
-      <section className="card master master--missing">
+      <section className={cls('card master master--missing')} {...dz}>
         <div className="master__id">
           <span className="master__tile"><Icon d={P.doc} size={20} /></span>
           <div className="master__text">
             <span className="ct">No master resume</span>
             <p className="master__sub">
               Tailoring and Apply can't run until you upload one. It goes at{' '}
-              <span className="mono">{master.path}</span>.
+              <span className="mono">{master.path}</span>. Drop a <b>.docx</b> here, or:
             </p>
           </div>
         </div>
@@ -96,7 +115,7 @@ function MasterCard({ master, result, onPick, busy }: {
   }
 
   return (
-    <section className="card master">
+    <section className={cls('card master')} {...dz}>
       <div className="master__id">
         <span className="master__tile"><Icon d={P.doc} size={20} /></span>
         <div className="master__text">
@@ -111,7 +130,7 @@ function MasterCard({ master, result, onPick, busy }: {
           {/* A rule worth saying plainly, not only after an upload. */}
           <p className="master__note">
             Replacing the master affects future tailoring only — existing versions keep
-            the file they were rendered from.
+            the file they were rendered from. Drop a <b>.docx</b> on this card to replace it.
           </p>
         </div>
       </div>
@@ -198,12 +217,7 @@ export function Resumes() {
 
   const pick = () => fileRef.current?.click()
 
-  const upload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    // Cleared on every attempt, not just on success: re-picking the same file
-    // after a refusal fires no change event otherwise, and the retry is lost.
-    e.target.value = ''
-    if (!file) return
+  const send = (file: File) => {
     setBusy(true)
     setResult(null)
     uploadFile<ActionResult>('/api/resumes', file)
@@ -213,6 +227,14 @@ export function Resumes() {
       })
       .catch((err: unknown) => setResult({ ok: false, message: errorText(err) }))
       .finally(() => setBusy(false))
+  }
+
+  const upload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    // Cleared on every attempt, not just on success: re-picking the same file
+    // after a refusal fires no change event otherwise, and the retry is lost.
+    e.target.value = ''
+    if (file) send(file)
   }
 
   const picker = (
@@ -261,7 +283,7 @@ export function Resumes() {
         <p>The master template every tailored resume is rendered from.</p>
       </div>
 
-      <MasterCard master={master} result={result} onPick={pick} busy={busy} />
+      <MasterCard master={master} result={result} onPick={pick} busy={busy} onFile={send} />
 
       <section className="card">
         <div className="ch vch">

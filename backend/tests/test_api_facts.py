@@ -87,16 +87,19 @@ def test_delete_refuses_a_fact_a_tailored_resume_cites(client, conn):
     assert client.get("/api/facts").json()["items"][0]["cited_by"] == ["tailored-1"]
 
 
-def test_list_says_which_resumes_cite_each_fact(client, conn):
-    """FC1: the page shows the citation before a delete is refused for it."""
+def test_list_marks_which_resume_versions_cite_each_fact(client, conn):
+    """FC1: the Facts page shows citations up front instead of only on a refused delete."""
     cited = _add(client).json()["id"]
-    _add(client, claim="Second claim")
-    conn.execute("INSERT INTO resume (version, path, content) VALUES (?, ?, ?)",
-                 ("tailored-1", "x.docx",
-                  json.dumps({"bullets": [{"text": "b", "fact_ids": [cited]}]})))
+    free = _add(client, claim="Led a team of 4").json()["id"]
+    for version, fids in (("tailored-1", [cited]), ("tailored-2", [cited, 999])):
+        conn.execute("INSERT INTO resume (version, path, content) VALUES (?, ?, ?)",
+                     (version, "x.docx", json.dumps({"bullets": [{"text": "b", "fact_ids": fids}]})))
+    conn.execute("INSERT INTO resume (version, path, content) VALUES ('broken', 'x.docx', 'not json')")
     conn.commit()
 
     body = client.get("/api/facts").json()
 
-    assert [i["cited_by"] for i in body["items"]] == [["tailored-1"], []]
+    items = {i["id"]: i for i in body["items"]}
+    assert items[cited]["cited_by"] == ["tailored-1", "tailored-2"]
+    assert items[free]["cited_by"] == []
     assert body["min_hard"] == MIN_FACTS_HARD and body["min_warn"]

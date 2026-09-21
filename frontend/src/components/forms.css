@@ -1,0 +1,664 @@
+/* The form-page kit Profile and Settings share (components/FormPage.tsx):
+   section nav, fields, the sticky save bar. Values from the approved Profile
+   and Settings artboards; base primitives (.card, .btn, .alert) stay in ui.css. */
+
+/* -- the page -- */
+
+.form-page.page {
+  gap: 20px;
+}
+
+/* The page scrolls clear of the save bar. */
+.form-page {
+  padding-bottom: 64px;
+}
+
+.form-page .ch h2 {
+  margin: 0;
+}
+
+.form-page .alert {
+  align-items: center;
+  padding: 10px 14px;
+}
+
+.form-page__retry {
+  margin-left: auto;
+}
+
+.form-skel__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 10px;
+}
+
+.form-skel__card {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* -- layout: section nav beside the form -- */
+
+.form-layout {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 32px;
+  align-items: start;
+}
+
+.form-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+/* Anchor targets land below the page top, not flush against it. */
+.form-sections > section {
+  scroll-margin-top: 24px;
+}
+
+.section-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  position: sticky;
+  top: 24px;
+}
+
+.section-nav button {
+  height: 34px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--sl-fg);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.section-nav button:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.section-nav button[aria-current='true'] {
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.section-nav__bad {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: var(--ro-dot);
+}
+
+.section-nav__done {
+  flex-shrink: 0;
+  color: var(--em-dot);
+}
+
+/* -- fields -- */
+
+.grid2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 16px;
+  padding: 16px;
+}
+
+.span2 {
+  grid-column: span 2;
+}
+
+.f {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* .in is the form pages' input (Profile, Settings, Memory, Logins); ui.css's
+   .field is every other screen's, at 32px. Two classes on purpose: the form
+   pages want the taller target, and unifying them would repaint eight shipped
+   screens for 4px. Shared label bits (.fl, .req, .fe) live in ui.css only. */
+.in {
+  width: 100%;
+  height: 36px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 0 10px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text);
+}
+
+.in::placeholder {
+  color: var(--text-5);
+}
+
+.in:focus {
+  outline: none;
+  border-color: var(--link-hover);
+  box-shadow: var(--ring);
+}
+
+.in:disabled {
+  background: var(--surface-2);
+  color: var(--text-5);
+}
+
+.in.mono {
+  font-size: 12px;
+}
+
+.in.short {
+  width: 120px;
+}
+
+textarea.in {
+  height: auto;
+  min-height: 64px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+select.in {
+  appearance: none;
+  padding-right: 32px;
+  background: var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center;
+}
+
+.in.bad,
+.in.bad:focus {
+  border-color: var(--ro-dot);
+  box-shadow: 0 0 0 3px rgba(225, 29, 72, 0.12);
+}
+
+.err {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--ro-fg);
+}
+
+.help {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text-3);
+}
+
+.f-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 18px;
+  color: #334155;
+}
+
+.f-check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+/* -- banners above a form: the error summary (rose .alert) and an amber variant -- */
+
+.alert.am {
+  background: var(--am-bg);
+  border-color: var(--am-line);
+  color: var(--am-fg);
+}
+
+.alert a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+/* -- the sticky "Unsaved changes" bar -- */
+
+.save-bar {
+  position: fixed;
+  /* ponytail: mirrors App.css's sidebar column (240 / 64 / 0); a slot in the
+     shell would track it automatically if a third form page ever appears. */
+  left: 240px;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  height: 64px;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  box-shadow: 0 -4px 16px rgba(15, 23, 42, 0.06);
+  padding: 0 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.save-bar__note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 18px;
+  color: #334155;
+}
+
+.save-bar__actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* -- Settings' controls (Settings.dc.html): tags, switch, stepper, slider, radio cards -- */
+
+.tags {
+  height: auto;
+  min-height: 36px;
+  padding: 5px 6px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  cursor: text;
+}
+
+.tags:focus-within {
+  border-color: var(--link-hover);
+  box-shadow: var(--ring);
+}
+
+.tags input {
+  flex: 1;
+  min-width: 96px;
+  height: 24px;
+  border: none;
+  outline: none;
+  background: transparent;
+  padding: 0 4px;
+  font-size: 13px;
+}
+
+.tags input::placeholder {
+  color: var(--text-5);
+}
+
+.tag {
+  height: 24px;
+  padding: 0 4px 0 8px;
+  border-radius: var(--radius-sm);
+  background: var(--sl-bg);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  color: #334155;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.tag button {
+  border: none;
+  background: none;
+  padding: 0;
+  display: flex;
+  color: var(--text-5);
+}
+
+.tag button:hover {
+  color: var(--text);
+}
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 18px;
+  color: #334155;
+  cursor: pointer;
+}
+
+.switch input {
+  appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 32px;
+  height: 18px;
+  margin: 0;
+  border-radius: 9999px;
+  background: var(--line-strong);
+  cursor: pointer;
+  transition: background 150ms ease-out;
+}
+
+.switch input::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: #ffffff;
+  transition: transform 150ms ease-out;
+}
+
+.switch input:checked {
+  background: var(--primary);
+}
+
+.switch input:checked::before {
+  transform: translateX(14px);
+}
+
+.num-stepper {
+  width: 140px;
+  height: 36px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  display: flex;
+  overflow: hidden;
+}
+
+.num-stepper:focus-within {
+  border-color: var(--link-hover);
+  box-shadow: var(--ring);
+}
+
+.num-stepper.bad {
+  border-color: var(--ro-dot);
+  box-shadow: 0 0 0 3px rgba(225, 29, 72, 0.12);
+}
+
+.num-stepper button {
+  width: 36px;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--sl-fg);
+  font-size: 15px;
+}
+
+.num-stepper button:first-child {
+  border-right: 1px solid var(--line);
+}
+
+.num-stepper button:last-child {
+  border-left: 1px solid var(--line);
+}
+
+.num-stepper button:hover {
+  background: var(--hover);
+}
+
+.num-stepper input {
+  min-width: 0;
+  flex: 1;
+  border: none;
+  outline: none;
+  text-align: center;
+  font-size: 13px;
+  background: transparent;
+}
+
+/* Native spin buttons would duplicate the stepper's and crowd the mono inputs. */
+.num-stepper input::-webkit-inner-spin-button,
+.slider input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.num-stepper input,
+.slider input[type='number'] {
+  -moz-appearance: textfield;
+}
+
+.slider {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.slider input[type='number'] {
+  width: 64px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.slider input[type='range'] {
+  flex: 1;
+  min-width: 0;
+  height: 18px;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.slider input[type='range']::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 9999px;
+  background: linear-gradient(to right, var(--sl-fg) var(--pct), var(--line) var(--pct));
+}
+
+.slider input[type='range']::-moz-range-track {
+  height: 6px;
+  border-radius: 9999px;
+  background: linear-gradient(to right, var(--sl-fg) var(--pct), var(--line) var(--pct));
+}
+
+.slider input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -6px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: 2px solid var(--primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+.slider input[type='range']::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: 2px solid var(--primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+.slider input[type='range']:focus-visible {
+  outline: none;
+}
+
+.slider input[type='range']:focus-visible::-webkit-slider-thumb {
+  box-shadow: var(--ring);
+}
+
+fieldset.radio-cards {
+  margin: 0;
+  padding: 0;
+  border: none;
+  min-width: 0;
+}
+
+fieldset.radio-cards legend {
+  padding: 0;
+  margin-bottom: 6px;
+}
+
+.radio-cards__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.radio-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.radio-card.on {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary) inset;
+  background: #fbfbff;
+}
+
+.radio-card input {
+  appearance: none;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  border-radius: 9999px;
+  border: 1.5px solid var(--line-strong);
+  cursor: pointer;
+}
+
+.radio-card input:checked {
+  border: 5px solid var(--primary);
+}
+
+.radio-card input:focus-visible {
+  outline: 2px solid var(--link-hover);
+  outline-offset: 2px;
+}
+
+.radio-card__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.radio-card__label {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.radio-card.on .radio-card__label {
+  font-weight: 600;
+}
+
+.radio-card__value {
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-3);
+}
+
+/* -- segmented control (Facts' confidence, Memory's kind) -- */
+
+.segmented {
+  display: flex;
+  height: 36px;
+  padding: 2px;
+  box-sizing: border-box;
+  border-radius: var(--radius);
+  background: var(--sl-bg);
+  border: 1px solid var(--line);
+}
+
+.segmented button {
+  flex-grow: 1;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+.segmented button[aria-pressed='true'] {
+  background: var(--surface);
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+  font-weight: 500;
+  color: var(--text);
+}
+
+/* -- a text filter with its magnifier inside -- */
+
+.searchbox {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.searchbox svg {
+  position: absolute;
+  left: 10px;
+  color: var(--text-5);
+  pointer-events: none;
+}
+
+.searchbox input {
+  padding-left: 30px;
+}
+
+@media (max-width: 1024px) {
+  .save-bar {
+    left: 64px;
+  }
+}
+
+@media (max-width: 720px) {
+  .form-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  .section-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    top: 0;
+    z-index: 5;
+    margin: 0 -16px;
+    padding: 8px 16px;
+    background: var(--bg);
+  }
+  .section-nav button {
+    flex-shrink: 0;
+    border: 1px solid var(--line);
+    background: var(--surface);
+  }
+  .form-sections > section {
+    scroll-margin-top: 64px;
+  }
+  .grid2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .span2 {
+    grid-column: auto;
+  }
+  .radio-cards__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .form-skel__nav {
+    display: none;
+  }
+  .save-bar {
+    left: 0;
+    padding: 0 16px;
+  }
+}

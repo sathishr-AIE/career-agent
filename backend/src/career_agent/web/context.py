@@ -9,6 +9,7 @@ import sqlite3
 from pathlib import Path
 
 from career_agent import chat, outcomes, store, tailor
+from career_agent.apply import agent as agent_mod
 from career_agent.apply import ats as ats_apply
 from career_agent.config import (APPLY_MODELS, MODEL_LABELS, SCORING_MODELS,
                                  CandidateProfile, load_brief,
@@ -365,6 +366,9 @@ def run_status_context(conn: sqlite3.Connection) -> dict:
             "open_prompt_count": conn.execute(
                 "SELECT COUNT(*) n FROM agent_prompt"
                 " WHERE job_id IS NOT NULL AND status = 'open'").fetchone()["n"],
+            # MS1: the model each live session was spawned with. A running
+            # claude -p can't switch, so the Job chat's picker shows it locked.
+            "live_runs": agent_mod.live_runs(),
             # Read once, cheaply, so the always-visible status bar can show
             # the kill switch's state without a second endpoint just for it.
             "submission_implemented": ats_apply.SUBMISSION_IMPLEMENTED}

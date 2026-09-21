@@ -5,6 +5,7 @@ from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 
 from career_agent import store
+from career_agent.apply.ats import QA_VOLATILE_WINDOW_DAYS
 
 router = APIRouter(prefix="/api")
 
@@ -16,7 +17,10 @@ def _app():
 
 @router.get("/memory")
 def api_get_memory():
-    return {"items": store.memory_list(_app()._conn())}
+    # The window the page labels the re-confirm chip with, from the same
+    # constant apply/agent.py marks a volatile answer stale by (MM1).
+    return {"items": store.memory_list(_app()._conn()),
+            "volatile_window_days": QA_VOLATILE_WINDOW_DAYS}
 
 
 @router.put("/memory/{item_id}")

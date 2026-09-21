@@ -2,6 +2,7 @@ import datetime as dt
 import json
 import threading
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -9,8 +10,10 @@ from fastapi.testclient import TestClient
 
 from conftest import build_tailor_template
 from career_agent import db, store
+from career_agent.apply import agent as agent_mod
 from career_agent.config import load_brief, load_candidate_profile
 from career_agent.web import app as web
+from career_agent.web import context
 from career_agent.web import pipeline
 from career_agent.web import worker
 
@@ -2266,7 +2269,7 @@ def test_chat_side_routers_are_mounted(client, monkeypatch):
                  "/api/chat/conversations", "/api/overview", "/"):
         assert client.get(path).status_code == 200, path
     assert client.get("/api/profile").json()["profile"]["candidate_name"] == "Jane Doe"
-    assert client.get("/api/memory").json() == {"items": []}
+    assert client.get("/api/memory").json() == {"items": [], "volatile_window_days": 30}
     assert client.get("/api/logins").json() == {"items": []}
 
 
@@ -2689,3 +2692,45 @@ def test_post_api_resumes_refuses_an_unpreparable_docx_with_422_and_leaves_the_m
     assert r.json()["ok"] is False
     assert r.json()["message"].startswith("Could not prepare this file:")
     assert target.read_bytes() == good, "a refused upload leaves the master untouched"
+
+
+def test_run_status_reports_each_live_sessions_model(client):
+    """The job chat's picker locks while its session runs: a running claude -p
+    can't switch models, so it shows the model that session was spawned with.
+    Built through the real build_cmd, because that argv holds the CLI alias
+    ("opus"), not the stored id -- reporting the alias would match nothing in
+    the picker's option list."""
+    conn = db.connect(web.DB_PATH)
+    assert context.run_status_context(conn)["live_runs"] == []
+
+    cmd = agent_mod.build_cmd("claude-opus-5", "mcp.json", "sess-1")
+    agent_mod.RUNS[7] = SimpleNamespace(cmd=cmd)
+    try:
+        assert "opus" in cmd, "build_cmd translates through APPLY_CLI_ALIAS"
+        assert context.run_status_context(conn)["live_runs"] == [
+            {"job_id": 7, "model": "claude-opus-5"}]
+    finally:
+        del agent_mod.RUNS[7]
+
+
+def test_put_api_settings_explains_empty_and_bad_fields_plainly(client, brief_path):
+    """The Settings page shows these under each field and in its error summary."""
+    def form(**over):
+        return {"brief_present": True, "candidate_present": False,
+                "target_titles": "AI Engineer", "search_locations": "Chennai",
+                "locations": "Chennai", "daily_cap": 5, "gate_threshold": 72,
+                "staleness_days": 30, "scoring_model": "claude-sonnet-5",
+                "max_score_per_run": 25, **over}
+
+    r = client.put("/api/settings", json=form(target_titles=" , ", daily_cap="",
+                                              staleness_days="soon"))
+
+    assert r.status_code == 422
+    errors = r.json()["errors"]
+    assert errors["daily_cap"] == "Required"
+    assert errors["staleness_days"] == "Must be a whole number"
+    assert client.put("/api/settings", json=form(max_score_per_run=-1)).json()["errors"] == {
+        "max_score_per_run": "Can't be negative"}
+    # The brief isn't validated until its numbers parse; fix them and the list error shows.
+    assert client.put("/api/settings", json=form(target_titles=" , ")).json()["errors"] == {
+        "target_titles": "Add at least one"}

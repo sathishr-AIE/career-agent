@@ -424,9 +424,11 @@ def memory_list(conn) -> list[dict]:
     history, not something to edit or show twice (see the "keyed vs literal
     drift" ruling)."""
     rows = conn.execute(
-        "SELECT id, question_normalized, answer, is_volatile, last_confirmed_at,"
-        " memory_key, kind, options_json, source_job_id, use_count,"
-        " last_used_at, twin_key FROM qa_bank ORDER BY question_normalized").fetchall()
+        "SELECT q.id, q.question_normalized, q.answer, q.is_volatile, q.last_confirmed_at,"
+        " q.memory_key, q.kind, q.options_json, q.source_job_id, q.use_count,"
+        " q.last_used_at, q.twin_key, j.company AS source_company, j.title AS source_title"
+        " FROM qa_bank q LEFT JOIN job j ON j.id = q.source_job_id"
+        " ORDER BY q.question_normalized").fetchall()
     items = []
     for r in without_twins(rows):
         is_keyed = bool(r["memory_key"])
@@ -441,6 +443,10 @@ def memory_list(conn) -> list[dict]:
             "use_count": r["use_count"],
             "last_used_at": r["last_used_at"],
             "is_preference": is_keyed,
+            # MM1: "Learned from Stripe · Senior SRE", linking to that job.
+            "source_job_id": r["source_job_id"],
+            "source_company": r["source_company"],
+            "source_title": r["source_title"],
         })
     return items
 

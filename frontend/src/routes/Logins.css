@@ -1,0 +1,212 @@
+/* The Logins page: values from the approved Logins artboard (Logins.dc.html). */
+
+.logins__retry {
+  margin-left: auto;
+}
+
+.logins__skel {
+  padding: 8px 0;
+}
+
+.logins__skel-row {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.logins__skel-row:last-child {
+  border-bottom: none;
+}
+
+/* The security note wraps to two lines, so the lock sits at the top. */
+.logins__note {
+  align-items: flex-start;
+}
+
+.logins__note > svg {
+  margin-top: 1px;
+}
+
+.logins__card {
+  overflow: hidden;
+}
+
+.logins__title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.logins__title h2 {
+  margin: 0;
+}
+
+.logins__filter {
+  width: 260px;
+}
+
+.logins__filter .field {
+  width: 100%;
+}
+
+/* -- the table -- */
+
+.logins-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.logins-table tbody tr:last-child .td {
+  border-bottom: none;
+}
+
+.c-site .mono {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.logins__email {
+  display: block;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.c-created,
+.c-used {
+  font-size: 12px;
+}
+
+.never {
+  color: var(--text-5);
+}
+
+.c-actions {
+  text-align: right;
+}
+
+.logins__menu {
+  display: none;
+}
+
+/* -- add login -- */
+
+.add-login__head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.add-login__body {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.add-login__pw-label {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.add-login__tag {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--sl-bg);
+  border: 1px solid var(--line);
+  color: var(--sl-fg);
+  font-size: 10px;
+  line-height: 14px;
+  text-transform: uppercase;
+}
+
+.add-login__pw {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.add-login__pw .in {
+  width: 100%;
+  padding-right: 38px;
+  letter-spacing: 0.08em;
+}
+
+.add-login__pw .ib {
+  position: absolute;
+  right: 4px;
+  color: var(--text-3);
+}
+
+.add-login__pw .ib[aria-pressed='true'] {
+  color: var(--primary);
+}
+
+@media (max-width: 1024px) {
+  .c-created {
+    display: none;
+  }
+}
+
+/* The rows become cards: site, email, who made it, and the row menu. */
+@media (max-width: 720px) {
+  .logins-table thead {
+    display: none;
+  }
+  .logins-table,
+  .logins-table tbody,
+  .logins-table tr,
+  .logins-table .td {
+    display: block;
+  }
+  .logins-table tr {
+    position: relative;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .logins-table tbody tr:last-child {
+    border-bottom: none;
+  }
+  .logins-table .td {
+    height: auto;
+    padding: 0 40px 0 0;
+    border-bottom: none;
+    white-space: normal;
+  }
+  .logins-table .c-email,
+  .logins-table .c-by {
+    margin-top: 4px;
+  }
+  .logins__email {
+    max-width: none;
+  }
+  /* Same specificity as the display:block above, and after it, so the two
+     date cells stay hidden once the row is a card. */
+  .logins-table .c-created,
+  .logins-table .c-used {
+    display: none;
+  }
+  .c-actions {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    padding: 0;
+  }
+  .logins__delete {
+    display: none;
+  }
+  .logins__menu {
+    display: block;
+  }
+  .ch:has(.logins__filter) {
+    flex-wrap: wrap;
+  }
+  .logins__filter {
+    width: 100%;
+  }
+}

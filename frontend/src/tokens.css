@@ -71,34 +71,6 @@
   --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
 
-  /* -- legacy names, read only by pages not yet rebuilt (main.tsx's legacy()).
-     Deleted in the final pass, once no route uses them. -- */
-  --paper: var(--bg);
-  --paper-raised: var(--surface);
-  --paper-line: var(--line);
-  --ink: var(--text);
-  --ink-dim: var(--text-3);
-  --signal: var(--primary);
-  --submit: var(--em-fg);
-  --submit-dim: var(--em-bg);
-  --hold: var(--am-fg);
-  --hold-dim: var(--am-bg);
-  --skip: var(--ro-fg);
-  --skip-dim: var(--ro-bg);
-  --graphite: var(--bg);
-  --graphite-raised: var(--surface);
-  --graphite-line: var(--line);
-  --graphite-text: var(--text);
-  --graphite-text-dim: var(--text-3);
-  --font-display: var(--font-ui);
-  --font-body: var(--font-ui);
-  --font-data: var(--font-mono);
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-6: 24px;
-  --space-8: 32px;
 }
 
 * {

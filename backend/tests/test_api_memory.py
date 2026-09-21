@@ -42,6 +42,14 @@ def test_get_memory_lists_keyed_and_untwinned_literal_rows(client, conn):
     assert store.qa_normalize("Notice period?") not in labels, "literal twin hidden"
 
 
+def test_get_memory_states_the_re_confirm_window(client):
+    """MM1: the page labels its chip "Re-confirm every N days" from this,
+    rather than hardcoding the window apply/agent.py measures staleness by."""
+    from career_agent.apply.ats import QA_VOLATILE_WINDOW_DAYS
+
+    assert client.get("/api/memory").json()["volatile_window_days"] == QA_VOLATILE_WINDOW_DAYS
+
+
 def test_put_memory_trims_and_saves(client, conn):
     store.qa_upsert(conn, "Years of experience?", "6", is_volatile=False)
     row_id = store.qa_lookup(conn, "Years of experience?")["id"]
@@ -77,3 +85,20 @@ def test_delete_memory_removes_the_row(client, conn):
 def test_delete_memory_unknown_id_is_404(client, conn):
     r = client.delete("/api/memory/999")
     assert r.status_code == 404
+
+
+def test_memory_items_name_the_job_they_were_learned_from(client, conn):
+    """MM1: "Learned from Stripe · Senior SRE", linking to that job's hub."""
+    conn.execute("INSERT INTO job (fingerprint, source, external_id, company, company_normalized,"
+                 " title, title_normalized, url) VALUES ('fp1', 'ats', '1', 'Stripe', 'stripe',"
+                 " 'Senior SRE', 'seniorsre', 'https://x/1')")
+    conn.commit()
+    store.qa_remember(conn, "Notice period?", "30 days", memory_key="notice_period",
+                      source_job_id=1)
+    store.qa_upsert(conn, "Years of experience?", "6", is_volatile=False)
+    items = {i["label"]: i for i in client.get("/api/memory").json()["items"]}
+    learned = items["notice_period"]
+    assert (learned["source_job_id"], learned["source_company"], learned["source_title"]) == (
+        1, "Stripe", "Senior SRE")
+    typed = next(i for k, i in items.items() if k != "notice_period")
+    assert typed["source_job_id"] is None and typed["source_company"] is None

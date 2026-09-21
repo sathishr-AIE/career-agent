@@ -57,12 +57,16 @@ def fake_agent(result: AgentResult):
     """The one test seam. Nothing in this file may launch Chrome, spawn a
     subprocess, or need the `claude`/`npx` binaries -- every case injects
     this instead of letting submit() reach _live_run_agent."""
-    async def _fake(prompt, job_id, nonce, events, session_id=None, resume=False):
+    async def _fake(prompt, job_id, nonce, events, session_id=None, resume=False, **kw):
+        # **kw: submit hands the live runner (which _use_live_fake stands in
+        # for) its model; an injected run_agent never gets one.
+        _fake.models.append(kw.get("model"))
         _fake.prompts.append(prompt)
         _fake.job_ids.append(job_id)
         _fake.nonces.append(nonce)
         return result
     _fake.prompts = []
+    _fake.models = []
     _fake.job_ids = []
     _fake.nonces = []
     return _fake
@@ -1917,20 +1921,32 @@ async def test_answer_timeout_without_an_approve_is_resumable(conn, monkeypatch,
 
 
 def _use_live_fake(monkeypatch, result):
-    """can_submit=False needs run_agent=None: stand a fake in for the live
-    runner (and its preflight) instead. The live runner takes one kwarg the
-    injected seam never sees -- the pinned model submit binds to it -- so
-    this records it rather than widening fake_agent."""
+    """can_submit=False needs run_agent=None: stand fake_agent in for the live
+    runner (and its preflight) instead. fake_agent already records the model
+    kwarg submit binds to the live runner, so fake.models reads the same here
+    as it does for an injected runner (where it is None)."""
     fake = fake_agent(result)
-    fake.models = []
-
-    async def live(*a, model=None, **kw):
-        fake.models.append(model)
-        return await fake(*a, **kw)
-
-    monkeypatch.setattr(ats_apply, "_live_run_agent", live)
+    monkeypatch.setattr(ats_apply, "_live_run_agent", fake)
     monkeypatch.setattr(ats_apply, "preflight", lambda: None)
     return fake
+
+
+@pytest.mark.parametrize("stored, spawned", [("claude-opus-5", "claude-opus-5"),
+                                              ("claude-retired-1", "claude-sonnet-5")])
+async def test_the_live_runner_gets_the_apply_model_setting(conn, monkeypatch, stored, spawned):
+    """MS1: the next Apply or Continue runs on the chosen model; a value no
+    longer in APPLY_MODELS falls back to the default instead of failing the run."""
+    conn.execute("UPDATE setting SET apply_model = ?", (stored,))
+    conn.commit()
+    fake = _use_live_fake(monkeypatch, AgentResult("draft_ready"))
+    await _submit(conn, mode="manual")
+    assert fake.models == [spawned]
+
+
+async def test_an_injected_runner_is_called_without_a_model(conn):
+    fake = fake_agent(AgentResult("draft_ready"))
+    await _submit(conn, mode="manual", run_agent=fake)
+    assert fake.models == [None]
 
 
 async def test_cancelling_the_awaiting_task_kills_the_live_run(conn, runs):
